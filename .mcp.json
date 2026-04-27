@@ -1,0 +1,54 @@
+{
+  "mcpServers": {
+    "yahoo-finance": {
+      "command": "uvx",
+      "args": ["yahoo-finance-mcp"]
+    },
+    "finnhub": {
+      "command": "npx",
+      "args": ["-y", "@nimblebrain/mcp-finnhub"],
+      "env": {
+        "FINNHUB_API_KEY": "${FINNHUB_API_KEY}"
+      }
+    },
+    "_polygon": {
+      "command": "uvx",
+      "args": ["mcp_polygon"],
+      "env": {
+        "POLYGON_API_KEY": "${POLYGON_API_KEY}"
+      }
+    },
+    "_alpha-vantage": {
+      "type": "http",
+      "url": "https://mcp.alphavantage.co/mcp",
+      "headers": {
+        "Authorization": "Bearer ${ALPHA_VANTAGE_API_KEY}"
+      }
+    },
+    "_fred": {
+      "command": "npx",
+      "args": ["-y", "fred-mcp-server"],
+      "env": {
+        "FRED_API_KEY": "${FRED_API_KEY}"
+      }
+    },
+    "_gold": {
+      "command": "uvx",
+      "args": ["mcp-metal-price"],
+      "env": {
+        "GOLDAPI_KEY": "${GOLD_API_KEY}"
+      }
+    },
+    "_exa": {
+      "command": "npx",
+      "args": ["-y", "exa-mcp-server"],
+      "env": {
+        "EXA_API_KEY": "${EXA_API_KEY}"
+      }
+    },
+    "_claude-mem": {
+      "command": "npx",
+      "args": ["-y", "claude-mem"]
+    }
+  }
+}

@@ -18,7 +18,8 @@ from pathlib import Path
 
 
 def settings_path() -> Path:
-    return Path(__file__).resolve().parent.parent / ".claude" / "settings.json"
+    """Project-level MCP config. Claude Code reads this from project root."""
+    return Path(__file__).resolve().parent.parent / ".mcp.json"
 
 
 def list_mcps(settings: dict) -> None:
