@@ -14,14 +14,36 @@ Run the full Trading Copilot pipeline on `$ARGUMENTS`.
 
 Follow this order **strictly**. Use the Agent tool with the named subagent for each step. Wait for each subagent to finish and save its report before starting the next.
 
-### Step 0: Setup
+### Step 0: Setup + RESUME DETECTION
 
-1. Create run dir: `data/runs/<TICKER>-<DATE>/`
-2. Read `data/memory/trading_memory.md` and extract:
+1. Create run dir: `data/runs/<TICKER>-<DATE>/` (or reuse if exists).
+
+2. **RESUME CHECK** — list existing files in the run dir. For each step below, if its output file already exists with non-trivial size (> 50 bytes), **SKIP that step** and use the existing file. Resume from the first incomplete step.
+
+   Decision table:
+
+   | File found | Action |
+   |------------|--------|
+   | `00-past-context.md` exists | Skip Step 0 step 2-3 |
+   | `01-market.md` (>500 bytes) exists | Skip market-analyst |
+   | `02-social.md` (>500 bytes) exists | Skip social-analyst |
+   | `03-news.md` (>500 bytes) exists | Skip news-analyst |
+   | `04-fundamentals.md` (>500 bytes) exists | Skip fundamentals-analyst |
+   | `debate_history.md` exists | Inspect content: count `## Bull (round N)` and `## Bear (round N)` headers. Resume from the next-needed turn (e.g. Bull done, Bear missing → start Step 2 at Bear) |
+   | `06-research-plan.md` (>200 bytes) exists | Skip Research Manager |
+   | `07-trader-proposal.md` (>200 bytes) exists | Skip Trader |
+   | `risk_debate_history.md` exists | Count Aggressive/Conservative/Neutral headers, resume next-needed |
+   | `08-portfolio-decision.md` (>200 bytes) exists | Skip Portfolio Manager — go to Step 7 (assemble final report) |
+   | `data/decisions/<TICKER>-<DATE>.md` exists | Pipeline already complete — print summary and return |
+
+3. Tell the user explicitly which steps you're skipping (e.g. "Resuming /analyze NVDA — skipping completed: market-analyst, social-analyst, news-analyst, fundamentals-analyst, Bull researcher. Continuing from: Bear researcher.").
+
+4. If 00-past-context.md does not exist: read `data/memory/trading_memory.md` and extract:
    - Last 5 resolved entries for `<TICKER>` (full DECISION + REFLECTION)
    - Last 3 resolved entries for OTHER tickers (REFLECTION only)
-   Save as `data/runs/<TICKER>-<DATE>/00-past-context.md`. If memory log is empty or has no resolved entries, write `(no past context)` to the file.
-3. Read `data/positions.md` to know current portfolio (for risk gate later).
+   Save as `00-past-context.md`. If memory log empty, write `(no past context)`.
+
+5. Read `data/positions.md` for the Portfolio Manager risk gate (don't skip even on resume).
 
 ### Step 1: Analysts (PARALLEL — fan out 4 in a single message)
 
