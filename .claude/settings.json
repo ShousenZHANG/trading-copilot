@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "_comment": "Trading Copilot - MCP servers + permissions. All MCPs are commented-out by default. Enable by uncommenting and ensuring the matching env var is set in .env. See .env.example for setup links.",
+  "mcpServers": {
+    "_polygon": {
+      "_doc": "Polygon.io - 35+ tools for stocks/options/forex/crypto. Free tier 5/min.",
+      "command": "uvx",
+      "args": [
+        "mcp_polygon"
+      ],
+      "env": {
+        "POLYGON_API_KEY": "${POLYGON_API_KEY}"
+      }
+    },
+    "_alpha-vantage": {
+      "_doc": "Hosted official MCP at mcp.alphavantage.co. Free 25/day.",
+      "type": "http",
+      "url": "https://mcp.alphavantage.co/mcp",
+      "headers": {
+        "Authorization": "Bearer ${ALPHA_VANTAGE_API_KEY}"
+      }
+    },
+    "_finnhub": {
+      "_doc": "News + financials + earnings. Free 60/min.",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@nimblebrain/mcp-finnhub"
+      ],
+      "env": {
+        "FINNHUB_API_KEY": "${FINNHUB_API_KEY}"
+      }
+    },
+    "_fred": {
+      "_doc": "Fed economic data: rates, CPI, yields, DXY. Free unlimited.",
+      "command": "npx",
+      "args": [
+        "-y",
+        "fred-mcp-server"
+      ],
+      "env": {
+        "FRED_API_KEY": "${FRED_API_KEY}"
+      }
+    },
+    "_gold": {
+      "_doc": "Spot gold via GoldAPI. Free 100/mo. Optional - yfinance GC=F also works.",
+      "command": "uvx",
+      "args": [
+        "mcp-metal-price"
+      ],
+      "env": {
+        "GOLDAPI_KEY": "${GOLD_API_KEY}"
+      }
+    },
+    "_exa": {
+      "_doc": "Neural web search for Reddit/X/news/filings. $10 free credits.",
+      "command": "npx",
+      "args": [
+        "-y",
+        "exa-mcp-server"
+      ],
+      "env": {
+        "EXA_API_KEY": "${EXA_API_KEY}"
+      }
+    },
+    "_claude-mem": {
+      "_doc": "Cross-session memory. Free local SQLite + Chroma.",
+      "command": "npx",
+      "args": [
+        "-y",
+        "claude-mem"
+      ]
+    },
+    "_yahoo-finance": {
+      "_doc": "Free, no API key. Primary stock data fallback.",
+      "command": "uvx",
+      "args": [
+        "yahoo-finance-mcp"
+      ]
+    }
+  },
+  "permissions": {
+    "allow": [
+      "Read",
+      "Write(D:/trading-copilot/data/**)",
+      "Write(D:/trading-copilot/docs/samples/**)",
+      "Edit(D:/trading-copilot/data/**)",
+      "Glob",
+      "Grep",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add data/**)",
+      "Bash(git commit*)",
+      "WebFetch",
+      "TodoWrite"
+    ],
+    "deny": [
+      "Bash(rm -rf*)",
+      "Bash(git push --force*)",
+      "Write(D:/trading-copilot/.env)",
+      "Edit(D:/trading-copilot/.env)"
+    ]
+  },
+  "env": {
+    "TRADING_COPILOT_HOME": "D:/trading-copilot",
+    "TRADING_COPILOT_OUTPUT_LANG": "Chinese"
+  }
+}

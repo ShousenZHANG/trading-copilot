@@ -1,0 +1,38 @@
+{
+  "_doc": "Curated regime windows for evaluation. Pick representative bull / bear / choppy periods that the underlying LLM has not memorized.",
+
+  "regimes": [
+    {
+      "id": "bull-2024-q4",
+      "label": "Bull market (election rally Q4 2024)",
+      "start": "2024-10-01",
+      "end": "2024-12-20",
+      "regime": "bull",
+      "spy_return": 0.062,
+      "vix_avg": 16.2,
+      "notes": "Post-election rally. Tech-led."
+    },
+    {
+      "id": "bear-2025-q1",
+      "label": "Tariff-led correction Q1 2025",
+      "start": "2025-02-15",
+      "end": "2025-04-30",
+      "regime": "bear",
+      "spy_return": -0.087,
+      "vix_avg": 28.5,
+      "notes": "Trump tariff announcements. Bear market test for the agent."
+    },
+    {
+      "id": "choppy-2025-q3",
+      "label": "Choppy summer 2025",
+      "start": "2025-06-15",
+      "end": "2025-08-31",
+      "regime": "choppy",
+      "spy_return": 0.012,
+      "vix_avg": 19.4,
+      "notes": "Range-bound. Tests false-breakout discipline."
+    }
+  ],
+
+  "_extension": "Add new regimes here. Always pick windows AFTER the LLM training cutoff (model_cutoff < window.start) to avoid contamination."
+}

@@ -1,0 +1,68 @@
+name: Weekly Review
+
+# Sundays 6pm ET (22:00 UTC winter / 23:00 UTC summer) — after week close,
+# before Asia opens. Resolves T+5d pending memory entries, computes alpha vs
+# SPY, generates reflections, and synthesizes lessons via Opus.
+
+on:
+  schedule:
+    - cron: '0 23 * * 0'   # 23:00 UTC Sunday ~= 6pm ET (winter)
+    - cron: '0 22 * * 0'   # 22:00 UTC Sunday ~= 6pm ET (summer)
+  workflow_dispatch:
+    inputs:
+      no_resolve:
+        description: 'Skip the T+5d resolution step'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm i -g @anthropic-ai/claude-code
+
+      - name: Run /weekly-review headless
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          NO_RESOLVE=""
+          if [ "${{ inputs.no_resolve }}" = "true" ]; then
+            NO_RESOLVE="--no-resolve"
+          fi
+          claude -p --model opus \
+            --allowedTools "Read,Write,Edit,Bash" \
+            "Run /weekly-review $NO_RESOLVE. After completion, push the headline summary to Telegram."
+
+      - name: Push weekly summary to Telegram
+        if: success()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scripts/notify.py push-weekly || true
+
+      - name: Commit state
+        if: success()
+        run: |
+          git config user.name "trading-copilot-bot"
+          git config user.email "bot@trading-copilot"
+          git add data/memory data/decisions || true
+          if ! git diff --cached --quiet; then
+            git commit -m "weekly review $(date -u +%F)"
+            git push
+          fi

@@ -1,0 +1,144 @@
+---
+description: Run the full Trading Copilot pipeline on one instrument (4 analysts -> Bull/Bear debate -> Trader -> 3-way Risk debate -> Portfolio Manager). Use for stocks, ETFs, futures.
+argument-hint: <TICKER> [--debate-rounds=1] [--risk-rounds=1]
+---
+
+Run the full Trading Copilot pipeline on `$ARGUMENTS`.
+
+**Ticker**: parse from `$ARGUMENTS` — first token. Preserve any exchange suffix exactly (`.HK`, `.T`, `.L`, `.TO`, `=F`, `=X`).
+**Date**: today (read from system clock, format `YYYY-MM-DD`).
+**Debate rounds**: default 1 (= 1 Bull + 1 Bear). Override via `--debate-rounds=N`.
+**Risk rounds**: default 1 (= Aggressive + Conservative + Neutral). Override via `--risk-rounds=N`.
+
+## Execution plan
+
+Follow this order **strictly**. Use the Agent tool with the named subagent for each step. Wait for each subagent to finish and save its report before starting the next.
+
+### Step 0: Setup
+
+1. Create run dir: `data/runs/<TICKER>-<DATE>/`
+2. Read `data/memory/trading_memory.md` and extract:
+   - Last 5 resolved entries for `<TICKER>` (full DECISION + REFLECTION)
+   - Last 3 resolved entries for OTHER tickers (REFLECTION only)
+   Save as `data/runs/<TICKER>-<DATE>/00-past-context.md`. If memory log is empty or has no resolved entries, write `(no past context)` to the file.
+3. Read `data/positions.md` to know current portfolio (for risk gate later).
+
+### Step 1: Analysts (SEQUENTIAL — do not parallelize)
+
+Run each subagent in order. Each writes its own report to `data/runs/<TICKER>-<DATE>/`.
+
+a. Dispatch **`market-analyst`** with the run brief: `{ticker, date, run_dir}`. Wait. Verify `01-market.md` exists.
+b. Dispatch **`social-analyst`**. Wait. Verify `02-social.md` exists.
+c. Dispatch **`news-analyst`**. Wait. Verify `03-news.md` exists.
+d. Dispatch **`fundamentals-analyst`**. Wait. Verify `04-fundamentals.md` exists.
+
+If any analyst fails, log the failure to `data/runs/<TICKER>-<DATE>/_errors.md` and continue — the next agents will work with what's available.
+
+### Step 2: Bull/Bear debate
+
+Maintain a `data/runs/<TICKER>-<DATE>/debate_history.md` file.
+
+For each round (default 1):
+1. Dispatch **`bull-researcher`** with: all 4 analyst reports + current `debate_history.md` + last bear arg (empty on round 1). Append the Bull's response to `debate_history.md` as `## Bull (round N)\n<text>`.
+2. Dispatch **`bear-researcher`** with: all 4 analyst reports + current `debate_history.md` + the Bull arg just produced. Append `## Bear (round N)\n<text>`.
+
+### Step 3: Research Manager
+
+Dispatch **`research-manager`** (Opus tier) with: ticker context + full `debate_history.md`. It produces the structured ResearchPlan to `06-research-plan.md`.
+
+### Step 4: Trader
+
+Dispatch **`trader`** with: ticker context + `06-research-plan.md` + all 4 analyst reports. Produces `07-trader-proposal.md`.
+
+### Step 5: Risk debate (3-way, fixed order)
+
+Maintain `data/runs/<TICKER>-<DATE>/risk_debate_history.md`.
+
+For each round (default 1), dispatch in order:
+1. **`aggressive-debator`** with: all analyst reports + trader proposal + current `risk_debate_history.md`. Append `## Aggressive (round N)\n<text>`.
+2. **`conservative-debator`** — same context. Append `## Conservative (round N)\n<text>`.
+3. **`neutral-debator`** — same context. Append `## Neutral (round N)\n<text>`.
+
+### Step 6: Portfolio Manager
+
+Dispatch **`portfolio-manager`** (Opus tier) with:
+- ticker context
+- `06-research-plan.md`
+- `07-trader-proposal.md`
+- `risk_debate_history.md`
+- `00-past-context.md`
+- `data/positions.md`
+
+It runs the pre-trade risk gate, applies past lessons, and produces `08-portfolio-decision.md`. It also appends a pending entry to `data/memory/trading_memory.md`.
+
+### Step 7: Assemble final user-facing report
+
+Write `data/decisions/<TICKER>-<DATE>.md` using this template:
+
+```markdown
+# <TICKER> 决策报告 — <DATE>
+
+> ⚠️ 教育与研究用途. 非投资建议. 详见 [DISCLAIMER.md](../../DISCLAIMER.md).
+
+## 最终结论 (Portfolio Manager)
+<paste 08-portfolio-decision.md content>
+
+## 交易员方案 (Trader)
+<paste 07-trader-proposal.md content>
+
+## 研究主管摘要 (Research Manager)
+<paste 06-research-plan.md content>
+
+---
+
+<details>
+<summary>📊 4位分析师报告 (展开查看)</summary>
+
+### 技术面 (Market)
+<paste 01-market.md>
+
+### 情绪面 (Social)
+<paste 02-social.md>
+
+### 新闻面 (News)
+<paste 03-news.md>
+
+### 基本面 (Fundamentals)
+<paste 04-fundamentals.md>
+
+</details>
+
+<details>
+<summary>🥊 Bull/Bear 辩论纪要 (英文, 展开查看)</summary>
+
+<paste debate_history.md>
+
+</details>
+
+<details>
+<summary>⚖️ 风险辩论纪要 (Aggressive/Conservative/Neutral, 英文)</summary>
+
+<paste risk_debate_history.md>
+
+</details>
+
+---
+
+**过往决策上下文** (用于本次复盘):
+
+<paste 00-past-context.md>
+
+---
+
+⚠️ **免责声明**: 本报告由 trading-copilot 多agent生成. 仅供教育研究, 非投资建议. 模型可能产生幻觉/错误/遗漏. 你对所有投资决定负全责. 详见 [DISCLAIMER.md](../../DISCLAIMER.md).
+```
+
+### Step 8: Reply to user
+
+Show the user:
+- The headline rating + price target (1 line)
+- The executive summary (2-4 sentences)
+- The path to the full report: `data/decisions/<TICKER>-<DATE>.md`
+- Brief warning: "教育用途, 不是投资建议"
+
+Do NOT dump the full report into chat — it's long. The user can open the markdown file or ask to see specific sections.

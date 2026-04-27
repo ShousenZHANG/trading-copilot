@@ -1,0 +1,53 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Personal trading state (do not commit positions/portfolio)
+data/positions.md
+data/runs/
+data/memory/trading_memory.md
+
+# Reference clones (cloned via git, no need to vendor)
+reference/
+
+# Python (for any helper scripts)
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.uv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node (for MCP servers via npx)
+node_modules/
+.npm/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Claude Code internal
+.omc/
+.claude/local/
+.claude/scheduled_tasks.json
+
+# Eval artifacts
+evals/results/
+evals/cache/

@@ -1,0 +1,110 @@
+name: Premarket Scan
+
+# Workdays at 8:27am ET (13:27 UTC standard / 12:27 UTC during DST).
+# Off-minute to avoid GitHub Actions cron drift on the hour.
+# Runs the full /scan pipeline on the watchlist and pushes high-conviction
+# alerts to Telegram. State is git-committed for dedup across runs.
+
+on:
+  schedule:
+    - cron: '27 13 * * 1-5'   # 13:27 UTC ~= 8:27am ET (winter)
+    - cron: '27 12 * * 1-5'   # 12:27 UTC ~= 8:27am ET (summer)
+  workflow_dispatch:           # manual trigger from GitHub UI
+    inputs:
+      filter:
+        description: 'Tag filter (comma-separated). Empty = scan all.'
+        required: false
+        default: ''
+      force:
+        description: 'Force re-scan even if already analyzed today'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # to commit state changes
+
+concurrency:
+  group: premarket-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code
+        run: npm i -g @anthropic-ai/claude-code
+
+      - name: Install uv (for MCP servers)
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Run /scan headless
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          GOLD_API_KEY: ${{ secrets.GOLD_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          FILTER_ARG=""
+          if [ -n "${{ inputs.filter }}" ]; then
+            FILTER_ARG="--filter=${{ inputs.filter }}"
+          fi
+          FORCE_ARG=""
+          if [ "${{ inputs.force }}" = "true" ]; then
+            FORCE_ARG="--force"
+          fi
+          claude -p --model sonnet \
+            --allowedTools "Read,Write,Edit,Bash,WebFetch" \
+            "Run /scan $FILTER_ARG $FORCE_ARG. After scan completes, push Telegram alerts for any decision with rating Buy or Sell that was NOT in state/seen_signals.json."
+
+      - name: Push Telegram alerts
+        if: success()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scripts/notify.py push-new-alerts || echo "notification step soft-fail"
+
+      - name: Commit state
+        if: success()
+        run: |
+          git config user.name "trading-copilot-bot"
+          git config user.email "bot@trading-copilot"
+          git add data/decisions data/memory data/state || true
+          if ! git diff --cached --quiet; then
+            git commit -m "premarket scan $(date -u +%FT%TZ)"
+            git push
+          else
+            echo "no state changes to commit"
+          fi
+
+      - name: Upload run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: premarket-${{ github.run_id }}
+          path: |
+            data/runs/
+            data/decisions/_scan-*.md
+          retention-days: 14
