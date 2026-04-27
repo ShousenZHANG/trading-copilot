@@ -1,19 +1,19 @@
 {
   "mcpServers": {
     "yahoo-finance": {
-      "command": "uvx",
-      "args": ["yahoo-finance-mcp"]
+      "command": "cmd",
+      "args": ["/c", "uvx", "yahoo-finance-mcp"]
     },
     "finnhub": {
-      "command": "npx",
-      "args": ["-y", "@nimblebrain/mcp-finnhub"],
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@nimblebrain/mcp-finnhub"],
       "env": {
         "FINNHUB_API_KEY": "${FINNHUB_API_KEY}"
       }
     },
     "_polygon": {
-      "command": "uvx",
-      "args": ["mcp_polygon"],
+      "command": "cmd",
+      "args": ["/c", "uvx", "mcp_polygon"],
       "env": {
         "POLYGON_API_KEY": "${POLYGON_API_KEY}"
       }
@@ -26,29 +26,29 @@
       }
     },
     "_fred": {
-      "command": "npx",
-      "args": ["-y", "fred-mcp-server"],
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "fred-mcp-server"],
       "env": {
         "FRED_API_KEY": "${FRED_API_KEY}"
       }
     },
     "_gold": {
-      "command": "uvx",
-      "args": ["mcp-metal-price"],
+      "command": "cmd",
+      "args": ["/c", "uvx", "mcp-metal-price"],
       "env": {
         "GOLDAPI_KEY": "${GOLD_API_KEY}"
       }
     },
     "_exa": {
-      "command": "npx",
-      "args": ["-y", "exa-mcp-server"],
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "exa-mcp-server"],
       "env": {
         "EXA_API_KEY": "${EXA_API_KEY}"
       }
     },
     "_claude-mem": {
-      "command": "npx",
-      "args": ["-y", "claude-mem"]
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "claude-mem"]
     }
   }
 }
