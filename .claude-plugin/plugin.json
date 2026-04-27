@@ -21,7 +21,8 @@
     "url": "https://github.com/ShousenZHANG/trading-copilot"
   },
   "commands": "./.claude/commands",
-  "agents": "./agents",
-  "skills": "./skills",
-  "settings": "./.claude/settings.json"
+  "agents": "./.claude/agents",
+  "skills": "./.claude/skills",
+  "settings": "./.claude/settings.json",
+  "mcpServers": "./.mcp.json"
 }

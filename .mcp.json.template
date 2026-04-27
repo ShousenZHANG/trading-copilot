@@ -1,0 +1,65 @@
+{
+  "_doc": "Template showing all 8 supported MCP servers. Copy entries you want into .mcp.json. Restart Claude Code after editing.",
+  "_setup_links": "See docs/mcp-setup.md for signup links and free-tier limits.",
+
+  "mcpServers": {
+    "yahoo-finance": {
+      "_doc": "Free, no API key. Primary stock data fallback.",
+      "command": "uvx",
+      "args": ["yahoo-finance-mcp"]
+    },
+    "polygon": {
+      "_doc": "Polygon.io - 35+ tools for stocks/options/forex/crypto. Free tier 5/min.",
+      "command": "uvx",
+      "args": ["mcp_polygon"],
+      "env": {
+        "POLYGON_API_KEY": "${POLYGON_API_KEY}"
+      }
+    },
+    "alpha-vantage": {
+      "_doc": "Hosted official MCP at mcp.alphavantage.co. Free 25/day.",
+      "type": "http",
+      "url": "https://mcp.alphavantage.co/mcp",
+      "headers": {
+        "Authorization": "Bearer ${ALPHA_VANTAGE_API_KEY}"
+      }
+    },
+    "finnhub": {
+      "_doc": "News + financials + earnings. Free 60/min.",
+      "command": "npx",
+      "args": ["-y", "@nimblebrain/mcp-finnhub"],
+      "env": {
+        "FINNHUB_API_KEY": "${FINNHUB_API_KEY}"
+      }
+    },
+    "fred": {
+      "_doc": "Fed economic data: rates, CPI, yields, DXY. Free unlimited.",
+      "command": "npx",
+      "args": ["-y", "fred-mcp-server"],
+      "env": {
+        "FRED_API_KEY": "${FRED_API_KEY}"
+      }
+    },
+    "gold": {
+      "_doc": "Spot gold via GoldAPI. Free 100/mo. Optional - yfinance GC=F also works.",
+      "command": "uvx",
+      "args": ["mcp-metal-price"],
+      "env": {
+        "GOLDAPI_KEY": "${GOLD_API_KEY}"
+      }
+    },
+    "exa": {
+      "_doc": "Neural web search for Reddit/X/news/filings. $10 free credits.",
+      "command": "npx",
+      "args": ["-y", "exa-mcp-server"],
+      "env": {
+        "EXA_API_KEY": "${EXA_API_KEY}"
+      }
+    },
+    "claude-mem": {
+      "_doc": "Cross-session memory. Free local SQLite + Chroma. Skip if you already have claude-mem at user level.",
+      "command": "npx",
+      "args": ["-y", "claude-mem"]
+    }
+  }
+}

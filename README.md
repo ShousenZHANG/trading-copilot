@@ -74,16 +74,17 @@ Configure in `.claude/settings.json` after copying `.env.example` -> `.env`.
 ```
 trading-copilot/
 |-- .claude-plugin/plugin.json         # plugin manifest
+|-- .mcp.json                          # MCP servers (project scope)
 |-- .claude/
-|   |-- settings.json                  # MCP servers + permissions
-|   `-- commands/                      # slash commands (/analyze, /gold, ...)
-|-- agents/                            # 11 subagents
-|   |-- analysts/                      #   market, social, news, fundamentals
-|   |-- researchers/                   #   bull, bear
-|   |-- managers/                      #   research-manager, portfolio-manager (Opus)
-|   |-- risk-debators/                 #   aggressive, conservative, neutral
-|   `-- trader.md
-|-- skills/trading-copilot/SKILL.md    # methodology
+|   |-- settings.json                  # permissions + env
+|   |-- commands/                      # slash commands (/analyze, /gold, ...)
+|   |-- agents/                        # 13 subagents
+|   |   |-- analysts/                  #   market, social, news, fundamentals, macro
+|   |   |-- researchers/               #   bull, bear
+|   |   |-- managers/                  #   research-manager, portfolio-manager (Opus)
+|   |   |-- risk-debators/             #   aggressive, conservative, neutral
+|   |   `-- trader.md
+|   `-- skills/trading-copilot/SKILL.md  # methodology
 |-- data/                              # human-readable persistence
 |   |-- watchlist.md
 |   |-- positions.md
