@@ -1,0 +1,6 @@
+{"id":"fb-001","ticker":"AAPL","filing":"10-K FY2023","question":"What was Apple's total net sales for fiscal year 2023?","reference_answer":"$383.285 billion","reference_metric":{"value":383.285,"unit":"billion USD"},"tolerance_pct":0.5,"test_against_agent":"fundamentals-analyst"}
+{"id":"fb-002","ticker":"MSFT","filing":"10-K FY2023","question":"What was Microsoft's research and development expense for fiscal year 2023?","reference_answer":"$27.195 billion","reference_metric":{"value":27.195,"unit":"billion USD"},"tolerance_pct":1.0,"test_against_agent":"fundamentals-analyst"}
+{"id":"fb-003","ticker":"NVDA","filing":"10-K FY2024","question":"What was NVIDIA's data center revenue for fiscal year 2024?","reference_answer":"$47.525 billion","reference_metric":{"value":47.525,"unit":"billion USD"},"tolerance_pct":1.0,"test_against_agent":"fundamentals-analyst"}
+# Add more questions as you curate from https://github.com/patronus-ai/financebench
+# Format: one JSON object per line. Required keys: id, ticker, question, reference_answer, test_against_agent
+# Optional: filing, reference_metric (for tolerance scoring), tolerance_pct
