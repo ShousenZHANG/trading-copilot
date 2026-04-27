@@ -47,6 +47,9 @@ logs/
 .omc/
 .claude/local/
 .claude/scheduled_tasks.json
+.claude/settings.local.json
+.claude/projects/
+.claude/.credentials.json
 
 # Eval artifacts
 evals/results/
