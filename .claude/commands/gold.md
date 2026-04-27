@@ -26,7 +26,7 @@ Run the gold-specialized Trading Copilot pipeline.
 
 Same 8 steps as `/analyze`, with these substitutions:
 
-- **Step 1d**: Skip `fundamentals-analyst`. Dispatch **`macro-analyst`** instead. Output to `05-macro.md`. (No `04-fundamentals.md` for this run.)
+- **Step 1 (analysts, PARALLEL)**: Fan out **4 analysts** in a single message — `market-analyst`, `social-analyst`, `news-analyst`, **`macro-analyst`** (replaces fundamentals-analyst). The macro-analyst writes to `05-macro.md` instead of `04-fundamentals.md`. Wait for all four; on rate-limit fall back to serial.
 - **Step 7 template**: Replace "基本面" section with "宏观面 (Macro)" pasting `05-macro.md`. Update the analyst-report list to read "技术面 / 情绪面 / 新闻面 / 宏观面".
 
 Everything else (debate, risk, portfolio manager, memory log, disclaimer) is identical to `/analyze`.

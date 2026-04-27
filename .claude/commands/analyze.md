@@ -23,16 +23,21 @@ Follow this order **strictly**. Use the Agent tool with the named subagent for e
    Save as `data/runs/<TICKER>-<DATE>/00-past-context.md`. If memory log is empty or has no resolved entries, write `(no past context)` to the file.
 3. Read `data/positions.md` to know current portfolio (for risk gate later).
 
-### Step 1: Analysts (SEQUENTIAL — do not parallelize)
+### Step 1: Analysts (PARALLEL — fan out 4 in a single message)
 
-Run each subagent in order. Each writes its own report to `data/runs/<TICKER>-<DATE>/`.
+The 4 analysts have **no inter-dependencies** (each writes a different report field, none reads another analyst's output). Dispatch all four in **a single message containing 4 Agent tool calls**, so Claude Code runs them concurrently. This cuts wall-clock time from ~15-20 min (serial) to ~5-7 min (parallel).
 
-a. Dispatch **`market-analyst`** with the run brief: `{ticker, date, run_dir}`. Wait. Verify `01-market.md` exists.
-b. Dispatch **`social-analyst`**. Wait. Verify `02-social.md` exists.
-c. Dispatch **`news-analyst`**. Wait. Verify `03-news.md` exists.
-d. Dispatch **`fundamentals-analyst`**. Wait. Verify `04-fundamentals.md` exists.
+In ONE message, fan out:
+- **`market-analyst`** with run brief `{ticker, date, run_dir}` → writes `01-market.md`
+- **`social-analyst`** with same brief → writes `02-social.md`
+- **`news-analyst`** with same brief → writes `03-news.md`
+- **`fundamentals-analyst`** with same brief → writes `04-fundamentals.md`
 
-If any analyst fails, log the failure to `data/runs/<TICKER>-<DATE>/_errors.md` and continue — the next agents will work with what's available.
+**Wait for all four to complete** before proceeding to Step 2. Verify each file exists. If any failed, log to `data/runs/<TICKER>-<DATE>/_errors.md` and continue with the analysts that succeeded — Bull/Bear can still debate from partial reports.
+
+**Rate-limit guardrail**: if Claude Code returns rate-limit errors during parallel dispatch, fall back to serial (a → b → c → d). Document the fallback in `_errors.md`.
+
+**Cost note**: parallel does not increase total tokens — same total work, different timing. Peak concurrent context is 4× higher (4 analyst contexts in flight), still well within Sonnet limits.
 
 ### Step 2: Bull/Bear debate
 
