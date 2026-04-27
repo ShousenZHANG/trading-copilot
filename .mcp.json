@@ -6,7 +6,7 @@
     },
     "finnhub": {
       "command": "cmd",
-      "args": ["/c", "npx", "-y", "@nimblebrain/mcp-finnhub"],
+      "args": ["/c", "npx", "-y", "finnhub-mcp", "--stdio"],
       "env": {
         "FINNHUB_API_KEY": "${FINNHUB_API_KEY}"
       }
