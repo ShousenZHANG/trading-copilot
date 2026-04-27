@@ -4,7 +4,8 @@
       "command": "cmd",
       "args": ["/c", "uvx", "yahoo-finance-mcp"]
     },
-    "finnhub": {
+    "_finnhub": {
+      "_doc_disabled_reason": "finnhub-mcp npm package has a Windows path bug — fails when Node.js is in C:\\Program Files due to unescaped spawn. Re-enable when patched upstream OR substitute with a working alternative.",
       "command": "cmd",
       "args": ["/c", "npx", "-y", "finnhub-mcp", "--stdio"],
       "env": {
