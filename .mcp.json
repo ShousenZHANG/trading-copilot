@@ -4,10 +4,10 @@
       "command": "cmd",
       "args": ["/c", "uvx", "yahoo-finance-mcp"]
     },
-    "_finnhub": {
-      "_doc_disabled_reason": "finnhub-mcp npm package has a Windows path bug — fails when Node.js is in C:\\Program Files due to unescaped spawn. Re-enable when patched upstream OR substitute with a working alternative.",
+    "finnhub": {
+      "_doc": "Custom thin Python MCP wrapping Finnhub REST API. Replaces the broken npm finnhub-mcp (Windows path bug). Source: mcps/finnhub_mcp.py.",
       "command": "cmd",
-      "args": ["/c", "npx", "-y", "finnhub-mcp", "--stdio"],
+      "args": ["/c", "uv", "run", "--no-project", "--quiet", "--script", "D:/trading-copilot/mcps/finnhub_mcp.py"],
       "env": {
         "FINNHUB_API_KEY": "${FINNHUB_API_KEY}"
       }
