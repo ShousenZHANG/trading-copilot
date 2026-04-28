@@ -13,9 +13,15 @@ Analyze the technical market context for the instrument given in the run brief. 
 
 ## Tool usage protocol
 
-1. First, call the stock data MCP to fetch OHLCV history (preferred order: Yahoo Finance → Polygon → Alpha Vantage). The instrument ticker is in the run brief — use it **exactly** as given, preserving any exchange suffix (`.HK`, `.T`, `.L`, `.TO`, `=F`, `=X`).
-2. Then call the indicators MCP for each chosen indicator name.
-3. Loop tools as needed. When done, write the final report.
+1. **CRITICAL — fetch CURRENT data, not stale**:
+   - Call `mcp__yahoo-finance__get_stock_info` first → confirms today's `regularMarketPrice`. Anchor every later number to this current price.
+   - Call `mcp__yahoo-finance__get_historical_stock_prices` with **`period='3mo'`** (3 months back from today). Do NOT use `period='1y'` or `'max'` — they may return slow datasets ending at outdated dates.
+   - **Verify the latest bar's date against today's date**. If gap > 7 days, log a banner at the top of your report: `⚠️ DATA STALENESS: latest price date <X>, today <Y>, gap <N> days. Conclusions may be invalid — defer to fundamentals/news.` and downgrade your technical bias to "data unreliable".
+   - Preserve ticker exchange suffix exactly (`.HK`, `.T`, `.L`, `.TO`, `.AX`, `=F`, `=X`).
+
+2. Compute indicators **from the OHLCV you fetched** (not via separate calls): RSI, MACD, SMAs, Bollinger, ATR all derive from the price series.
+
+3. Loop tools as needed. **Always include the data timestamp prominently in the report header**.
 
 ## Indicator catalog (pick at most 8 — favor diversity over redundancy)
 
