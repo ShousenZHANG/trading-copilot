@@ -1,113 +1,107 @@
 # Trading Copilot
 
-> Multi-agent trading research copilot, native to Claude Code. Stocks + Gold + Macro analysis with adversarial Bull/Bear debate, 3-way risk analysis, and self-reflection loop.
+**English** · [中文](./README_zh.md)
 
-**Architecture**: Direct port of [TradingAgents](https://github.com/TauricResearch/TradingAgents) (53k+ stars) to Claude Code subagents + slash commands + MCP servers. No separate backend service.
+> A multi-agent trading-research plugin for **Claude Code**. Four analysts → Bull/Bear debate → Trader → 3-way risk debate → Portfolio Manager. Stocks, ETFs, gold, macro.
 
-> ⚠️ **Educational and informational use only. Not investment advice.** See [DISCLAIMER.md](./DISCLAIMER.md).
+A faithful port of [TradingAgents](https://github.com/TauricResearch/TradingAgents) (53k★) to native Claude Code subagents + slash commands + MCP data servers. No backend, no build step.
+
+> ⚠️ **Educational use only. Not investment advice.** See [DISCLAIMER.md](./DISCLAIMER.md).
 
 ---
 
-## Quick Start
+## Install (60 seconds)
+
+1. **Download** the latest `trading-copilot-x.y.z.zip` from [Releases](https://github.com/ShousenZHANG/trading-copilot/releases).
+2. **Unzip** anywhere, e.g. `~/trading-copilot`.
+3. **Open the folder in [Claude Code](https://claude.com/claude-code)** (`claude` in that directory).
+4. `cp .env.example .env` — add a free [Finnhub](https://finnhub.io) key (Yahoo Finance needs none).
+5. Type `/advise NVDA`.
+
+That's it. No install scripts, no dependencies beyond Claude Code + Python 3.
+
+---
+
+## Use it
+
+| Command | What it does | Time / cost |
+|---------|--------------|-------------|
+| `/advise NVDA` | One Opus agent: full read + Buy/Hold/Sell call | ~5 min · $0.20–0.50 |
+| `/analyze NVDA` | Full 12-agent pipeline (debate + risk + PM) | ~30 min · $1–3 |
+| `/gold` | Gold pipeline (macro-driven) | ~30 min |
+| `/scan` | Run the whole watchlist | varies |
+| `/watchlist add TSLA` | Manage tickers | instant |
+| `/weekly-review` | Resolve past calls, compute alpha, learn | ~10 min |
+
+### Example
+
+```
+You:   /advise NVDA
+Claude: NVDA — Buy (medium conviction)
+        Entry $182–188 · Stop $171 · Target $230 (12mo) · Size ≤5%
+        Why: data-center demand + reasonable forward P/E; RSI not overbought.
+        Risk gate: all pass. Full report → data/decisions/NVDA-2026-06-01.md
+```
+
+Every run also writes a full markdown report under `data/decisions/`.
+
+---
+
+## Pipeline (`/analyze`)
+
+```
+Market · Social · News · Fundamentals   (4 analysts, parallel)
+                  │
+        Bull  ⇄  Bear   debate
+                  │
+        Research Manager (Opus)  → 5-tier rating
+                  │
+              Trader            → entry / stop / size
+                  │
+   Aggressive → Conservative → Neutral   (risk debate)
+                  │
+       Portfolio Manager (Opus)  → final decision + risk gate
+                  │
+        Logged → reflected at T+5 days
+```
+
+Opus runs the 2 deciders + `/advise`; Sonnet runs the rest. Adversarial debate surfaces failure modes a single oracle misses; the memory log makes it learn from past calls.
+
+---
+
+## Other runtimes (Claude.ai / ChatGPT)
+
+The full pipeline needs Claude Code (subagents + MCP + filesystem). For **claude.ai** or **ChatGPT**, the agent prompts in `.claude/agents/` are portable — paste one (e.g. `investment-advisor.md`) as a system prompt / Custom GPT instruction, supply market data manually, and you get the reasoning framework without the automation. See [docs/INSTALL.md](./docs/INSTALL.md).
+
+---
+
+## Data sources (MCP)
+
+Configured in `.mcp.json` (only `yahoo-finance` + `finnhub` active by default; rest ship disabled). Keys live in `.env` (gitignored). Toggle with `python scripts/enable_mcp.py <name>`.
+
+| Data | Server | Cost |
+|------|--------|------|
+| Quotes / history | Yahoo Finance | free |
+| News / financials / sentiment | Finnhub | free 60/min |
+| Macro (Fed/CPI/yields) | FRED | free |
+| Web research | Exa | free credits |
+
+---
+
+## Verify your install
 
 ```bash
-git clone https://github.com/ShousenZHANG/trading-copilot.git D:/trading-copilot
-cd D:/trading-copilot
-cp .env.example .env   # fill in API keys for the MCP servers you want
-```
-
-Then in Claude Code:
-
-```
-/analyze NVDA       # Run full pipeline on a stock
-/gold               # Analyze XAU/USD with macro emphasis
-/scan               # Run watchlist
-/watchlist add TSLA
-/weekly-review      # Sunday deep review with Opus
-/debate AAPL        # Force multi-round Bull/Bear debate
+python scripts/check.py        # repo health → prints "OK"
+/advise NVDA                   # in Claude Code
 ```
 
 ---
 
-## Pipeline
+## Links
 
-```
-Market Analyst   -> Social Analyst   -> News Analyst   -> Fundamentals Analyst
-                                                                 |
-                                          Bull Researcher <-> Bear Researcher
-                                                                 |
-                                                   Research Manager (Opus)
-                                                                 |
-                                                              Trader
-                                                                 |
-                              Aggressive -> Conservative -> Neutral Risk Debators
-                                                                 |
-                                                  Portfolio Manager (Opus)
-                                                                 |
-                                                Decision logged + reflected at T+5d
-```
+- [docs/INSTALL.md](./docs/INSTALL.md) — full install (Claude Code / claude.ai / ChatGPT)
+- [docs/methodology.md](./docs/methodology.md) — why adversarial debate + reflection
+- [.claude/skills/trading-copilot/SKILL.md](./.claude/skills/trading-copilot/SKILL.md) — pipeline spec
+- [LICENSE](./LICENSE) (MIT) · [DISCLAIMER.md](./DISCLAIMER.md)
 
-`/analyze` uses 12 agents per run: 4 analysts in parallel, Bull/Bear researchers, Research Manager, Trader, 3 risk debaters, and Portfolio Manager. The repository contains 14 configured agent prompts total, including the gold-only `macro-analyst` variant and the single-agent `/advise` advisor. Opus is reserved for the two managers plus `/advise`; Sonnet covers the rest. Rating scale: Buy/Overweight/Hold/Underweight/Sell.
-
-See [docs/tradingagents-deep-dive.md](./docs/tradingagents-deep-dive.md) for architecture details.
-
----
-
-## Data Sources (MCP servers)
-
-| Role | MCP | Cost |
-|------|-----|------|
-| Primary market data | [Polygon.io](https://github.com/polygon-io/mcp_polygon) | Free 5/min |
-| Backup / quotes | [Yahoo Finance](https://github.com/Alex2Yang97/yahoo-finance-mcp) | Free |
-| News + financials | [Finnhub](https://github.com/NimbleBrainInc/mcp-finnhub) | Free 60/min |
-| Macro (Fed/CPI/yields) | [FRED](https://github.com/stefanoamorelli/fred-mcp-server) | Free unlimited |
-| Gold spot | [metal-price MCP](https://github.com/isdaniel/mcp-metal-price) | Free 100/mo |
-| Web research | [Exa](https://github.com/exa-labs/exa-mcp-server) | $10 free credits |
-| Memory | [claude-mem](https://github.com/thedotmack/claude-mem) | Free local |
-
-MCP servers are configured in `.mcp.json`. Copy `.env.example` -> `.env`, fill the keys you need, then toggle optional servers with `python scripts/enable_mcp.py <name>`.
-
----
-
-## Project Layout
-
-```
-trading-copilot/
-|-- .claude-plugin/plugin.json         # plugin manifest
-|-- .mcp.json                          # MCP servers (project scope)
-|-- .claude/
-|   |-- settings.json                  # permissions + env
-|   |-- commands/                      # slash commands (/analyze, /gold, ...)
-|   |-- agents/                        # subagent prompts
-|   |   |-- analysts/                  #   market, social, news, fundamentals, macro
-|   |   |-- researchers/               #   bull, bear
-|   |   |-- managers/                  #   research-manager, portfolio-manager (Opus)
-|   |   |-- risk-debators/             #   aggressive, conservative, neutral
-|   |   `-- trader.md
-|   `-- skills/trading-copilot/SKILL.md  # methodology
-|-- data/                              # human-readable persistence
-|   |-- watchlist.md
-|   |-- positions.md
-|   |-- decisions/<TICKER>-<DATE>.md
-|   |-- runs/<TICKER>-<DATE>/          # intermediate per-step outputs
-|   `-- memory/trading_memory.md       # append-only decision log
-|-- docs/                              # methodology + samples
-|-- evals/                             # FinanceBench + StockBench harness
-|-- reference/TradingAgents/           # upstream source for reference
-`-- .github/workflows/                 # cron jobs (premarket scan, weekly review)
-```
-
-Final `/analyze` persistence is deterministic: validate the run, append memory through the CLI, then assemble the report.
-
-```bash
-python scripts/validate_outputs.py run data/runs/<TICKER>-<DATE>
-python scripts/memory.py append --ticker <TICKER> --date <DATE> --decision-file data/runs/<TICKER>-<DATE>/08-portfolio-decision.md
-python scripts/assemble_report.py --ticker <TICKER> --date <DATE>
-python scripts/check.py
-```
-
----
-
-## Status
-
-**Status**: file-based plugin with hardened memory, validation, deterministic report assembly, MCP fallbacks, and scheduled-run scaffolding. Evaluation runners are still scaffolds; treat generated research as educational and verify before acting.
+> ⚠️ AI-generated research. Verify before acting. You bear all responsibility for your decisions.

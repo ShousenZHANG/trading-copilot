@@ -139,10 +139,10 @@ def check_agents() -> None:
 
 
 def check_skill_mirror() -> None:
+    # Cross-runtime mirror (.agents/) is optional. Validate only if present.
     source = ROOT / ".claude" / "skills" / "trading-copilot" / "SKILL.md"
     mirror = ROOT / ".agents" / "skills" / "trading-copilot" / "SKILL.md"
     if not mirror.exists():
-        err(".agents skill mirror missing")
         return
     if read(source) != read(mirror):
         err(".agents/skills/trading-copilot/SKILL.md drifted from .claude source")

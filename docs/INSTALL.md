@@ -99,8 +99,8 @@ If `check.py` prints `OK` and `/advise` returns a rated report, you are good.
 ## What you must configure before real use
 
 - **`.env`** — API keys (never commit this; it is gitignored).
-- **`docs/strategy.md`** — your personal strategy/risk profile (the bundled one
-  is the author's; replace it with yours).
+- **`docs/strategy.md`** — your personal strategy/risk profile (not shipped;
+  create your own. It is gitignored so it stays private).
 - **`data/watchlist.md`** — tickers you actually track.
 - **`data/positions.md`** — your holdings (gitignored; create from scratch).
 
