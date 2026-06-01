@@ -19,9 +19,9 @@ SPY    | etf, broad-market | S&P 500 benchmark
 TLT    | etf, bonds        | 20+ year treasuries
 DXY    | macro, dollar     | dollar index proxy
 
-## Personal core ETFs (real money, /advise weekly, CommSec Pocket — US-heavy regime per ADR-0006)
-NDQ.AX | etf, us-tech       | BetaShares NASDAQ 100 — 60% allocation (~95% US tech mega-cap)
-IOO.AX | etf, global-mcap   | iShares Global 100 — 30% allocation (~70% US, broader sectors)
+## ASX (Australia) — example
+# VAS.AX | etf, au-core      | Vanguard ASX 300
+# NDQ.AX | etf, us-tech      | BetaShares NASDAQ 100 (ASX-listed)
 
 ## A-share / HK (add when AKShare/Tushare MCP wired)
 # 600519.SS | a-share | 贵州茅台
