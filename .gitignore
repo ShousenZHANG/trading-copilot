@@ -15,6 +15,10 @@ data/audit/
 # Instance state, NOT shippable plugin content. Curated demos live in docs/samples/.
 data/decisions/
 
+# Personal strategy (each user writes their own; not shippable plugin content)
+docs/strategy.md
+docs/strategy-checklist.md
+
 # Release build artifacts
 dist/
 *.zip

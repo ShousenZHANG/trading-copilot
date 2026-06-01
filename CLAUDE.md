@@ -237,9 +237,8 @@ If the user asks a one-off "what's NVDA doing?" question, answer directly from M
 - [docs/tradingagents-deep-dive.md](docs/tradingagents-deep-dive.md) — upstream architecture analysis
 - [.claude/skills/trading-copilot/SKILL.md](.claude/skills/trading-copilot/SKILL.md) — methodology reference loaded into agent context
 - [evals/README.md](evals/README.md) — eval harness scaffold (FinanceBench + StockBench)
-- [docs/strategy.md](docs/strategy.md) — Eddy's active investment strategy. **Read before any /advise or /scan run** to confirm ratings + sizing align with current regime.
-- [docs/strategy-checklist.md](docs/strategy-checklist.md) — manual setup steps (broker accounts, Telegram, GitHub Actions secrets)
-- [docs/adr/](docs/adr/) — architecture decisions (numbered, append-only)
+- `docs/strategy.md` — your personal investment strategy (gitignored; create your own — it is NOT shipped). The pipeline reads it before `/advise` and `/scan` runs if present.
+- [docs/adr/](docs/adr/) — software architecture decisions (numbered, append-only)
 
 ## Agent skills
 

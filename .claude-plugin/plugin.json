@@ -1,6 +1,6 @@
 {
   "name": "trading-copilot",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Multi-agent trading research copilot for stocks, gold, and macro analysis. Mirrors the TradingAgents architecture as a native Claude Code plugin: 4 analysts -> Bull/Bear debate -> Trader -> 3-way Risk debate -> Portfolio Manager. Educational use only.",
   "author": {
     "name": "eddy.zhang24",

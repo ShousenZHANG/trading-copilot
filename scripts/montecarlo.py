@@ -38,7 +38,7 @@ the pipeline's anti-waffle rule: identical inputs must produce identical output.
 CLI
 ---
     python scripts/montecarlo.py --price 4479 --vol 0.18 --days 14 \\
-        --cost 1018.07 --drift 0.0 --paths 100000
+        --cost 4650 --drift 0.0 --paths 100000
 
     # gold example (GC=F): annualized vol ~16-20%, 2-week horizon
     python scripts/montecarlo.py --price 4479 --vol 0.18 --days 14 --drift 0.04
