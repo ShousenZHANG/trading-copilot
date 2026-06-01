@@ -69,17 +69,6 @@ def main() -> int:
         questions = questions[: args.sample_size]
 
     print(f"Loaded {len(questions)} questions.")
-    print()
-    print("This scaffold does not yet invoke the analyst subagents — that step")
-    print("requires Claude Code SDK headless mode to dispatch the right subagent")
-    print("per question. Implement in a follow-up commit:")
-    print()
-    print("  for q in questions:")
-    print("    answer = invoke_subagent(q['test_against_agent'], q['question'])")
-    print("    score  = compare(answer, q['reference_answer'], q['tolerance_pct'])")
-    print("    record(q, answer, score)")
-    print()
-    print("Until then, this script just validates the question file is well-formed.")
 
     # Validate schema of every question.
     required = {"id", "ticker", "question", "reference_answer", "test_against_agent"}
@@ -92,8 +81,45 @@ def main() -> int:
     if bad:
         print(f"\n{bad} malformed question(s).")
         return 1
-    print(f"\n{len(questions)} questions OK.")
-    return 0
+
+    # Score any answers already collected. A separate headless step (Claude Code
+    # SDK dispatching `test_against_agent` per question) writes `model_answer`
+    # back into each record; this runner then scores deterministically. If no
+    # answers are present yet, we report coverage and exit 0 (schema is valid).
+    from importlib import util as _importutil
+
+    scorer_path = ROOT / "evals" / "scorer.py"
+    spec = _importutil.spec_from_file_location("scorer", scorer_path)
+    scorer = _importutil.module_from_spec(spec)  # type: ignore
+    # Register before exec so @dataclass introspection can resolve __module__.
+    sys.modules["scorer"] = scorer
+    spec.loader.exec_module(scorer)  # type: ignore
+
+    answered = [q for q in questions if q.get("model_answer")]
+    if not answered:
+        print(f"\n{len(questions)} questions OK (schema valid).")
+        print("No `model_answer` fields yet — collect answers via headless dispatch,")
+        print("write them back into the JSONL, then re-run to score.")
+        return 0
+
+    tallies = {"pass": 0, "fail": 0, "hallucination": 0, "no-reference": 0}
+    for q in answered:
+        v = scorer.score(
+            q["model_answer"],
+            q["reference_answer"],
+            float(q.get("tolerance_pct", 1.0)),
+        )
+        tallies[v.status] = tallies.get(v.status, 0) + 1
+        print(f"  [{v.status.upper():13}] {q['id']}: {v.detail}")
+
+    n = len(answered)
+    acc = tallies["pass"] / n if n else 0.0
+    print(f"\nScored {n}/{len(questions)} answered.")
+    print(f"  accuracy:       {acc:.1%}")
+    print(f"  hallucinations: {tallies['hallucination']}  (confident-wrong; worst failure)")
+    print(f"  plain misses:   {tallies['fail']}")
+    # Fail the run if any hallucination or accuracy < 80% (tune as needed).
+    return 0 if (tallies["hallucination"] == 0 and acc >= 0.8) else 1
 
 
 if __name__ == "__main__":
