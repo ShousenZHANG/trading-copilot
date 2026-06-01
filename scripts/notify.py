@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
-import io
 import json
 import os
 import re
@@ -26,10 +25,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-if hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "buffer"):
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+from runtime import force_utf8_stdio
+
+force_utf8_stdio()
 
 ROOT = Path(__file__).resolve().parent.parent
 STATE_DIR = ROOT / "data" / "state"

@@ -47,7 +47,7 @@ Market Analyst   -> Social Analyst   -> News Analyst   -> Fundamentals Analyst
                                                 Decision logged + reflected at T+5d
 ```
 
-11 agents. 2-tier LLM (Opus for 2 managers, Sonnet for 9 others). 5-tier rating (Buy/Overweight/Hold/Underweight/Sell).
+`/analyze` uses 12 agents per run: 4 analysts in parallel, Bull/Bear researchers, Research Manager, Trader, 3 risk debaters, and Portfolio Manager. The repository contains 14 configured agent prompts total, including the gold-only `macro-analyst` variant and the single-agent `/advise` advisor. Opus is reserved for the two managers plus `/advise`; Sonnet covers the rest. Rating scale: Buy/Overweight/Hold/Underweight/Sell.
 
 See [docs/tradingagents-deep-dive.md](./docs/tradingagents-deep-dive.md) for architecture details.
 
@@ -65,7 +65,7 @@ See [docs/tradingagents-deep-dive.md](./docs/tradingagents-deep-dive.md) for arc
 | Web research | [Exa](https://github.com/exa-labs/exa-mcp-server) | $10 free credits |
 | Memory | [claude-mem](https://github.com/thedotmack/claude-mem) | Free local |
 
-Configure in `.claude/settings.json` after copying `.env.example` -> `.env`.
+MCP servers are configured in `.mcp.json`. Copy `.env.example` -> `.env`, fill the keys you need, then toggle optional servers with `python scripts/enable_mcp.py <name>`.
 
 ---
 
@@ -78,7 +78,7 @@ trading-copilot/
 |-- .claude/
 |   |-- settings.json                  # permissions + env
 |   |-- commands/                      # slash commands (/analyze, /gold, ...)
-|   |-- agents/                        # 13 subagents
+|   |-- agents/                        # subagent prompts
 |   |   |-- analysts/                  #   market, social, news, fundamentals, macro
 |   |   |-- researchers/               #   bull, bear
 |   |   |-- managers/                  #   research-manager, portfolio-manager (Opus)
@@ -97,10 +97,17 @@ trading-copilot/
 `-- .github/workflows/                 # cron jobs (premarket scan, weekly review)
 ```
 
+Final `/analyze` persistence is deterministic: validate the run, append memory through the CLI, then assemble the report.
+
+```bash
+python scripts/validate_outputs.py run data/runs/<TICKER>-<DATE>
+python scripts/memory.py append --ticker <TICKER> --date <DATE> --decision-file data/runs/<TICKER>-<DATE>/08-portfolio-decision.md
+python scripts/assemble_report.py --ticker <TICKER> --date <DATE>
+python scripts/check.py
+```
+
 ---
 
 ## Status
 
-**Phase 0 (skeleton) - in progress.** See `TodoWrite` for live phase tracking.
-
-Roadmap: 8 phases, ~4-5 days to ship a complete institutional-grade trading agent.
+**Status**: file-based plugin with hardened memory, validation, deterministic report assembly, MCP fallbacks, and scheduled-run scaffolding. Evaluation runners are still scaffolds; treat generated research as educational and verify before acting.

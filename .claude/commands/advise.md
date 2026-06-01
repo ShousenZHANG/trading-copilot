@@ -1,5 +1,5 @@
 ---
-description: Single comprehensive investment advisor — runs ONE agent that combines technical, fundamental, news, sentiment, and macro analysis in a single pass. Faster + cheaper than the 13-agent /analyze. Outputs an actionable Buy/Hold/Reduce recommendation with entry/stop/sizing.
+description: Single comprehensive investment advisor — runs ONE agent that combines technical, fundamental, news, sentiment, and macro analysis in a single pass. Faster + cheaper than the 12-agent /analyze. Outputs an actionable Buy/Hold/Reduce recommendation with entry/stop/sizing.
 argument-hint: <TICKER>
 ---
 
@@ -8,7 +8,7 @@ argument-hint: <TICKER>
 Run a comprehensive investment analysis on `$ARGUMENTS` using **ONE** super-agent.
 
 **Difference vs `/analyze`**:
-- `/analyze` = 13 subagents in serial pipeline (Bull/Bear debate + 3-way risk debate + Portfolio Manager). Deep, slow (30-60 min), expensive. Use for high-conviction positions.
+- `/analyze` = 12-agent staged pipeline (4 analysts in parallel, then Bull/Bear debate + 3-way risk debate + Portfolio Manager). Deep, slow (30-60 min), expensive. Use for high-conviction positions.
 - `/advise` = 1 agent (Opus) doing everything in one pass. Fast (5-10 min), focused, cheaper. Use for **daily decision-making**.
 
 ## Args
@@ -23,7 +23,7 @@ Run a comprehensive investment analysis on `$ARGUMENTS` using **ONE** super-agen
   - Gold: `GC=F` (futures) or `XAUUSD=X` (spot)
   - Index: `^GSPC` (S&P 500), `^AXJO` (ASX 200)
 
-If user gave just a name ("Tesla", "苹果"), resolve to ticker first by asking or inferring (TSLA, AAPL).
+If user gave just a name ("Tesla", "Apple", "苹果"), resolve to ticker first by asking or inferring (TSLA, AAPL).
 
 ## Execution
 
@@ -44,7 +44,15 @@ If user gave just a name ("Tesla", "苹果"), resolve to ticker first by asking 
 
 4. **Wait** for the agent to return the saved file path.
 
-5. **Reply to user** (do NOT dump full report into chat — too long). Show:
+5. **Validate the saved report** before summarizing:
+
+   ```bash
+   python scripts/validate_outputs.py advisor data/decisions/<TICKER>-<DATE>.md
+   ```
+
+   If validation fails, show the validation error and ask the agent to repair the saved report before presenting a recommendation.
+
+6. **Reply to user** (do NOT dump full report into chat — too long). Show:
    - Headline rating + confidence
    - Entry / stop / target / sizing (1 line)
    - 1-sentence reason
@@ -57,14 +65,14 @@ If user gave just a name ("Tesla", "苹果"), resolve to ticker first by asking 
    ✅ TSLA — Buy (中等确信)
    入场 $245-$252 | 止损 $228 | 目标 12个月 $310 | 仓位 ≤8%
 
-   理由: 4Q交付超预期 + Robotaxi 5月发布会催化剂 + 50日线突破, 但 RSI 偏高需小心追高.
+   理由: 4Q 交付超预期 + Robotaxi 5 月发布会催化剂 + 50 日线突破, 但 RSI 偏高需小心追高.
 
    📄 完整报告: data/decisions/TSLA-2026-04-27.md (含技术/基本/情绪/风控/操作步骤)
 
    ⚠️ 教育用途, 非投资建议. 你对所有决定负责.
    ```
 
-6. **Optional**: append a pending entry to `data/memory/trading_memory.md` for T+5 day reflection (only if rating is Buy or Strong Buy or Reduce/Sell — Hold doesn't generate a memory entry since no action was taken).
+7. **Optional**: append a pending entry to `data/memory/trading_memory.md` for T+5 day reflection using `scripts/memory.py append` (only if rating is Buy or Strong Buy or Reduce/Sell — Hold doesn't generate a memory entry since no action was taken).
 
 ## Speed expectation
 
@@ -80,7 +88,7 @@ If user gave just a name ("Tesla", "苹果"), resolve to ticker first by asking 
 | 想买某只前快速 sanity check | **`/advise`** |
 | ETF / 大盘指数评估 | **`/advise`** |
 | 黄金 / 大宗 | **`/advise`** |
-| **大仓位**前最终尽调 (>10% portfolio) | `/analyze` (13-agent 深度) |
+| **大仓位**前最终尽调 (>10% portfolio) | `/analyze` (12-agent 深度) |
 | 评级和你直觉冲突想要"二次意见" | `/analyze` |
 | 教学 / 学习多视角分析 | `/analyze` |
 | 复盘历史决策 | 都不需要, 直接读 data/memory/trading_memory.md |

@@ -1,6 +1,6 @@
 # MCP Server Setup
 
-> Wire the 8 MCP servers that power Trading Copilot. All MCPs are **disabled by default** in `.claude/settings.json` (prefixed with `_`). Enable each one as you get its API key.
+> Wire the MCP servers that power Trading Copilot. Project MCPs live in `.mcp.json`. Servers prefixed with `_` are disabled; use `python scripts/enable_mcp.py` to toggle them.
 
 ---
 
@@ -15,7 +15,7 @@ These two work immediately — no signup, no keys.
 uvx yahoo-finance-mcp --help
 ```
 
-Then in `.claude/settings.json`, **rename** `"_yahoo-finance"` to `"yahoo-finance"` (drop the leading underscore).
+`yahoo-finance` is already enabled in `.mcp.json` by default. If disabled, run `python scripts/enable_mcp.py yahoo-finance`.
 
 ### 2. claude-mem — cross-session memory
 
@@ -24,7 +24,7 @@ npm i -g claude-mem
 claude-mem --version
 ```
 
-Rename `"_claude-mem"` to `"claude-mem"` in settings.json.
+Run `python scripts/enable_mcp.py claude-mem` if you want this optional server.
 
 ---
 
@@ -37,14 +37,14 @@ Sign up takes 1-2 min each. All have generous free tiers.
 1. Sign up: https://polygon.io/dashboard/signup
 2. Get your API key from dashboard
 3. Put in `.env`: `POLYGON_API_KEY=pk_xxx`
-4. Rename `"_polygon"` -> `"polygon"` in settings.json
+4. Run `python scripts/enable_mcp.py polygon`
 5. Test: ask Claude "use Polygon to get NVDA last quote"
 
 ### 4. Alpha Vantage — backup market data (hosted MCP)
 
 1. Sign up (instant): https://www.alphavantage.co/support/#api-key
 2. Put key in `.env`: `ALPHA_VANTAGE_API_KEY=xxx`
-3. Rename `"_alpha-vantage"` -> `"alpha-vantage"` in settings.json
+3. Run `python scripts/enable_mcp.py alpha-vantage`
 4. Note: This one is HTTP-hosted (no local install).
 
 ### 5. Finnhub — news + financials
@@ -52,21 +52,21 @@ Sign up takes 1-2 min each. All have generous free tiers.
 1. Sign up: https://finnhub.io/register
 2. Free tier: 60 requests/min
 3. Put key in `.env`: `FINNHUB_API_KEY=xxx`
-4. Rename `"_finnhub"` -> `"finnhub"` in settings.json
+4. `finnhub` is already enabled in `.mcp.json` by default. If disabled, run `python scripts/enable_mcp.py finnhub`.
 
 ### 6. FRED — Fed economic data
 
 1. Sign up: https://fred.stlouisfed.org/docs/api/api_key.html
 2. Free, unlimited
 3. Put key in `.env`: `FRED_API_KEY=xxx`
-4. Rename `"_fred"` -> `"fred"` in settings.json
+4. Run `python scripts/enable_mcp.py fred`
 
 ### 7. Exa — neural web search
 
 1. Sign up: https://exa.ai/
 2. Free trial: $10 credits (~1000 searches)
 3. Put key in `.env`: `EXA_API_KEY=xxx`
-4. Rename `"_exa"` -> `"exa"` in settings.json
+4. Run `python scripts/enable_mcp.py exa`
 
 ---
 
@@ -77,7 +77,7 @@ Sign up takes 1-2 min each. All have generous free tiers.
 1. Sign up: https://www.goldapi.io/
 2. Free tier: 100 requests/month
 3. Put key in `.env`: `GOLD_API_KEY=xxx`
-4. Rename `"_gold"` -> `"gold"` in settings.json
+4. Run `python scripts/enable_mcp.py gold`
 
 > **Alternative (no key)**: skip this MCP and use Yahoo Finance ticker `GC=F` (gold futures) or `XAUUSD=X` (spot). Slightly lower precision, but free and unlimited.
 
@@ -93,7 +93,7 @@ If you want sync:
 1. Create project at https://supabase.com/
 2. Get URL + anon key + project ref
 3. Put in `.env`: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_PROJECT_REF`
-4. Add Supabase MCP block manually to settings.json (see [Supabase MCP repo](https://github.com/supabase-community/supabase-mcp))
+4. Add Supabase MCP block manually to `.mcp.json` or `.codex/config.toml` (see [Supabase MCP repo](https://github.com/supabase-community/supabase-mcp))
 
 ---
 
