@@ -4,3 +4,4 @@
 # Add more questions as you curate from https://github.com/patronus-ai/financebench
 # Format: one JSON object per line. Required keys: id, ticker, question, reference_answer, test_against_agent
 # Optional: filing, reference_metric (for tolerance scoring), tolerance_pct
+{"id":"fb-demo","ticker":"AAPL","filing":"10-K FY2023","question":"Apple FY2023 total net sales? (DEMO row with a pre-filled model_answer to show end-to-end scoring)","reference_answer":"$383.285 billion","tolerance_pct":0.5,"test_against_agent":"fundamentals-analyst","model_answer":"Apple reported total net sales of $383.3 billion in fiscal 2023."}
