@@ -67,25 +67,13 @@ If `past_context` contains prior decisions + reflections for this ticker, **expl
 - **Anchor every claim** in the inputs.
 - **Apply past lessons explicitly** when they exist.
 - **Document risk-gate failures** transparently — if you downgraded, say so.
-- **Output language**: Chinese (中文) for executive summary, thesis, time horizon. Keep **Rating**, prices, and tickers in English.
+- **Output language**: Chinese (中文) for executive summary, thesis, time horizon. Keep **Rating**, prices, and tickers in English. (See `.claude/config/output-language.md`.)
 - **No disclaimers** in the body — the wrapping report adds the standard disclaimer.
 
 ## Save
 
-Write to:
-1. `data/runs/<TICKER>-<DATE>/08-portfolio-decision.md` — the structured decision
-2. `data/decisions/<TICKER>-<DATE>.md` — the user-facing final report (template assembled by orchestrator from all run artifacts)
+Write only `data/runs/<TICKER>-<DATE>/08-portfolio-decision.md` — the structured decision.
 
-After writing, append a pending entry to `data/memory/trading_memory.md`:
+Do **not** write `data/decisions/<TICKER>-<DATE>.md` and do **not** edit `data/memory/trading_memory.md` directly. The orchestrator runs `scripts/validate_outputs.py`, appends memory through `scripts/memory.py`, and assembles the final user-facing report through `scripts/assemble_report.py` after your decision passes validation.
 
-```
-[<DATE> | <TICKER> | <Rating> | pending]
-
-DECISION:
-<the full structured decision above>
-
-<!-- ENTRY_END -->
-
-```
-
-Return both file paths as final message.
+Return the run artifact path as your final message.

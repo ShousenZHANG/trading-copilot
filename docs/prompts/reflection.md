@@ -34,7 +34,7 @@ Final Decision:
 - Cite the alpha figure explicitly in the first sentence.
 - Reference a specific thesis component (e.g. "the bull case on data-center demand").
 - End with one actionable lesson — phrased so a future analyst can apply it.
-- **Output language**: match the original decision's language. If the decision was in Chinese, write the reflection in Chinese.
+- **Output language**: follows `.claude/config/output-language.md` (currently Chinese 中文). For backward compat with older decisions in the memory log, you may match the original decision's language instead — the goal is the reflection sits naturally next to its DECISION block.
 
 ## Model
 

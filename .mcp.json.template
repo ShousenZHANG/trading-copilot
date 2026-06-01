@@ -25,9 +25,9 @@
       }
     },
     "finnhub": {
-      "_doc": "News + financials + earnings. Free 60/min.",
-      "command": "npx",
-      "args": ["-y", "@nimblebrain/mcp-finnhub"],
+      "_doc": "News + financials + earnings. Free 60/min. Uses the local Python wrapper to avoid the npm finnhub-mcp Windows path bug.",
+      "command": "cmd",
+      "args": ["/c", "uv", "run", "--no-project", "--quiet", "--script", "D:/trading-copilot/mcps/finnhub_mcp.py"],
       "env": {
         "FINNHUB_API_KEY": "${FINNHUB_API_KEY}"
       }

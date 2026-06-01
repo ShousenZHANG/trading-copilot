@@ -4,6 +4,8 @@
 
 **源码位置**: `reference/TradingAgents/` (commit截至2026-04-25, v0.2.4)
 
+> Current repo note: upstream TradingAgents keeps analysts sequential inside LangGraph. Trading Copilot intentionally diverges by running the four analysts in parallel as Claude Code subagents, then validating and assembling durable markdown artifacts with `scripts/validate_outputs.py` and `scripts/assemble_report.py`.
+
 ---
 
 ## 1. 真实架构 (修正之前的错误)

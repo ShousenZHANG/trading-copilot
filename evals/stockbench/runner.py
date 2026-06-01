@@ -24,14 +24,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-if hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 WINDOWS_FILE = Path(__file__).resolve().parent / "windows.json"

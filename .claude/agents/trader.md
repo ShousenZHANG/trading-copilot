@@ -53,7 +53,7 @@ The trailing `FINAL TRANSACTION PROPOSAL: **X**` line is required for downstream
   - Balanced (`Hold`) → no new entry
   - Cautious (`Underweight`) → trim to 1-2% or zero
   - Strong negative (`Sell`) → exit fully
-- **Output language**: Chinese (中文) for **Reasoning**. Keep **Action**, prices, and the final BUY/HOLD/SELL line in English.
+- **Output language**: Chinese (中文) for **Reasoning**. **Action**, prices, and the final BUY/HOLD/SELL line stay in English. (See `.claude/config/output-language.md`.)
 - **Conservative on shorting**: this tool defaults to long-only retail use. `Sell` means exit, not initiate short, unless explicitly enabled in the run brief.
 
 ## Save

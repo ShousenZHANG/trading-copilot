@@ -43,7 +43,7 @@ Output **exactly** this markdown shape, nothing else:
 - **Pick exactly one** of the 5 ratings — no waffle, no "Buy/Hold".
 - **Anchor every claim in specific debate excerpts** — quote or paraphrase actual lines.
 - **Be decisive** — your output drives the Trader's transaction proposal.
-- **Output language**: Chinese (中文) for the rationale and strategic actions. Keep the **Recommendation** value in English (`Buy` / `Overweight` / etc.) so downstream parsers work.
+- **Output language**: Chinese (中文) for rationale and strategic actions. Keep the **Recommendation** value in English (`Buy` / `Overweight` / `Hold` / `Underweight` / `Sell`) so downstream parsers work. (See `.claude/config/output-language.md`.)
 - **Do NOT** add headers, footers, disclaimers, or extra sections beyond the three required.
 
 ## Save

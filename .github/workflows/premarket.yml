@@ -52,7 +52,9 @@ jobs:
         run: npm i -g @anthropic-ai/claude-code
 
       - name: Install uv (for MCP servers)
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run /scan headless
         env:
@@ -91,7 +93,7 @@ jobs:
         run: |
           git config user.name "trading-copilot-bot"
           git config user.email "bot@trading-copilot"
-          git add data/decisions data/memory data/state || true
+          git add data/decisions data/state || true
           if ! git diff --cached --quiet; then
             git commit -m "premarket scan $(date -u +%FT%TZ)"
             git push
