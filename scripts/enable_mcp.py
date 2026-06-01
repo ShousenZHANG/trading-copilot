@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Toggle MCP servers in .claude/settings.json.
+"""Toggle MCP servers in .mcp.json.
 
 Usage:
     python scripts/enable_mcp.py                    # list all MCPs and state
@@ -58,7 +58,7 @@ def toggle(settings: dict, name: str, enable: bool) -> str:
 def main() -> int:
     path = settings_path()
     if not path.exists():
-        print(f"Error: settings.json not found at {path}", file=sys.stderr)
+        print(f"Error: .mcp.json not found at {path}", file=sys.stderr)
         return 1
 
     with path.open("r", encoding="utf-8") as f:

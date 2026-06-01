@@ -15,6 +15,10 @@
       "Bash(git log*)",
       "Bash(git add data/**)",
       "Bash(git commit*)",
+      "Bash(python scripts/memory.py*)",
+      "Bash(python scripts/validate_outputs.py*)",
+      "Bash(python scripts/assemble_report.py*)",
+      "Bash(python scripts/check.py*)",
       "WebFetch",
       "TodoWrite"
     ],

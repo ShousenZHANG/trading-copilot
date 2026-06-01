@@ -7,11 +7,11 @@
 ```
 GitHub Actions cron (8:27am ET workdays)
   -> headless `claude -p --model sonnet "Run /scan"`
-  -> 13 subagents fan out per ticker
+  -> 12-agent staged pipeline per ticker
   -> writes data/decisions/<TICKER>-<DATE>.md + data/decisions/_scan-<DATE>.md
   -> scripts/notify.py picks high-conviction Buy/Sell, pushes Telegram
   -> dedup via data/state/pushed_alerts.json (sha256 of ticker+date+rating)
-  -> git commit data/ + push back to repo
+  -> git commit non-private decision/state artifacts + push back to repo
 
 Same pattern Sunday 6pm ET for /weekly-review (resolves T+5d entries + Opus synthesis).
 ```
@@ -87,10 +87,10 @@ Or via GitHub Actions tab in the UI.
 
 | Run | Tickers | Avg cost | Notes |
 |-----|---------|----------|-------|
-| Premarket scan | 12 watchlist | ~$3-6 | 9 Sonnet agents + 2 Opus per ticker, prompt caching reduces 60-70% |
+| Premarket scan | 12 watchlist | ~$12-36 before caching, often lower | 9 Sonnet agents + 2 Opus per ticker, prompt caching can reduce materially |
 | Weekly review | 1 portfolio review | ~$2-4 | Mostly Opus synthesis |
 
-Monthly total: ~$80-150 if you scan every workday + weekly review. Drop scan frequency to weekdays only and you're at ~$60-100.
+Monthly total can exceed $250 if you run a full deep scan across a 12-name watchlist every workday. Keep daily automation on `/advise` or a small filtered watchlist unless you explicitly accept the spend.
 
 To reduce: scan smaller watchlist, skip days when MCPs return stale data, drop debate rounds to 0 (no debate, just analyst → Trader → Risk → PM).
 
@@ -102,15 +102,14 @@ To clear: delete `data/state/pushed_alerts.json`.
 
 ## What gets committed back
 
-After each successful run, the bot commits:
+After each successful run, the bot commits non-private artifacts:
 
 - `data/decisions/<TICKER>-<DATE>.md` — full decision report
 - `data/decisions/_scan-<DATE>.md` — scan summary
 - `data/decisions/_weekly-<DATE>.md` — weekly review (Sundays only)
-- `data/memory/trading_memory.md` — append-only decision log
 - `data/state/pushed_alerts.json` — dedup state
 
-`data/positions.md` is **gitignored** — your live positions never go to the repo. Update it locally only.
+`data/positions.md`, `data/runs/`, `data/memory/trading_memory.md`, and `data/audit/` are **gitignored** personal state. Update them locally only. If you want cloud persistence for memory/reflections, use a private state backend or explicitly opt into force-adding that file in a private repository after accepting the privacy tradeoff.
 
 ## Failure modes
 

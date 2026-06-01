@@ -1,0 +1,69 @@
+[mcp_servers._alpha-vantage]
+bearer_token_env_var = "ALPHA_VANTAGE_API_KEY"
+url = "https://mcp.alphavantage.co/mcp"
+
+[mcp_servers._claude-mem]
+args = [
+    "/c",
+    "npx",
+    "-y",
+    "claude-mem",
+]
+command = "cmd"
+
+[mcp_servers._exa]
+args = [
+    "/c",
+    "npx",
+    "-y",
+    "exa-mcp-server",
+]
+command = "cmd"
+env_vars = ["EXA_API_KEY"]
+
+[mcp_servers._fred]
+args = [
+    "/c",
+    "npx",
+    "-y",
+    "fred-mcp-server",
+]
+command = "cmd"
+env_vars = ["FRED_API_KEY"]
+
+[mcp_servers._polygon]
+args = [
+    "/c",
+    "uvx",
+    "mcp_polygon",
+]
+command = "cmd"
+env_vars = ["POLYGON_API_KEY"]
+
+[mcp_servers.finnhub]
+args = [
+    "/c",
+    "uv",
+    "run",
+    "--no-project",
+    "--quiet",
+    "--script",
+    "D:/trading-copilot/mcps/finnhub_mcp.py",
+]
+command = "cmd"
+env_vars = ["FINNHUB_API_KEY"]
+
+[mcp_servers.yahoo-finance]
+args = [
+    "/c",
+    "uvx",
+    "yahoo-finance-mcp",
+]
+command = "cmd"
+
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+TRADING_COPILOT_HOME = "D:/trading-copilot"
+TRADING_COPILOT_OUTPUT_LANG = "Chinese"

@@ -96,11 +96,31 @@ Dispatch **`portfolio-manager`** (Opus tier) with:
 - `00-past-context.md`
 - `data/positions.md`
 
-It runs the pre-trade risk gate, applies past lessons, and produces `08-portfolio-decision.md`. It also appends a pending entry to `data/memory/trading_memory.md`.
+It runs the pre-trade risk gate, applies past lessons, and produces `08-portfolio-decision.md`. The orchestrator, not the Portfolio Manager, appends memory and assembles the final report after deterministic validation passes.
 
-### Step 7: Assemble final user-facing report
+### Step 7: Validate, append memory, assemble final user-facing report
 
-Write `data/decisions/<TICKER>-<DATE>.md` using this template:
+Run the deterministic validation gate before any final report or memory write:
+
+```bash
+python scripts/validate_outputs.py run data/runs/<TICKER>-<DATE>
+```
+
+If validation fails, stop and show the error. Do not append memory and do not present a final rating.
+
+After validation passes, append the Portfolio Manager decision through the hardened memory CLI (rating is parsed deterministically from the decision file):
+
+```bash
+python scripts/memory.py append --ticker <TICKER> --date <DATE> --decision-file data/runs/<TICKER>-<DATE>/08-portfolio-decision.md
+```
+
+Then assemble `data/decisions/<TICKER>-<DATE>.md` deterministically:
+
+```bash
+python scripts/assemble_report.py --ticker <TICKER> --date <DATE>
+```
+
+The assembler uses this report shape:
 
 ```markdown
 # <TICKER> 决策报告 — <DATE>
@@ -157,7 +177,7 @@ Write `data/decisions/<TICKER>-<DATE>.md` using this template:
 
 ---
 
-⚠️ **免责声明**: 本报告由 trading-copilot 多agent生成. 仅供教育研究, 非投资建议. 模型可能产生幻觉/错误/遗漏. 你对所有投资决定负全责. 详见 [DISCLAIMER.md](../../DISCLAIMER.md).
+⚠️ **免责声明**: 本报告由 trading-copilot 多 agent 生成. 仅供教育研究, 非投资建议. 模型可能产生幻觉/错误/遗漏. 你对所有投资决定负全责. 详见 [DISCLAIMER.md](../../DISCLAIMER.md).
 ```
 
 ### Step 8: Reply to user

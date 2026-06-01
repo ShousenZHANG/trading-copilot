@@ -9,6 +9,15 @@
 data/positions.md
 data/runs/
 data/memory/trading_memory.md
+data/audit/
+
+# Personal decision outputs — each run writes the user's actual analysis here.
+# Instance state, NOT shippable plugin content. Curated demos live in docs/samples/.
+data/decisions/
+
+# Release build artifacts
+dist/
+*.zip
 
 # Reference clones (cloned via git, no need to vendor)
 reference/

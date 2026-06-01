@@ -54,4 +54,4 @@ Scan the entire watchlist by running `/analyze` on each ticker.
 
 - Estimated runtime: ~2-5 min per ticker depending on MCP latency. For a 10-ticker watchlist, expect 20-50 min.
 - For long scans, write progress to `data/runs/_scan-<DATE>/progress.md` so the user can monitor.
-- **Cost guardrail**: if estimated cost > $5 (rough estimate: ~$0.50/ticker with prompt caching), prompt the user before proceeding.
+- **Cost guardrail**: if estimated cost > $5 (rough estimate: ~$1-3/ticker for full `/analyze`, lower when prompt caching is strong), prompt the user before proceeding.

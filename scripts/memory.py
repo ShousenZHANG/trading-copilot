@@ -26,31 +26,42 @@ CLI:
     python scripts/memory.py past-context --ticker NVDA [--n-same 5] [--n-cross 3]
     python scripts/memory.py resolve --ticker NVDA --date 2026-04-27 \\
         --raw 0.052 --alpha 0.018 --days 5 --reflection "..."
+
+Tests can set TRADING_COPILOT_MEMORY_PATH to isolate the log from real trading
+state.
 """
 
 from __future__ import annotations
 
 import argparse
-import io
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# Force UTF-8 on stdout/stderr so Chinese reflections survive Windows cp936.
-if hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "buffer"):
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+from runtime import force_utf8_stdio
+
+force_utf8_stdio()
 
 SEPARATOR = "\n\n<!-- ENTRY_END -->\n\n"
 DECISION_RE = re.compile(r"DECISION:\n(.*?)(?=\nREFLECTION:|\Z)", re.DOTALL)
 REFLECTION_RE = re.compile(r"REFLECTION:\n(.*?)$", re.DOTALL)
 
+# Re-exported from parse_rating.py to keep validation logic in one place.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from parse_rating import RATINGS_5_TIER, parse_rating  # noqa: E402
+from ticker import validate_ticker_component  # noqa: E402
+
+VALID_RATINGS = set(RATINGS_5_TIER)
+
 
 def memory_path() -> Path:
+    override = os.environ.get("TRADING_COPILOT_MEMORY_PATH")
+    if override:
+        return Path(override)
     return Path(__file__).resolve().parent.parent / "data" / "memory" / "trading_memory.md"
 
 
@@ -135,6 +146,7 @@ def _parse_block(raw: str) -> Optional[Entry]:
 
 def append_pending(ticker: str, date: str, rating: str, decision: str) -> None:
     """Phase A: append a pending entry. Idempotent on (date, ticker)."""
+    ticker = validate_ticker_component(ticker)
     path = memory_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -154,6 +166,7 @@ def list_pending() -> list[Entry]:
 
 def past_context(ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
     """Format recent resolved entries for injection to Portfolio Manager prompt."""
+    ticker = validate_ticker_component(ticker)
     entries = [e for e in load_entries() if not e.pending]
     if not entries:
         return ""
@@ -184,6 +197,7 @@ def resolve(ticker: str, date: str, raw: float, alpha: float, days: int, reflect
     Atomic: writes to .tmp then renames. Returns True if updated, False if no
     matching pending entry was found.
     """
+    ticker = validate_ticker_component(ticker)
     path = memory_path()
     if not path.exists():
         return False
@@ -251,7 +265,12 @@ def main() -> int:
     p = sub.add_parser("append", help="Append a pending entry")
     p.add_argument("--ticker", required=True)
     p.add_argument("--date", required=True, help="YYYY-MM-DD")
-    p.add_argument("--rating", required=True, help="Buy|Overweight|Hold|Underweight|Sell")
+    p.add_argument(
+        "--rating",
+        required=False,
+        default=None,
+        help="Buy|Overweight|Hold|Underweight|Sell. If omitted, parsed from --decision-file.",
+    )
     p.add_argument("--decision-file", required=True, help="Path to decision markdown file")
 
     p = sub.add_parser("past-context", help="Print past-context for a ticker")
@@ -283,8 +302,15 @@ def main() -> int:
 
     if args.cmd == "append":
         decision_text = Path(args.decision_file).read_text(encoding="utf-8").strip()
-        append_pending(args.ticker, args.date, args.rating, decision_text)
-        print(f"appended pending: {args.ticker} {args.date} {args.rating}")
+        rating = args.rating or parse_rating(decision_text)
+        if rating not in VALID_RATINGS:
+            print(
+                f"invalid rating '{rating}'. Expected one of {sorted(VALID_RATINGS)}.",
+                file=sys.stderr,
+            )
+            return 2
+        append_pending(args.ticker, args.date, rating, decision_text)
+        print(f"appended pending: {args.ticker} {args.date} {rating}")
         return 0
 
     if args.cmd == "past-context":

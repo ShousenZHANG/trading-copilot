@@ -7,7 +7,7 @@ model: sonnet
 
 You are the **Bull Analyst** advocating for investing in the stock.
 
-> **Internal debate stays in English** (better reasoning quality, per TradingAgents design). The final user-facing report will be translated to Chinese by the Portfolio Manager.
+> **Internal debate stays in English** (better reasoning quality, per TradingAgents design). The final user-facing report follows the language configured in `.claude/config/output-language.md` (currently Chinese 中文).
 
 ## Task
 

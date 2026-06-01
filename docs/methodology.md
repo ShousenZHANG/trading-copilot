@@ -22,12 +22,12 @@
 
 ---
 
-## Pipeline (12 steps)
+## Pipeline (staged execution)
 
 ```
 0.  Setup (resolve ticker, load past_context, read positions)
 
-ANALYSTS (sequential)
+ANALYSTS (parallel fan-out)
 1.  market-analyst              -> 01-market.md       [Sonnet]
 2.  social-analyst              -> 02-social.md       [Sonnet]
 3.  news-analyst                -> 03-news.md         [Sonnet]
@@ -49,17 +49,19 @@ RISK DEBATE (3-way, 1+ rounds)
     (loop steps 9-11 for max_risk_rounds × 3 turns)
 
 12. portfolio-manager  -> 08-portfolio-decision.md     [Opus]   PortfolioDecision
-                       -> appends pending entry to memory log
-                       -> writes user-facing decisions/<TICKER>-<DATE>.md
+13. validation gate    -> validate_outputs.py run
+14. persistence        -> memory.py append + assemble_report.py
 ```
 
 ---
 
-## Why sequential analysts (not parallel)
+## Why parallel analysts (intentional Claude Code divergence)
 
-Each analyst's prompt focuses narrowly on its domain. Sequential means the news analyst can reference what the market analyst surfaced (e.g., "this technical breakdown coincides with the earnings date next week"). LangGraph state passes through. The cost of waiting is dominated by the cost of better cross-domain synthesis.
+Upstream TradingAgents runs analysts sequentially inside LangGraph so each node can pass state to the next. Trading Copilot deliberately diverges because Claude Code subagents exchange durable markdown artifacts instead of an in-memory LangGraph state.
 
-Parallel would be ~4× faster but the analysts would each work in isolation, missing material cross-references.
+The four analyst reports are independent inputs to the Bull/Bear debate. Running them in parallel cuts wall-clock latency while preserving the synthesis point: the debate, Research Manager, Trader, risk debators, and Portfolio Manager all read the full set of reports afterward. If rate limits hit, the orchestrator falls back to serial and logs the fallback to `_errors.md`.
+
+Final persistence is deterministic: Portfolio Manager writes only `08-portfolio-decision.md`; `scripts/validate_outputs.py` validates the run; `scripts/memory.py` appends the decision log; `scripts/assemble_report.py` writes the user-facing report.
 
 ---
 
@@ -77,12 +79,12 @@ The Trader downsamples to 3 (Buy/Hold/Sell) for execution, but the Research Mana
 
 ---
 
-## Why English debate, Chinese reports
+## Why English debate, configurable reports
 
-TradingAgents finding (preserved in our `get_language_instruction`): **internal debate quality degrades** when the model is forced to reason in non-English. So:
+TradingAgents finding (preserved in our config-driven language rule): **internal debate quality degrades** when the model is forced to reason in non-English. So:
 
-- Internal Bull/Bear/Risk debate stays in English (best reasoning)
-- User-facing analyst reports + final decision in target language (we default to Chinese, configurable)
+- Internal Bull/Bear/Risk debate stays in English (best reasoning) — non-negotiable
+- User-facing analyst reports + final decision follow [.claude/config/output-language.md](../.claude/config/output-language.md) (current default: Chinese 中文; switchable to any language without touching agent prompts)
 - Tickers, indicator names, FRED series IDs, prices stay in English everywhere
 
 ---
@@ -143,12 +145,14 @@ Format:
 Past analyses of <TICKER> (most recent first):
 [2026-04-10 | NVDA | Overweight | +5.2% | +1.8% | 5d]
 DECISION: ...
-REFLECTION: 方向正确 (+5.2%, alpha+1.8%). 数据中心论点成立. 下次类似setup加大仓位.
+REFLECTION: Directional call correct (+5.2%, alpha +1.8%). Data-center thesis held. Next similar setup, size up earlier.
 
 Recent cross-ticker lessons:
 [2026-04-12 | AMD | Buy | +3.1%]
-半导体板块整体beta>1, 单一名建仓时记得check correlation.
+Semis sector-beta >1; when adding a single name, check correlation to existing book.
 ```
+
+> Historical entries written in Chinese (pre-2026-05-08) are preserved as-is in `data/memory/trading_memory.md`. New entries follow the current language config.
 
 The Portfolio Manager prompt explicitly instructs: "If past_context is provided, cite the lesson and how it informs this round."
 
@@ -176,11 +180,11 @@ Portfolio Manager enforces. Failure → automatic downgrade with explicit explan
 |-------|--------|
 | Layered LLM (Opus 2 / Sonnet 9 / Haiku 1) | 40-60% vs all-Opus |
 | Prompt caching (system prompts + tool defs) | 60-70% on repeat calls |
-| Sequential analysts (vs parallel + redundant tool fetch) | 20-30% on tools |
+| Parallel analyst fan-out | 3-4x lower wall-clock time for Step 1 |
 | Skip-recent rule in /scan (24h gate) | Variable |
 | Default 1 debate round (vs 3) | 60% on debate cost |
 
-Personal MVP cost: $0.30-0.50 per `/analyze` run. Monthly $30-100 with daily scan + weekly review.
+Personal MVP cost: roughly $1-3 per deep `/analyze` run, depending on debate rounds, enabled MCPs, and prompt-cache hit rate. `/advise` remains the cheaper daily path at roughly $0.20-0.50 per run.
 
 ---
 
