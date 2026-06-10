@@ -53,7 +53,18 @@ What to do when an MCP server fails mid-pipeline. Ordered by primary → fallbac
 
 1. **Primary**: `mcp__finnhub__get_news_sentiment`
 2. **Fallback 1**: `mcp__exa__web_search_exa` query `<ticker> reddit wallstreetbets stocktwits last 7 days`
-3. **All fail**: social-analyst marks sentiment as `unmeasured` and uses qualitative headlines only.
+3. **Fallback 2 — Reddit keyless RSS** (pattern from [mvanhorn/last30days-skill](https://github.com/mvanhorn/last30days-skill), MIT): Reddit's `.json` endpoints return HTTP 403 (shreddit anti-bot), but **RSS feeds still serve 200 with no key**. WebFetch these directly:
+   - `https://www.reddit.com/search.rss?q=<ticker>&sort=top&t=month`
+   - `https://www.reddit.com/r/wallstreetbets/search.rss?q=<ticker>&restrict_sr=on&sort=top&t=month`
+   - `https://www.reddit.com/r/stocks/top.rss?t=week` (listing sweep)
+   RSS entries carry no upvote counts — treat as qualitative discovery, not scored sentiment.
+4. **All fail**: social-analyst marks sentiment as `unmeasured` and uses qualitative headlines only.
+
+### Event probabilities (Fed / CPI / recession odds)
+
+1. **Primary**: `python scripts/polymarket_odds.py "<event query>"` — real-money market-implied odds via Polymarket Gamma API (keyless, free). E.g. `"fed decision june"`, `"CPI inflation"`, `"recession 2026"`.
+2. Cite as `market-implied P(X) = Y% (Polymarket, $<volume>)` — these are tool-sourced, NOT `[UNSOURCED]`. Always cite volume; thin markets are weak signals.
+3. Agents must PREFER these over their own subjective probabilities for any event Polymarket prices.
 
 ### Macro / FRED series
 
