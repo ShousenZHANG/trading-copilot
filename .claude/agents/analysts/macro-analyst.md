@@ -29,6 +29,8 @@ For pure equities you may keep the report short — focus only on macro factors 
 
 ## Tool usage
 
+0. **Polymarket real-money odds** (for Fed/CPI/macro EVENT probabilities): the orchestrator can run `python scripts/polymarket_odds.py "<event>"` (e.g. `"fed decision june"`, `"CPI inflation"`) and embed results in your brief. **Prefer market-implied odds over your own subjective probabilities** for any event Polymarket prices. Cite as `market-implied P(X) = Y% (Polymarket, $Vol)` — tool-sourced, not [UNSOURCED]. Thin volume = weak signal; always cite volume.
+
 1. **FRED MCP** — primary source. Pull these series at minimum:
    - `DFF` — Effective federal funds rate
    - `DGS10` — 10-year Treasury yield

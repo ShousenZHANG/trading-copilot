@@ -186,6 +186,9 @@ python scripts/validate_pm_output.py data/runs/NVDA-2026-04-27/08-portfolio-deci
 
 Anti-waffle rule: same inputs → same rating. A -1% day must not flip Buy→Hold. Only a **structural thesis-breaker** (stale data, methodology change, solvency/liquidity event, real-yields-up-AND-central-banks-stop for gold) forces a downgrade — not short-term timing noise.
 
+- [scripts/polymarket_odds.py](scripts/polymarket_odds.py) — real-money market-implied probabilities via the keyless Polymarket Gamma API (`python scripts/polymarket_odds.py "fed decision june"`). Agents must PREFER these over subjective probabilities for any event Polymarket prices; cite as `market-implied P(X) = Y% (Polymarket, $Vol)`. Pattern ported from [mvanhorn/last30days-skill](https://github.com/mvanhorn/last30days-skill) (MIT), re-implemented stdlib-only.
+- **Reddit keyless RSS fallback** — Reddit `.json` returns 403 (shreddit anti-bot) but RSS serves 200 keyless (`/search.rss?q=...`, `/r/<sub>/search.rss?...`). Documented in [docs/mcp-fallback.md](docs/mcp-fallback.md) + `social-analyst` prompt. Same upstream source.
+- **`/last30days` (global skill, optional)** — multi-source social research (Reddit/X/HN/Polymarket) installed at `~/.claude/skills/last30days`. Run `/last30days <ticker> sentiment` before `/analyze` and embed the output into the social-analyst brief for richer retail-mood data.
 - [docs/mcp-fallback.md](docs/mcp-fallback.md) — fallback playbook when MCP servers fail.
 
 ## Security + provenance guardrails (per analyst prompt)
