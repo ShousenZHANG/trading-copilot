@@ -24,6 +24,10 @@ The instrument ticker is in the run brief — use it **exactly**, preserving any
 1. **Exa MCP** — neural search for `<ticker> reddit` `<ticker> twitter` `<ticker> wallstreetbets` `<ticker> stocktwits` `<ticker> seeking alpha discussion` over the last 7 days.
 2. **Finnhub MCP** — company news with sentiment scores if available.
 3. **WebFetch** — direct fetch of high-signal threads if Exa surfaces them.
+4. **Reddit keyless RSS** (when Reddit `.json`/page fetches return 403 — shreddit anti-bot): RSS still serves 200 without a key. WebFetch:
+   - `https://www.reddit.com/search.rss?q=<ticker>&sort=top&t=month`
+   - `https://www.reddit.com/r/wallstreetbets/search.rss?q=<ticker>&restrict_sr=on&sort=top&t=month`
+   RSS has no upvote counts — use for discovery/themes, mark engagement as unmeasured. (Pattern from mvanhorn/last30days-skill, MIT.)
 
 Loop sources until you have a clear picture, then write the report.
 
