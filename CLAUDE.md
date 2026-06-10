@@ -202,10 +202,11 @@ Inspired by [`anthropic/financial-services`](https://github.com/anthropics/finan
 - [.claude/skills/trading-copilot/SKILL.md](.claude/skills/trading-copilot/SKILL.md) — pipeline methodology loaded into agent context.
 - [.claude/skills/catalyst-calendar/SKILL.md](.claude/skills/catalyst-calendar/SKILL.md) — forward-looking catalyst calendar (earnings / FOMC / CPI / RBA / regulatory). Used to flag binary-event windows. Direct port of [`equity-research/skills/catalyst-calendar`](https://github.com/anthropics/financial-services/blob/main/plugins/vertical-plugins/equity-research/skills/catalyst-calendar).
 
-## Slash commands (9)
+## Slash commands (10)
 
 | Command | Status | Use |
 |---------|--------|-----|
+| `/portfolio` | Active | Deterministic check of actual holdings (zero-LLM math; agents only on trigger). The cheap daily/weekly habit |
 | `/advise <TICKER>` | Active | Single Opus advisor (5-10 min, $0.20-0.50) |
 | `/analyze <TICKER>` | Active | Full 12-agent pipeline (30-60 min, $1-3) |
 | `/debate <TICKER>` | Active | Force multi-round Bull/Bear |
@@ -215,6 +216,8 @@ Inspired by [`anthropic/financial-services`](https://github.com/anthropics/finan
 | `/weekly-review` | Active | Sunday T+5d resolution + alpha + lessons |
 | `/earnings <TICKER>` | **Stub** | Quarterly earnings update (graduation phase) |
 | `/screen <kind>` | **Stub** | Pre-filter watchlist by quant criteria (large-watchlist phase) |
+
+`/portfolio` exit-code contract: `scripts/portfolio_check.py` returns 0 = HOLD (report, no agents), 1 = TRIGGER (dispatch advisor/PM scoped to what fired), 2 = input error. Trigger-line flags (`--ndq-50d` etc.) drift with the moving averages — refresh weekly.
 
 Stubs encode activation TODOs inline. Direct ports of [`anthropic/financial-services`](https://github.com/anthropics/financial-services) `equity-research` patterns.
 
