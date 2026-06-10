@@ -29,6 +29,7 @@ EXPECTED_COMMANDS = {
     "debate.md",
     "earnings.md",
     "gold.md",
+    "portfolio.md",
     "scan.md",
     "screen.md",
     "watchlist.md",
