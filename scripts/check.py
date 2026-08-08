@@ -35,6 +35,38 @@ EXPECTED_COMMANDS = {
     "watchlist.md",
     "weekly-review.md",
 }
+
+# Category vocabulary mirrored from the official Claude Code plugin directory
+# (anthropics/claude-plugins-official). The directory has no "finance" category,
+# so this plugin lists itself under "productivity". Update this set only after
+# re-checking the published directory — an unknown category fails submission.
+PLUGIN_CATEGORIES = {
+    "automation",
+    "database",
+    "deployment",
+    "design",
+    "development",
+    "learning",
+    "location",
+    "math",
+    "migration",
+    "monitoring",
+    "productivity",
+    "security",
+    "testing",
+}
+
+# Fields the directory listing renders; missing any of them fails submission.
+REQUIRED_PLUGIN_FIELDS = (
+    "name",
+    "version",
+    "description",
+    "displayName",
+    "category",
+    "license",
+    "homepage",
+)
+
 OPUS_AGENTS = {"research-manager", "portfolio-manager", "investment-advisor"}
 INTERNAL_DEBATE_AGENTS = {
     "bull-researcher",
@@ -86,6 +118,38 @@ def check_json(path: Path) -> None:
         json.loads(read(path))
     except json.JSONDecodeError as exc:
         err(f"{rel(path)}: JSON parse failed: {exc}")
+
+
+def check_plugin_manifest(path: Path) -> None:
+    """Validate plugin.json against the official directory's listing schema.
+
+    Supersedes a plain JSON parse check for this file: it still errors on a
+    parse failure, and additionally enforces the metadata the directory renders.
+    """
+    try:
+        manifest = json.loads(read(path))
+    except json.JSONDecodeError as exc:
+        err(f"{rel(path)}: JSON parse failed: {exc}")
+        return
+    if not isinstance(manifest, dict):
+        err(f"{rel(path)}: manifest must be a JSON object")
+        return
+
+    for field in REQUIRED_PLUGIN_FIELDS:
+        value = manifest.get(field)
+        if not isinstance(value, str) or not value.strip():
+            err(f"{rel(path)}: missing or empty required field '{field}'")
+
+    category = manifest.get("category")
+    if isinstance(category, str) and category not in PLUGIN_CATEGORIES:
+        err(
+            f"{rel(path)}: category {category!r} is outside the known directory "
+            f"vocabulary {sorted(PLUGIN_CATEGORIES)}"
+        )
+
+    keywords = manifest.get("keywords")
+    if not isinstance(keywords, list) or not keywords:
+        warn(f"{rel(path)}: keywords are empty; the directory listing will show no tags")
 
 
 def check_commands() -> None:
@@ -194,7 +258,7 @@ def check_private_state_not_tracked() -> None:
 
 
 def main() -> int:
-    check_json(ROOT / ".claude-plugin" / "plugin.json")
+    check_plugin_manifest(ROOT / ".claude-plugin" / "plugin.json")
     check_json(ROOT / ".mcp.json")
     check_json(ROOT / ".claude" / "settings.json")
     check_commands()

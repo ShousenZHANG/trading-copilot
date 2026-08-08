@@ -60,6 +60,12 @@ Single source of truth: [.claude/config/output-language.md](.claude/config/outpu
 - **User-facing reports** (analyst reports, RM rationale, Trader reasoning, PM thesis, final decision): follows `output-language.md` (current: **Chinese 中文**).
 - **Always preserve in English regardless of report language**: ticker symbols (incl. exchange suffixes `.HK` `.T` `.AX` `=F` `=X`), indicator names (RSI/MACD/ATR), price numbers, FRED series IDs.
 
+**Report style — 结论卡先行 + 白话层** (also in `output-language.md`; applies ONLY to the three artifacts a human reads: PM decision, `/advise` output, assembled report — analyst reports keep their density for downstream agents):
+- **结论卡** opens every terminal report: bold plain-Chinese action + one why-clause, then a ≤12-line table (现在做什么 / 什么时候再看 / 最大风险 / 和上次比变了什么).
+- **白话层**: jargon gets a short parenthetical gloss on FIRST use only — "NVDA 看穿浓度 (通过 ETF 间接持有的 NVDA 占比)".
+- **无废话**: no filler openers, no hedge stacks — but keep **normal full sentences**. This is not caveman fragment style; it is a report a human reads.
+- **Parser safety (hard)**: the card must never contain an English rating word (`Buy`/`Hold`/…) — `parse_rating.py` falls back to "first rating word anywhere in the file" and a stray word would log the wrong rating to memory. `**Rating**` / `**Executive Summary**` / `**Investment Thesis**` stay verbatim at column 0. `assemble_report.py --self-test` covers the extraction, including the fallback for pre-card runs.
+
 ## Memory log — append-only, never edit by hand
 
 `data/memory/trading_memory.md` is gitignored, append-only, managed by `scripts/memory.py` and the slash commands.
@@ -84,7 +90,7 @@ Only `scripts/memory.py` should mutate `data/memory/trading_memory.md`. Portfoli
 
 Configured in [.mcp.json](.mcp.json). **Only servers without `_` prefix are active.** All others ship disabled.
 
-Currently active: `yahoo-finance`, `finnhub`. Disabled-by-default: `_polygon`, `_alpha-vantage`, `_fred`, `_gold`, `_exa`, `_claude-mem`.
+Currently active: `yahoo-finance`, `finnhub`. Disabled-by-default: `_polygon`, `_alpha-vantage`, `_fred`, `_gold`, `_exa`, `_claude-mem`, `_akshare`, `_tushare`.
 
 Toggle:
 ```bash
@@ -94,6 +100,8 @@ python scripts/enable_mcp.py polygon --disable
 ```
 
 **Custom Finnhub MCP** at [mcps/finnhub_mcp.py](mcps/finnhub_mcp.py) — replaces the broken npm `finnhub-mcp` (Windows path bug). Run via `uv run --no-project --quiet --script`. Don't replace with the npm version.
+
+**AkShare MCP** at [mcps/akshare_mcp.py](mcps/akshare_mcp.py) — A-share / HK / index coverage (`.SS` `.SZ` `.HK`), **keyless**. Same single-file `uv run --script` shape as finnhub. Ships disabled (`_akshare`) because of the extra dep + slow first import; enable with `python scripts/enable_mcp.py akshare`. Yahoo/Finnhub coverage of `.SS`/`.SZ` is thin-to-absent — that is "not covered", not "nothing happened".
 
 API keys live in `.env` (gitignored). On Windows, launch via [scripts/start.ps1](scripts/start.ps1) so it loads `.env` into the PowerShell session before invoking `claude` (MCPs read keys via `${VAR}` substitution in `.mcp.json`).
 
@@ -176,6 +184,9 @@ python scripts/validate_pm_output.py data/runs/NVDA-2026-04-27/08-portfolio-deci
 - [scripts/check.py](scripts/check.py) — repository health check for manifests, command/agent prompt drift, model tiers, private-state tracking, and workflow guardrails. Inspired by [`anthropic/financial-services/scripts/check.py`](https://github.com/anthropics/financial-services/blob/main/scripts/check.py).
 - [scripts/ticker.py](scripts/ticker.py) — ticker validation (rejects path-injection / Windows reserved names / unsafe chars).
 - [scripts/runtime.py](scripts/runtime.py) — UTF-8 stdio reconfiguration via `reconfigure` (safe across re-imports).
+- [evals/stockbench/backtest_engine.py](evals/stockbench/backtest_engine.py) — the backtest the ecosystem doesn't have (upstream TradingAgents, TradingAgents-CN, FinRobot and PanWatch all ship without one). Stdlib-only, `--self-test`. Pattern from [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund) (MIT) + [microsoft/qlib](https://github.com/microsoft/qlib) metric math (MIT). Two correctness details that are easy to get wrong and are deliberately tested: **edge-triggered arming** (a ticker is disarmed after entry until conviction falls back below threshold — otherwise a persistently bullish stream opens overlapping duplicate positions) and the **tail-data guard** (a signal without `holding_days` bars remaining is recorded in `result.skipped`, never silently dropped). Prices come from an injected `PriceSource`; `JsonPriceSource` is the offline deterministic default, `YFinancePriceSource` lazy-imports. Drive it via `evals/stockbench/runner.py --replay`, which backtests decisions **already paid for** (`08-portfolio-decision.md` → `parse_rating` → conviction) at zero new token cost.
+- [scripts/trigger_state.py](scripts/trigger_state.py) — trigger dedup for `/portfolio`. `filter_new_triggers(fired, state, now, ttl)` is pure with an **injected clock** (only the CLI reads the real time), so it stays unit-testable. Dedup key is the semantic kind, never the formatted message — prices are embedded in trigger text and would defeat dedup entirely.
+- [scripts/benchmarks.py](scripts/benchmarks.py) — region-aware alpha benchmarks (`.AX→^AXJO`, `.HK→^HSI`, `.T→^N225`, `.SS→000001.SS`, …; bare US tickers keep `SPY`). Fixes a real correctness bug: T+5d alpha was computed against SPY for **every** ticker, so alpha on an ASX holding was alpha plus an unhedged market/FX mismatch. `is_alpha_meaningful()` returns False for commodities/FX/indices — quote raw return there instead.
 - [scripts/montecarlo.py](scripts/montecarlo.py) — Geometric Brownian Motion Monte Carlo price-path simulator. Replaces hand-waved point probabilities ("~60% lower") with a real terminal-price distribution from a stochastic model (Brownian motion / Wiener process — the same physics behind Black-Scholes; Monte Carlo from the Manhattan Project). Deterministic (fixed seed → anti-waffle). Drift is a supplied ASSUMPTION, not a forecast — the tool quantifies uncertainty, it does not remove it. Use to sanity-check whether a "wait for a dip" view is supported by the distribution (usually it shows ~50/50, confirming DCA over timing).
 
 ## Decision modes (investment-advisor)
@@ -220,7 +231,7 @@ Inspired by [`anthropic/financial-services`](https://github.com/anthropics/finan
 | `/earnings <TICKER>` | **Stub** | Quarterly earnings update (graduation phase) |
 | `/screen <kind>` | **Stub** | Pre-filter watchlist by quant criteria (large-watchlist phase) |
 
-`/portfolio` exit-code contract: `scripts/portfolio_check.py` returns 0 = HOLD (report, no agents), 1 = TRIGGER (dispatch advisor/PM scoped to what fired), 2 = input error. Trigger-line flags (`--ndq-50d` etc.) drift with the moving averages — refresh weekly.
+`/portfolio` exit-code contract: `scripts/portfolio_check.py` returns 0 = HOLD (report, no agents), 1 = TRIGGER (dispatch advisor/PM scoped to what fired), 2 = input error. **A trigger already dispatched within `--state-ttl-hours` (default 24) is suppressed and exits 0** — that is the cost saved; state in `data/portfolio_state.json` (gitignored), keyed by semantic trigger kind so the same breach at a new price still dedupes, and fails open on a corrupt file. Trigger-line flags (`--ndq-50d` etc.) drift with the moving averages — refresh weekly, or pass `--ndq-atr-pct` / `--ioo-atr-pct` so ATR widens any line sitting inside the daily-noise band (ATR only loosens, never tightens; omitting the flags is byte-identical to the fixed lines).
 
 Stubs encode activation TODOs inline. Direct ports of [`anthropic/financial-services`](https://github.com/anthropics/financial-services) `equity-research` patterns.
 

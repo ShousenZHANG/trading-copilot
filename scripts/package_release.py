@@ -17,6 +17,13 @@ WHAT IT NEVER SHIPS (security)
 The allow-list below is explicit: if a path is not listed, it is NOT shipped.
 This is fail-closed — safer than a deny-list for an open-source release.
 
+MCP CONFIG
+----------
+`.mcp.json` IS shipped so the unzipped folder is runnable as-is (the plugin
+manifest points at it). It may only reference secrets via `${VAR}` substitution;
+the post-build audit fails the release if any `env`/`headers` value in a shipped
+MCP config carries a literal value instead of a placeholder.
+
 USAGE
 -----
     python scripts/package_release.py            # version from plugin.json
@@ -31,8 +38,10 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import re
 import sys
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 
 try:
@@ -59,13 +68,28 @@ INCLUDE_PATHS = [
     "data/watchlist.md",
     "data/memory/README.md",
     "README.md",
+    "README_zh.md",
     "LICENSE",
     "DISCLAIMER.md",
     "CLAUDE.md",
     "CONTEXT.md",
+    ".mcp.json",
     ".mcp.json.template",
     ".env.example",
+    ".gitignore",
     ".github/workflows",
+]
+
+# Files a plugin-directory listing (and a first-run user) expects to find.
+# The build fails if any of these are absent from the finished zip.
+REQUIRED_ARTIFACT_FILES = [
+    ".claude-plugin/plugin.json",
+    "README.md",
+    "README_zh.md",
+    "LICENSE",
+    "DISCLAIMER.md",
+    ".mcp.json",
+    ".env.example",
 ]
 
 # Patterns excluded even if under an included path (defense in depth).
@@ -97,13 +121,61 @@ def _excluded(rel: str) -> bool:
     return False
 
 
-def _iter_files(base: Path):
+def _iter_files(base: Path) -> Iterator[Path]:
     if base.is_file():
         yield base
         return
     for p in sorted(base.rglob("*")):
         if p.is_file():
             yield p
+
+
+# A shipped MCP config may only carry `${VAR}` references, never literal keys.
+_PLACEHOLDER_RE = re.compile(r"\$\{[A-Za-z0-9_]+\}")
+
+
+def _hardcoded_mcp_secrets(config_text: str) -> list[str]:
+    """Return `server.field.key` paths whose value is not a ${VAR} placeholder."""
+    try:
+        config = json.loads(config_text)
+    except json.JSONDecodeError:
+        return ["<unparseable MCP config>"]
+    offenders: list[str] = []
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict):
+        return offenders
+    for server, spec in servers.items():
+        if not isinstance(spec, dict):
+            continue
+        for field in ("env", "headers"):
+            block = spec.get(field)
+            if not isinstance(block, dict):
+                continue
+            for key, value in block.items():
+                if isinstance(value, str) and value and not _PLACEHOLDER_RE.search(value):
+                    offenders.append(f"{server}.{field}.{key}")
+    return offenders
+
+
+def _audit_zip(out: Path) -> list[str]:
+    """Post-build verification: no secrets, no personal state, listing complete."""
+    problems: list[str] = []
+    with zipfile.ZipFile(out) as zf:
+        names = zf.namelist()
+        for name in names:
+            low = name.lower()
+            if low.endswith("/.env") or low.endswith("/positions.md") or "trading_memory.md" in low:
+                problems.append(name)
+            if "/data/decisions/" in low or "/data/runs/" in low:
+                problems.append(name)
+            if low.endswith(".mcp.json") or low.endswith(".mcp.json.template"):
+                text = zf.read(name).decode("utf-8", errors="replace")
+                problems += [f"{name}: hardcoded secret at {p}" for p in _hardcoded_mcp_secrets(text)]
+        present = {n.split("/", 1)[1] for n in names if "/" in n}
+        for required in REQUIRED_ARTIFACT_FILES:
+            if required not in present:
+                problems.append(f"missing required listing file: {required}")
+    return problems
 
 
 def plugin_version() -> str:

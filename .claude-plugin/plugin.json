@@ -1,7 +1,9 @@
 {
   "name": "trading-copilot",
-  "version": "0.2.4",
+  "displayName": "Trading Copilot",
+  "version": "0.3.0",
   "description": "Multi-agent trading research copilot for stocks, gold, and macro analysis. Mirrors the TradingAgents architecture as a native Claude Code plugin: 4 analysts -> Bull/Bear debate -> Trader -> 3-way Risk debate -> Portfolio Manager. Educational use only.",
+  "category": "productivity",
   "author": {
     "name": "eddy.zhang24",
     "email": "eddy.zhang24@gmail.com"
@@ -12,8 +14,15 @@
     "finance",
     "stocks",
     "gold",
+    "macro",
+    "etf",
+    "equity-research",
+    "portfolio",
+    "risk-management",
     "multi-agent",
-    "investment-research"
+    "investment-research",
+    "market-data",
+    "mcp"
   ],
   "homepage": "https://github.com/ShousenZHANG/trading-copilot",
   "repository": {

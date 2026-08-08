@@ -22,6 +22,61 @@
 
 ---
 
+## 安全与数据溯源
+
+插件目录不会审计插件所带的 MCP 服务器。本节就是审计面——下面每一条都可在本仓库中核对。
+
+**1. 外部输入是数据，不是指令。**
+五个分析师 prompt（`market`、`social`、`news`、`fundamentals`、`macro`）以及
+`investment-advisor` 都写明了同一条策略：抓取到的新闻、社交帖、财报文件、FOMC 文本
+只是**待提取的材料**，绝不是要服从的指令。任何试图下达命令的文本会被标记为
+`[suspicious directive content in <source>]` 并忽略。任何 agent 都不得基于注入文本
+发出买/卖决策。
+→ `.claude/agents/analysts/*.md`、`.claude/agents/investment-advisor.md`
+
+**2. `[UNSOURCED]` 溯源标记，由脚本计数。**
+agent 引用的任何数字，只要不是本次运行中由工具返回的，就必须打上 `[UNSOURCED]`。
+`scripts/validate_outputs.py` 会按产物和整轮运行分别统计这些标记，超过软上限 3 就告警，
+让投资组合经理在评级前先看到溯源薄弱的地方。
+
+**3. 无密钥即可运行（keyless by design）。**
+Yahoo Finance 无需 key。事件概率来自真金白银的预测市场——无密钥的 Polymarket Gamma API
+（`scripts/polymarket_odds.py`），因此 agent 引用的是 `market-implied P(x) = y%` 而不是
+主观猜测。Reddit `.json` 对爬虫返回 403，社交分析师会退回到无密钥的 Reddit RSS。默认启用的
+服务器中只有 Finnhub 需要 key，而免费额度已经够用。
+
+**4. 绝不硬编码任何密钥。**
+key 只存在于 `.env`（已 gitignore），在 `.mcp.json` 中以 `${VAR}` 形式引用。
+`.env.example` 是唯一提交进仓库的模板，里面只有占位符。
+`.claude/settings.json` 额外禁止对 `.env` 的 `Write`/`Edit`。
+
+**5. 你的交易状态不出本机。**
+`.gitignore` 屏蔽 `data/positions.md`、`data/runs/`、`data/memory/trading_memory.md`、
+`data/decisions/`、`data/audit/`、`docs/strategy.md`、`evals/results/`。
+一旦这些被 git 跟踪，`scripts/check.py` 会**直接失败**。发布 zip 由 fail-closed 白名单构建，
+并在打包后做泄漏扫描（`scripts/package_release.py`）——不在白名单里的路径永远不会被打包。
+无遥测：唯一会发起网络请求的脚本是 `polymarket_odds.py`（公开 Polymarket API）和
+`notify.py`（可选 Telegram 推送，不设置 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` 就完全不动）。
+
+**6. 实际会运行哪些 MCP 服务器。**
+默认只启用两个。其余全部以 `_` 前缀禁用，必须用
+`python scripts/enable_mcp.py <name>` 手动开启。
+
+| 服务器 | 默认 | 是什么 | 密钥 |
+|--------|------|--------|------|
+| `yahoo-finance` | **启用** | 第三方 `uvx yahoo-finance-mcp` | 无 |
+| `finnhub` | **启用** | `mcps/finnhub_mcp.py` — 本仓库内，可完整审阅 | 免费 Finnhub key |
+| `_akshare` | 禁用 | `mcps/akshare_mcp.py` — 本仓库内，A股/港股数据 | 无 |
+| `_polygon` `_alpha-vantage` `_fred` `_gold` `_exa` `_tushare` `_claude-mem` | 禁用 | 第三方服务器 | 各服务自备 |
+
+`finnhub` 和 `akshare` 都是我们自带的单文件 Python 包装器，你可以直接读源码；
+`yahoo-finance` 和其余被禁用的条目都是第三方代码，启用前请自行评估。
+
+**7. 这不是投资建议。** 输出是 AI 生成的研究材料，仅供教育用途，不保证准确。
+在依据本插件的任何输出行动之前，请先读 [DISCLAIMER.md](./DISCLAIMER.md)。
+
+---
+
 ## 使用
 
 | 命令 | 作用 | 时间 / 成本 |

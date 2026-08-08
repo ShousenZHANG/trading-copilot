@@ -4,6 +4,18 @@
 This keeps the final user-facing report deterministic: subagents write their
 own section artifacts, validators check the decision contracts, and this script
 performs the only Write to ``data/decisions/<TICKER>-<DATE>.md``.
+
+The 头条结论 section follows the 结论先行 style contract in
+``.claude/config/output-language.md``: if the Portfolio Manager wrote a
+``**结论卡**`` block, it is lifted verbatim to the top of the report so the
+reader gets a plain-language answer before any evidence. Older runs that
+predate the card still assemble — the extractor returns ``None`` and the
+dense ``Rating | Target | Horizon`` one-liner stands alone.
+
+CLI::
+
+    python scripts/assemble_report.py --ticker NVDA --date 2026-06-25
+    python scripts/assemble_report.py --self-test
 """
 
 from __future__ import annotations
@@ -48,6 +60,59 @@ def _headline(pm_text: str) -> str:
     return " | ".join(bits)
 
 
+# --- 结论卡 (conclusion card) extraction ------------------------------------
+# Contract: portfolio-manager.md emits a `**结论卡**` label line, then a bold
+# plain-Chinese action line, then a 4-row table, then the machine-parsed
+# `**Rating**:` field. Extraction stops at the first PM field label or the next
+# markdown heading, so the card can never swallow the rest of the decision.
+
+_CARD_LABEL_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?\*{0,2}\s*(?:结论卡|一句话结论)\s*\*{0,2}\s*[:：]?\s*(.*)$"
+)
+_PM_FIELD_RE = re.compile(
+    r"^\s*\*{0,2}(?:Rating|Executive Summary|Investment Thesis|Price Target|Time Horizon)"
+    r"\*{0,2}\s*[:\-]",
+    re.IGNORECASE,
+)
+_HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S")
+
+# Defensive bound: a PM that never emits a field label must not drag the whole
+# document into the headline block.
+_CARD_MAX_LINES = 20
+
+
+def _conclusion_card(pm_text: str) -> str | None:
+    """Lift the PM's 结论卡 block, or return None when the run predates it."""
+    lines = pm_text.splitlines()
+    start: int | None = None
+    inline = ""
+    for index, line in enumerate(lines):
+        match = _CARD_LABEL_RE.match(line)
+        if match:
+            start = index + 1
+            inline = match.group(1).strip()
+            break
+    if start is None:
+        return None
+
+    block: list[str] = [inline] if inline else []
+    for line in lines[start : start + _CARD_MAX_LINES]:
+        if _PM_FIELD_RE.match(line) or _HEADING_RE.match(line):
+            break
+        block.append(line.rstrip())
+    card = "\n".join(block).strip()
+    return card or None
+
+
+def _headline_block(pm_text: str) -> str:
+    """头条结论 body: plain-language card first, dense one-liner underneath."""
+    card = _conclusion_card(pm_text)
+    headline = _headline(pm_text)
+    if card is None:
+        return headline
+    return f"{card}\n\n{headline}"
+
+
 def assemble(ticker: str, date: str, run_dir: Path, out_path: Path) -> str:
     validate_ticker_component(ticker)
     result = validate_run_dir(run_dir)
@@ -83,7 +148,7 @@ def assemble(ticker: str, date: str, run_dir: Path, out_path: Path) -> str:
 
 ## 头条结论
 
-{_headline(pm)}
+{_headline_block(pm)}
 
 ## 最终结论 (Portfolio Manager)
 
@@ -150,13 +215,86 @@ def assemble(ticker: str, date: str, run_dir: Path, out_path: Path) -> str:
     return str(out_path.resolve())
 
 
+_CARD_PM = (
+    "**结论卡**\n"
+    "\n"
+    "**继续持有, 不动.** 三条预设触发线一条都没碰到.\n"
+    "\n"
+    "| 项 | 内容 |\n"
+    "|----|------|\n"
+    "| 现在做什么 | 不动 |\n"
+    "| 什么时候再看 | 2026-08-14 财报后 |\n"
+    "| 最大风险是什么 | 看穿浓度 8.7%, 超 5% 上限 |\n"
+    "| 这次和上次比变了什么 | 浓度 8.1% -> 8.7% |\n"
+    "\n"
+    "**Rating**: Hold\n"
+    "\n"
+    "**Executive Summary**: 维持仓位.\n"
+    "\n"
+    "**Investment Thesis**: 证据均衡.\n"
+    "\n"
+    "**Time Horizon**: 3-6 months\n"
+)
+_LEGACY_PM = (
+    "**Rating**: Hold\n\n"
+    "**Executive Summary**: 维持仓位.\n\n"
+    "**Investment Thesis**: 证据均衡.\n\n"
+    "**Time Horizon**: 3-6 months\n"
+)
+
+
+def _self_test() -> int:
+    """Deterministic built-in cases for the 结论卡 extraction path."""
+    runaway = "**结论卡**\n" + "\n".join(f"line {i}" for i in range(60))
+    cases: list[tuple[str, str, bool]] = [
+        # (label, pm_text, expect_card)
+        ("new template with card", _CARD_PM, True),
+        ("legacy run without card", _LEGACY_PM, False),
+        ("heading-style card label", "## 结论卡\n不动.\n\n**Rating**: Hold\n", True),
+        ("inline card label", "**一句话结论**: 不动.\n\n**Rating**: Hold\n", True),
+        ("empty card falls back", "**结论卡**\n\n**Rating**: Hold\n", False),
+        ("runaway card is bounded", runaway, True),
+    ]
+    failures = 0
+    for label, text, expect_card in cases:
+        card = _conclusion_card(text)
+        got = card is not None
+        ok = got == expect_card
+        failures += not ok
+        print(f"  {'ok ' if ok else 'XX '} {label}: card={'yes' if got else 'no'} "
+              f"(expected {'yes' if expect_card else 'no'})")
+
+    checks: list[tuple[str, bool]] = [
+        ("card stops before **Rating**", "**Rating**" not in (_conclusion_card(_CARD_PM) or "")),
+        ("card keeps the action line", "继续持有" in (_conclusion_card(_CARD_PM) or "")),
+        ("card keeps all 4 table rows", (_conclusion_card(_CARD_PM) or "").count("| 现在做什么") == 1),
+        ("headline survives with card", "Rating: Hold" in _headline_block(_CARD_PM)),
+        ("headline survives without card", _headline_block(_LEGACY_PM) == _headline(_LEGACY_PM)),
+        ("runaway bounded to 20 lines", len((_conclusion_card(runaway) or "").splitlines()) <= 20),
+        ("extraction is idempotent", _conclusion_card(_CARD_PM) == _conclusion_card(_CARD_PM)),
+    ]
+    for label, ok in checks:
+        failures += not ok
+        print(f"  {'ok ' if ok else 'XX '} {label}")
+
+    total = len(cases) + len(checks)
+    print(f"\n{total - failures}/{total} assemble_report unit tests passed.")
+    return 1 if failures else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Assemble a Trading Copilot final report")
-    parser.add_argument("--ticker", required=True)
-    parser.add_argument("--date", required=True, help="YYYY-MM-DD")
+    parser.add_argument("--ticker")
+    parser.add_argument("--date", help="YYYY-MM-DD")
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--out", default=None)
+    parser.add_argument("--self-test", action="store_true", help="run built-in unit tests")
     args = parser.parse_args()
+
+    if args.self_test:
+        return _self_test()
+    if not args.ticker or not args.date:
+        parser.error("--ticker and --date are required (or pass --self-test)")
 
     ticker = validate_ticker_component(args.ticker)
     run_dir = Path(args.run_dir) if args.run_dir else ROOT / "data" / "runs" / f"{ticker}-{args.date}"
