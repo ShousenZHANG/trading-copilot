@@ -1,0 +1,150 @@
+name: CI
+
+# Every script in this repo is stdlib-only and self-testing. CI's job is to
+# prove that on a clean machine, on every supported Python, before a commit
+# becomes a directory-pinned release sha.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Byte-compile every module
+        run: python -m compileall -q scripts evals mcps
+
+      - name: Repo health check
+        run: python scripts/check.py
+
+      - name: Self-tests (auto-discovered)
+        run: |
+          set -euo pipefail
+          # Any module exposing --self-test is picked up automatically, so a new
+          # module cannot silently ship without CI coverage.
+          # -e is required: a bare '--self-test' pattern would be parsed as a
+          # grep option, and using '--' to stop parsing swallows --include.
+          mapfile -t modules < <(
+            grep -rl --include='*.py' -e '--self-test' scripts evals mcps | sort
+          )
+          if [ ${#modules[@]} -eq 0 ]; then
+            echo "::error::no self-testing modules found — discovery is broken"
+            exit 1
+          fi
+          echo "Discovered ${#modules[@]} self-testing module(s):"
+          printf '  %s\n' "${modules[@]}"
+          echo
+          failed=0
+          for module in "${modules[@]}"; do
+            echo "::group::$module --self-test"
+            if python "$module" --self-test; then
+              echo "PASS $module"
+            else
+              echo "::error file=$module::self-test failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$failed"
+
+      - name: Integration test suites
+        run: |
+          python scripts/_test_memory.py
+          python scripts/_test_validation.py
+
+      - name: Manifests parse
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for name in (".mcp.json", ".mcp.json.template",
+                       ".claude-plugin/plugin.json", ".claude/settings.json"):
+              json.loads(Path(name).read_text(encoding="utf-8"))
+              print(f"ok  {name}")
+          PY
+
+  lint:
+    name: lint (critical errors only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install ruff
+      # Deliberately the pyflakes critical subset: undefined names, broken
+      # f-strings, syntax errors. Real bugs, no style churn — a formatter
+      # disagreement must never block a release.
+      - run: ruff check --select E9,F63,F7,F82 --output-format github scripts evals mcps
+
+  release-package:
+    name: release zip builds + leak check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # package_release.py is allow-list based: a new module can be silently
+      # omitted from the zip. Build it on every push and assert the payload.
+      - name: Build release zip
+        run: python scripts/package_release.py
+
+      - name: Assert shipped payload
+        run: |
+          python - <<'PY'
+          import sys, zipfile
+          from pathlib import Path
+
+          zips = sorted(Path("dist").glob("trading-copilot-*.zip"))
+          if not zips:
+              sys.exit("no release zip produced")
+          names = set(zipfile.ZipFile(zips[-1]).namelist())
+
+          required = [
+              "scripts/portfolio_check.py", "scripts/trigger_state.py",
+              "scripts/benchmarks.py", "scripts/memory.py",
+              "scripts/parse_rating.py", "scripts/assemble_report.py",
+              "evals/scorer.py", "evals/stockbench/backtest_engine.py",
+              "mcps/finnhub_mcp.py", "mcps/akshare_mcp.py",
+              ".claude-plugin/plugin.json", "README.md", "DISCLAIMER.md",
+          ]
+          missing = [r for r in required
+                     if not any(n.endswith(r) for n in names)]
+          if missing:
+              sys.exit("missing from release zip: " + ", ".join(missing))
+
+          # Belt and braces: package_release.py runs its own leak check, but a
+          # regression there must not quietly ship personal state.
+          leaked = [n for n in names
+                    if "positions.md" in n or "trading_memory" in n
+                    or n.endswith(".env") or "/data/runs/" in n
+                    or "/data/decisions/" in n or "portfolio_state.json" in n]
+          if leaked:
+              sys.exit("personal state leaked into zip: " + ", ".join(leaked))
+
+          print(f"ok  {zips[-1].name}: {len(names)} entries, payload complete, no leaks")
+          PY
