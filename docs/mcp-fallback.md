@@ -73,6 +73,21 @@ What to do when an MCP server fails mid-pipeline. Ordered by primary → fallbac
 3. **Fallback 2**: `mcp__exa__web_search_exa` query `current <metric> rate fed`
 4. **All fail**: macro-analyst flags `<series> data unavailable` and reasons from last-known reading + commentary.
 
+### A-share / HK / index data (`.SS` `.SZ` `.BJ` `.HK`)
+
+Finnhub and Yahoo Finance coverage of mainland-China listings is **thin-to-absent**. A `[]` or `{}` from those vendors for `600519.SS` means *not covered*, not *nothing happened* — do not read it as "no data exists". Fall through the chain below before concluding anything.
+
+1. **Primary — AkShare (keyless)**: `mcp___akshare__get_cn_quote` / `get_cn_history` / `get_hk_quote` / `get_index_quote`. **No API key, no registration, no token** — that is why it outranks Tushare. Ships disabled (extra deps + slow first import); enable with `python scripts/enable_mcp.py akshare`. Source: [mcps/akshare_mcp.py](../mcps/akshare_mcp.py). Symbols: `600519.SS`, `000001.SZ`, `430047.BJ`, `00700.HK`, `000001.SH` (index).
+2. **Fallback 1 — Tushare** (`mcp___tushare__*`): hosted streamable-HTTP MCP, config-only in `.mcp.json`. Requires `TUSHARE_TOKEN` and burns a points quota, so it sits *below* AkShare. Enable with `python scripts/enable_mcp.py tushare`.
+3. **Fallback 2 — BaoStock**: keyless Python library (`pip install baostock`), A-share daily/weekly bars back to 1990. Not wired as an MCP here — reach for it only if both of the above are down and the run genuinely needs deep CN history.
+4. **Fallback 3 — WebFetch**: `https://quote.eastmoney.com/<sh600519|sz000001>.html`, or `https://finance.yahoo.com/quote/600519.SS` (often stale/partial for CN names — treat as last resort and label the source).
+5. **All fail**: report `A-share data not available — <symbol> uncertain`. Per the stale-data rule below, the Portfolio Manager data-freshness gate downgrades automatically. Do NOT substitute a US-listed ADR price for the local line and present it as the same instrument.
+
+Notes for analysts:
+- Every AkShare tool returns `{"error": "..."}` on upstream failure instead of raising — that is your signal to step down the chain, not to abort the run.
+- `get_cn_history` returns `last_bar_date` + `bar_count`. Run the >7-day staleness check against `last_bar_date` exactly as `market-analyst` does for Yahoo. Default period is `3mo` (tactical); never request `1y`/`2y` for a tactical view.
+- Prices are CNY (A-share) / HKD (HK). Never mix them into a USD portfolio total without an explicit FX conversion, and cite the FX source.
+
 ### Gold spot price
 
 1. **Primary**: `mcp__yahoo-finance__get_stock_info` ticker `GC=F` (futures) or `XAUUSD=X` (spot)

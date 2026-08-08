@@ -1,5 +1,5 @@
 {
-  "_doc": "Template showing all 8 supported MCP servers. Copy entries you want into .mcp.json. Restart Claude Code after editing.",
+  "_doc": "Template showing all 10 supported MCP servers. Copy entries you want into .mcp.json. Restart Claude Code after editing.",
   "_setup_links": "See docs/mcp-setup.md for signup links and free-tier limits.",
 
   "mcpServers": {
@@ -60,6 +60,19 @@
       "_doc": "Cross-session memory. Free local SQLite + Chroma. Skip if you already have claude-mem at user level.",
       "command": "npx",
       "args": ["-y", "claude-mem"]
+    },
+    "akshare": {
+      "_doc": "A-share / HK / index data. NO API KEY, no registration. Fills the .SS/.SZ gap Finnhub and Yahoo do not cover. Local Python wrapper, PEP 723 deps provisioned by uv. Ships disabled as _akshare (extra deps + slow first import).",
+      "command": "cmd",
+      "args": ["/c", "uv", "run", "--no-project", "--quiet", "--script", "D:/trading-copilot/mcps/akshare_mcp.py"]
+    },
+    "tushare": {
+      "_doc": "Tushare Pro hosted MCP (streamable HTTP). Only if AkShare is insufficient - needs a token and a points quota. Get one at https://tushare.pro/register",
+      "type": "http",
+      "url": "https://mcp.tushare.pro/mcp",
+      "headers": {
+        "X-Tushare-Token": "${TUSHARE_TOKEN}"
+      }
     }
   }
 }

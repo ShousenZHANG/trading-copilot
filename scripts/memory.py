@@ -13,6 +13,7 @@ Format:
 
 After T+5d resolution:
     [YYYY-MM-DD | TICKER | RATING | +X.X% | +Y.Y% | Nd]
+    BENCHMARK: ^AXJO (exchange suffix .AX)
     DECISION:
     <unchanged>
     REFLECTION:
@@ -20,12 +21,19 @@ After T+5d resolution:
 
     <!-- ENTRY_END -->
 
+The 6-field header shape is frozen — legacy entries must keep parsing. The
+benchmark alpha was measured against is therefore recorded as a labelled
+``BENCHMARK:`` field in the entry BODY, between the tag and ``DECISION:``.
+Entries written before this field existed simply have ``benchmark=None``; they
+were all resolved against SPY regardless of listing venue, which is only correct
+for US names (see scripts/benchmarks.py).
+
 CLI:
     python scripts/memory.py list-pending
     python scripts/memory.py append --ticker NVDA --date 2026-04-27 --rating Buy --decision-file path/to/decision.md
     python scripts/memory.py past-context --ticker NVDA [--n-same 5] [--n-cross 3]
     python scripts/memory.py resolve --ticker NVDA --date 2026-04-27 \\
-        --raw 0.052 --alpha 0.018 --days 5 --reflection "..."
+        --raw 0.052 --alpha 0.018 --days 5 --reflection "..." [--benchmark ^AXJO]
 
 Tests can set TRADING_COPILOT_MEMORY_PATH to isolate the log from real trading
 state.
@@ -49,9 +57,11 @@ force_utf8_stdio()
 SEPARATOR = "\n\n<!-- ENTRY_END -->\n\n"
 DECISION_RE = re.compile(r"DECISION:\n(.*?)(?=\nREFLECTION:|\Z)", re.DOTALL)
 REFLECTION_RE = re.compile(r"REFLECTION:\n(.*?)$", re.DOTALL)
+BENCHMARK_RE = re.compile(r"^BENCHMARK:\s*(\S+)", re.MULTILINE)
 
 # Re-exported from parse_rating.py to keep validation logic in one place.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from benchmarks import resolve_benchmark  # noqa: E402
 from parse_rating import RATINGS_5_TIER, parse_rating  # noqa: E402
 from ticker import validate_ticker_component  # noqa: E402
 
@@ -76,6 +86,9 @@ class Entry:
     holding: Optional[str]
     decision: str
     reflection: str
+    # Benchmark alpha was measured against. None on legacy entries written
+    # before the field existed (those were all measured against SPY).
+    benchmark: Optional[str] = None
 
     def format_full(self) -> str:
         if self.pending:
@@ -85,7 +98,10 @@ class Entry:
             alpha = self.alpha or "n/a"
             holding = self.holding or "n/a"
             tag = f"[{self.date} | {self.ticker} | {self.rating} | {raw} | {alpha} | {holding}]"
-        parts = [tag, f"DECISION:\n{self.decision}"]
+        parts = [tag]
+        if self.benchmark:
+            parts.append(f"BENCHMARK: {self.benchmark}")
+        parts.append(f"DECISION:\n{self.decision}")
         if self.reflection:
             parts.append(f"REFLECTION:\n{self.reflection}")
         return "\n\n".join(parts)
@@ -131,6 +147,11 @@ def _parse_block(raw: str) -> Optional[Entry]:
     body = "\n".join(lines[tag_idx + 1 :]).strip()
     decision_match = DECISION_RE.search(body)
     reflection_match = REFLECTION_RE.search(body)
+    # The BENCHMARK field lives between the tag and DECISION:. Search only that
+    # header slice so a "BENCHMARK:" line inside free-form decision prose cannot
+    # be mistaken for the recorded field.
+    header = body.split("DECISION:", 1)[0]
+    benchmark_match = BENCHMARK_RE.search(header)
     return Entry(
         date=fields[0],
         ticker=fields[1],
@@ -141,6 +162,7 @@ def _parse_block(raw: str) -> Optional[Entry]:
         holding=fields[5] if len(fields) > 5 else None,
         decision=decision_match.group(1).strip() if decision_match else "",
         reflection=reflection_match.group(1).strip() if reflection_match else "",
+        benchmark=benchmark_match.group(1) if benchmark_match else None,
     )
 
 
@@ -191,13 +213,39 @@ def past_context(ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
     return "\n\n".join(parts)
 
 
-def resolve(ticker: str, date: str, raw: float, alpha: float, days: int, reflection: str) -> bool:
+def benchmark_line(ticker: str, benchmark: Optional[str] = None) -> str:
+    """Render the labelled BENCHMARK field stored inside a resolved entry.
+
+    Recorded so a future reader can tell what the alpha number actually means:
+    ``+1.8%`` vs ``^AXJO`` and ``+1.8%`` vs ``SPY`` are different claims.
+    """
+    if benchmark:
+        return f"BENCHMARK: {benchmark} (explicitly supplied)"
+    choice = resolve_benchmark(ticker)
+    return f"BENCHMARK: {choice.benchmark} ({choice.reason})"
+
+
+def resolve(
+    ticker: str,
+    date: str,
+    raw: float,
+    alpha: float,
+    days: int,
+    reflection: str,
+    benchmark: Optional[str] = None,
+) -> bool:
     """Phase B: replace the pending entry with resolved tag + reflection.
+
+    ``benchmark`` defaults to the region-derived benchmark for ``ticker``
+    (scripts/benchmarks.py). Alpha vs SPY is only correct for US listings — an
+    ASX or HKEX name measured against SPY mixes in an unhedged FX and market
+    mismatch, so the benchmark actually used is written into the entry body.
 
     Atomic: writes to .tmp then renames. Returns True if updated, False if no
     matching pending entry was found.
     """
     ticker = validate_ticker_component(ticker)
+    bench_field = benchmark_line(ticker, benchmark)
     path = memory_path()
     if not path.exists():
         return False
@@ -235,7 +283,9 @@ def resolve(ticker: str, date: str, raw: float, alpha: float, days: int, reflect
             new_tag = f"[{date} | {ticker} | {rating} | {raw_pct} | {alpha_pct} | {days}d]"
             preamble = "\n".join(lines[:tag_idx]).rstrip()
             rest = "\n".join(lines[tag_idx + 1 :]).lstrip()
-            updated_block = f"{new_tag}\n\n{rest}\n\nREFLECTION:\n{reflection}"
+            updated_block = (
+                f"{new_tag}\n\n{bench_field}\n\n{rest}\n\nREFLECTION:\n{reflection}"
+            )
             new_blocks.append(
                 f"{preamble}\n{updated_block}" if preamble else updated_block
             )
@@ -282,9 +332,22 @@ def main() -> int:
     p.add_argument("--ticker", required=True)
     p.add_argument("--date", required=True)
     p.add_argument("--raw", type=float, required=True, help="Raw return as decimal, e.g. 0.052 for +5.2%")
-    p.add_argument("--alpha", type=float, required=True, help="Alpha vs SPY as decimal")
+    p.add_argument(
+        "--alpha",
+        type=float,
+        required=True,
+        help="Alpha vs the region benchmark as decimal (see --benchmark)",
+    )
     p.add_argument("--days", type=int, required=True)
     p.add_argument("--reflection", required=True, help="Reflection text (2-4 sentences)")
+    p.add_argument(
+        "--benchmark",
+        default=None,
+        help=(
+            "Benchmark alpha was measured against. Omit to derive from the exchange "
+            "suffix via scripts/benchmarks.py (.AX -> ^AXJO, .HK -> ^HSI, ... else SPY)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -326,9 +389,13 @@ def main() -> int:
             args.alpha,
             args.days,
             args.reflection,
+            benchmark=args.benchmark,
         )
         if ok:
-            print(f"resolved: {args.ticker} {args.date}")
+            choice = resolve_benchmark(args.ticker)
+            used = args.benchmark or choice.benchmark
+            note = "" if choice.alpha_meaningful else " [alpha not meaningful - use raw return]"
+            print(f"resolved: {args.ticker} {args.date} (benchmark {used}){note}")
             return 0
         print(f"no pending entry found: {args.ticker} {args.date}", file=sys.stderr)
         return 1

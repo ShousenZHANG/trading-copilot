@@ -136,6 +136,29 @@ def score(answer: str, reference: str, tolerance_pct: float = 1.0) -> Verdict:
     return Verdict("fail", f"textual mismatch (overlap {overlap:.2f})", None, None, None)
 
 
+def score_batch(
+    pairs: list[tuple[str, str]], tolerance_pct: float = 1.0
+) -> dict[str, float | int]:
+    """Score many (answer, reference) pairs and aggregate the verdicts.
+
+    Returns counts per status plus ``pass_rate`` (share of *scorable* items —
+    ``no-reference`` rows are excluded from the denominator, because a missing
+    ground truth is a dataset defect, not a model failure). ``hallucination``
+    is reported separately from ``fail``: a confidently wrong number is the
+    dangerous failure mode, and averaging it into a pass rate hides it.
+    """
+    counts = {"pass": 0, "fail": 0, "hallucination": 0, "no-reference": 0}
+    for answer, reference in pairs:
+        counts[score(answer, reference, tolerance_pct).status] += 1
+    scorable = counts["pass"] + counts["fail"] + counts["hallucination"]
+    return {
+        **counts,
+        "total": len(pairs),
+        "scorable": scorable,
+        "pass_rate": round(counts["pass"] / scorable, 4) if scorable else 0.0,
+    }
+
+
 # --------------------------------------------------------------------------
 # Built-in unit tests (deterministic). Run: python evals/scorer.py --self-test
 # --------------------------------------------------------------------------
@@ -165,6 +188,32 @@ def _self_test() -> int:
         print(f"  {flag} score({ans!r}, {ref!r}, {tol}) -> {v.status} "
               f"(expected {expected}) [{v.detail}]")
     total = len(cases)
+
+    # score_batch aggregation (deterministic).
+    batch = score_batch(
+        [
+            ("$383.3 billion", "$383.285 billion"),  # pass
+            ("$400 billion", "$383.285 billion"),    # fail
+            ("$50 billion", "$383.285 billion"),     # hallucination
+            ("anything", ""),                        # no-reference (excluded)
+        ],
+        0.5,
+    )
+    batch_cases = [
+        ("batch counts each status",
+         (batch["pass"], batch["fail"], batch["hallucination"], batch["no-reference"])
+         == (1, 1, 1, 1)),
+        ("batch excludes no-reference from denominator",
+         batch["scorable"] == 3 and batch["total"] == 4),
+        ("batch pass_rate", abs(float(batch["pass_rate"]) - 1 / 3) < 1e-4),
+        ("empty batch does not divide by zero",
+         score_batch([], 0.5)["pass_rate"] == 0.0),
+    ]
+    for name, ok in batch_cases:
+        passed += ok
+        total += 1
+        print(f"  {'ok ' if ok else 'XX '} {name}")
+
     print(f"\n{passed}/{total} scorer unit tests passed.")
     return 0 if passed == total else 1
 

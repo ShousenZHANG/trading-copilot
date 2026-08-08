@@ -50,6 +50,19 @@
     "_claude-mem": {
       "command": "cmd",
       "args": ["/c", "npx", "-y", "claude-mem"]
+    },
+    "_akshare": {
+      "_doc": "Custom thin Python MCP wrapping AkShare for A-share / HK / index data. NO API KEY. Disabled by default: extra deps + slow first import (uv provisions akshare+pandas on first run). Source: mcps/akshare_mcp.py. Enable: python scripts/enable_mcp.py akshare",
+      "command": "cmd",
+      "args": ["/c", "uv", "run", "--no-project", "--quiet", "--script", "D:/trading-copilot/mcps/akshare_mcp.py"]
+    },
+    "_tushare": {
+      "_doc": "Tushare Pro hosted MCP (streamable HTTP). Fallback below AkShare because it requires a token and gates endpoints behind a points quota. Config only - no code in this repo.",
+      "type": "http",
+      "url": "https://mcp.tushare.pro/mcp",
+      "headers": {
+        "X-Tushare-Token": "${TUSHARE_TOKEN}"
+      }
     }
   }
 }

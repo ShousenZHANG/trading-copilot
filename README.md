@@ -22,6 +22,68 @@ That's it. No install scripts, no dependencies beyond Claude Code + Python 3.
 
 ---
 
+## Security & data provenance
+
+Plugin directories do not vet the MCP servers a plugin ships. This section is the
+audit surface — every claim below is checkable in this repo.
+
+**1. Untrusted input is data, never instructions.**
+All five analyst prompts (`market`, `social`, `news`, `fundamentals`, `macro`) and
+`investment-advisor` carry an explicit policy: fetched news, social posts, filings,
+and FOMC text are material **to extract from**, never directives to obey. A prompt
+that tries to issue orders gets tagged `[suspicious directive content in <source>]`
+and ignored. No agent may originate a buy/sell call from injected text.
+→ `.claude/agents/analysts/*.md`, `.claude/agents/investment-advisor.md`
+
+**2. `[UNSOURCED]` provenance tagging, machine-counted.**
+Any number an agent cites that did **not** come from a tool result in that run must
+be tagged `[UNSOURCED]`. `scripts/validate_outputs.py` counts the markers per
+artifact and across the whole run, and warns past a soft cap of 3 so weak provenance
+is visible to the Portfolio Manager before it rates anything.
+
+**3. Keyless by design — it works with zero paid keys.**
+Yahoo Finance needs no key. Event probabilities come from real-money markets via the
+keyless Polymarket Gamma API (`scripts/polymarket_odds.py`), so agents cite
+`market-implied P(x) = y%` instead of guessing. Reddit `.json` returns 403 to
+bots, so the social analyst falls back to keyless Reddit RSS. Finnhub is the only
+default server wanting a key, and its free tier is enough.
+
+**4. No hardcoded secrets, anywhere.**
+Keys live only in `.env` (gitignored) and are referenced as `${VAR}` inside
+`.mcp.json`. `.env.example` is the sole committed template and holds placeholders.
+`.claude/settings.json` additionally denies `Write`/`Edit` on `.env`.
+
+**5. Your trading state never leaves your machine.**
+`.gitignore` blocks `data/positions.md`, `data/runs/`, `data/memory/trading_memory.md`,
+`data/decisions/`, `data/audit/`, `docs/strategy.md`, and `evals/results/`.
+`scripts/check.py` **fails** if any of it becomes git-tracked. The release zip is
+built from a fail-closed allow-list plus a post-build leak scan
+(`scripts/package_release.py`) — unlisted paths are never shipped.
+No telemetry: the only scripts that talk to the network are `polymarket_odds.py`
+(public Polymarket API) and `notify.py` (opt-in Telegram push, inert unless you set
+`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`).
+
+**6. Which MCP servers actually run.**
+Only two ship enabled. Everything else is disabled behind a `_` name prefix and must
+be turned on deliberately with `python scripts/enable_mcp.py <name>`.
+
+| Server | Default | What it is | Key |
+|--------|---------|-----------|-----|
+| `yahoo-finance` | **enabled** | third-party `uvx yahoo-finance-mcp` | none |
+| `finnhub` | **enabled** | `mcps/finnhub_mcp.py` — in this repo, readable in full | free Finnhub key |
+| `_akshare` | disabled | `mcps/akshare_mcp.py` — in this repo, A-share/HK data | none |
+| `_polygon` `_alpha-vantage` `_fred` `_gold` `_exa` `_tushare` `_claude-mem` | disabled | third-party servers | per-service |
+
+`finnhub` and `akshare` are single-file Python wrappers we ship and you can read;
+`yahoo-finance` and the remaining disabled entries are third-party code you should
+evaluate yourself before enabling.
+
+**7. It is not advice.** Outputs are AI-generated research for education only, with
+no guarantee of accuracy. Read [DISCLAIMER.md](./DISCLAIMER.md) before acting on
+anything this plugin prints.
+
+---
+
 ## Use it
 
 | Command | What it does | Time / cost |

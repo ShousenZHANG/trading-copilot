@@ -105,3 +105,38 @@ If `check.py` prints `OK` and `/advise` returns a rated report, you are good.
 - **`data/positions.md`** — your holdings (gitignored; create from scratch).
 
 See [README.md](../README.md) for the command table and pipeline diagram.
+
+---
+
+## Submitting to the official plugin directory (maintainers)
+
+[`anthropics/claude-plugins-official`](https://github.com/anthropics/claude-plugins-official)
+is the Anthropic-managed directory. Submission is a **form**, not a pull
+request: <https://clau.de/plugin-directory-submission>. There is no
+`CONTRIBUTING.md` and no review thread you can iterate in.
+
+Three properties make this a one-shot action — land everything first:
+
+| Property | Consequence |
+|----------|-------------|
+| The plugin **name is immutable** once listed | `trading-copilot` is permanent. Decide before submitting. |
+| Listings **pin an exact commit sha** | A bug fix does not propagate; it needs a re-submission / re-pin. |
+| Anthropic **does not vet MCP servers** — the directory README points users at each plugin's homepage instead | Our `README.md` is the de-facto security-review surface. Keep the "Security & data provenance" section accurate. |
+
+### Pre-submission checklist
+
+- [ ] `python scripts/check.py` prints `OK` (it now also validates that
+      `plugin.json` carries `displayName` and a known `category`).
+- [ ] `.claude-plugin/plugin.json` version bumped, `displayName` + `category`
+      present, `homepage` reachable.
+- [ ] `README.md` opens with the educational-use disclaimer and carries the
+      security/provenance section in its top third.
+- [ ] No personal state tracked: `git ls-files` shows no `data/positions.md`,
+      `data/runs/`, `data/memory/trading_memory.md`, `data/decisions/`, `.env`.
+- [ ] `python scripts/package_release.py` builds and its post-build leak check
+      passes.
+- [ ] Tag and publish a GitHub release; submit **that** commit sha.
+
+Secondary marketplaces accept submissions in parallel and are lower-stakes:
+[`davepoon/buildwithclaude`](https://github.com/davepoon/buildwithclaude),
+[`jeremylongshore/claude-code-plugins-plus-skills`](https://github.com/jeremylongshore/claude-code-plugins-plus-skills).
