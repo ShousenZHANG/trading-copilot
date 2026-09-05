@@ -77,7 +77,8 @@ INCLUDE_PATHS = [
     ".mcp.json.template",
     ".env.example",
     ".gitignore",
-    ".github/workflows",
+    # .github/ is deliberately NOT shipped: CI config is repo infrastructure, not
+    # plugin content, and a user unzipping this should not inherit our schedules.
 ]
 
 # Files a plugin-directory listing (and a first-run user) expects to find.
