@@ -50,6 +50,30 @@ Every tool returns a JSON-serialisable ``dict``. On upstream failure it returns
 ``{"error": "..."}`` instead of raising, so an analyst agent can degrade to the
 next link in the fallback chain rather than dying mid-pipeline.
 
+Freshness contract (``as_of``)
+------------------------------
+Every quote tool returns an ``as_of`` field so the repo anti-stale rule (see
+CLAUDE.md: downgrade to "data unreliable" when the last bar is >7 days old) can
+actually run on AkShare data. Most EastMoney *spot snapshot* endpoints carry no
+timestamp column at all; in that case ``as_of`` is ``null`` and ``as_of_note``
+says why. Today's date is **never** substituted — a fabricated timestamp would
+silently disarm the freshness gate, which is worse than an admitted blank.
+
+Verified against live frames (``--probe``, 2026-09-05):
+``stock_hk_spot`` carries ``日期时间`` (``2026/09/04 14:20:16``, normalised to
+ISO) plus ``中文名称`` / ``英文名称``; ``stock_zh_a_hist`` carries ``日期``;
+``stock_zh_index_spot_sina`` and the EastMoney spot tables carry **no** date, so
+those payloads are honestly blank.
+
+Known limitations (deliberate, not oversights)
+----------------------------------------------
+* ``get_cn_quote`` / ``get_cn_history`` run an EastMoney-only chain — there is
+  no Sina fallback for them, so an EastMoney outage takes both down.
+* ``get_hk_quote`` downloads the entire HK spot table (~45s) to read one row.
+
+Both are deferred on purpose: this server is a coverage backstop for names the
+maintainer does not hold, not a hot path.
+
 Usage as MCP server (.mcp.json) — ships DISABLED as ``_akshare``:
     {
       "mcpServers": {
@@ -65,7 +89,8 @@ Enable with ``python scripts/enable_mcp.py akshare``.
 
 CLI
 ---
-    python mcps/akshare_mcp.py --self-test    # deterministic symbol-parser tests
+    python mcps/akshare_mcp.py --self-test    # deterministic tests, no network
+    python mcps/akshare_mcp.py --probe        # OPT-IN live probe, hits network
     python mcps/akshare_mcp.py --help
 """
 
@@ -74,10 +99,11 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import time
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 try:
@@ -203,6 +229,7 @@ def normalise_symbol(value: str, *, default_market: str = "") -> Symbol:
 
 _FIELD_MAP = {
     "代码": "code", "股票代码": "code", "名称": "name", "简称": "name",
+    "中文名称": "name", "英文名称": "name_en",
     "最新价": "price", "最新": "price", "收盘": "close", "今开": "open",
     "开盘": "open", "最高": "high", "最低": "low", "昨收": "prev_close",
     "涨跌幅": "change_pct", "涨幅": "change_pct", "涨跌额": "change",
@@ -210,8 +237,31 @@ _FIELD_MAP = {
     "成交额": "turnover", "金额": "turnover", "换手率": "turnover_rate",
     "换手": "turnover_rate", "振幅": "amplitude", "量比": "volume_ratio",
     "市盈率-动态": "pe_ttm", "市净率": "pb", "总市值": "market_cap",
-    "流通市值": "float_market_cap", "日期": "date", "均价": "vwap",
+    "流通市值": "float_market_cap", "均价": "vwap",
+    # Date-bearing columns. Kept distinct so _as_of_from() can prefer the most
+    # precise one; 名称/中文名称 collide onto "name" harmlessly (same value).
+    "日期": "date", "日期时间": "datetime", "时间戳": "timestamp",
+    "最新交易日": "last_trade_date", "更新时间": "update_time",
+    "时间": "time", "行情时间": "quote_time", "最新行情时间": "quote_time",
 }
+
+# Priority order for deriving ``as_of``. Includes raw upstream keys (Sina's HK
+# spot table ships English column names, e.g. ``ticktime``) because _map_row
+# passes unknown columns through unchanged.
+_AS_OF_KEYS: tuple[str, ...] = (
+    "as_of", "datetime", "date", "quote_time", "update_time",
+    "last_trade_date", "ticktime", "time", "timestamp",
+)
+
+_AS_OF_NOTE = (
+    "upstream snapshot carries no timestamp column; freshness cannot be "
+    "verified from this payload — do NOT assume today"
+)
+
+_NULLISH = frozenset({"", "nan", "nat", "none", "null", "-", "--", "0"})
+
+# Sina's HK spot table ships 日期时间 as ``2026/09/04 14:20:16`` (verified live).
+_SLASH_DATE_RE = re.compile(r"^(\d{4})/(\d{2})/(\d{2})(.*)$")
 
 
 def _akshare() -> Any:
@@ -248,6 +298,50 @@ def _map_row(row: dict[str, Any]) -> dict[str, Any]:
     return {_FIELD_MAP.get(str(k), str(k)): _jsonable(v) for k, v in row.items()}
 
 
+def _normalise_as_of(value: Any) -> Optional[str]:
+    """Coerce an upstream date cell into a readable timestamp, or ``None``.
+
+    Handles the three shapes AkShare actually emits: ``YYYYMMDD`` digits, an
+    epoch (seconds or milliseconds), and an already-formatted string. Anything
+    blank / NaN-ish yields ``None`` so the caller emits an honest null.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.lower() in _NULLISH:
+        return None
+    if text.isdigit():
+        if len(text) == 8:
+            return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+        if len(text) in (10, 13):
+            seconds = int(text) / 1000 if len(text) == 13 else int(text)
+            return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+        return None  # a bare row counter / volume, not a date
+    slashed = _SLASH_DATE_RE.fullmatch(text)
+    if slashed:
+        return "-".join(slashed.group(1, 2, 3)) + slashed.group(4)
+    return text
+
+
+def _as_of_from(payload: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """Derive ``(as_of, as_of_note)`` from an already-mapped payload.
+
+    Never falls back to today's date — a fabricated timestamp would disarm the
+    anti-stale gate that this field exists to feed.
+    """
+    for key in _AS_OF_KEYS:
+        stamp = _normalise_as_of(payload.get(key))
+        if stamp:
+            return stamp, None
+    return None, _AS_OF_NOTE
+
+
+def _freshness(payload: dict[str, Any]) -> dict[str, Any]:
+    """Freshness fields to splice into a tool result (``as_of`` always present)."""
+    stamp, note = _as_of_from(payload)
+    return {"as_of": stamp} if stamp else {"as_of": None, "as_of_note": note}
+
+
 def _first_frame(chain: list[tuple[str, Callable[[], Any]]]) -> tuple[Any, str]:
     """Multi-source degradation chain: return the first non-empty DataFrame.
 
@@ -268,14 +362,37 @@ def _first_frame(chain: list[tuple[str, Callable[[], Any]]]) -> tuple[Any, str]:
     raise RuntimeError("; ".join(problems) or "no data source succeeded")
 
 
-def _filter_by_code(frame: Any, code: str) -> Any:
-    """Row-select a spot snapshot table by instrument code."""
+def _match_row_index(cells: Sequence[Any], candidates: Sequence[str]) -> Optional[int]:
+    """Positional index of the first row matching any accepted code form.
+
+    Pure and pandas-free so ``--self-test`` can cover both real frame shapes:
+    Sina index tables prefix the code (``sh000001``) while EastMoney tables use
+    the bare 6-digit form. Comparing a bare code against a prefixed frame was
+    the E4 bug — the Sina fallback could never match, so it was dead code.
+    """
+    for candidate in candidates:
+        if not candidate:
+            continue
+        for index, cell in enumerate(cells):
+            text = str(cell).strip()
+            if text == candidate or text.zfill(len(candidate)) == candidate:
+                return index
+    return None
+
+
+def _filter_by_code(frame: Any, *candidates: str) -> Any:
+    """Row-select a spot snapshot table by any accepted form of the code.
+
+    Callers pass every form they will accept (bare code first, then the
+    ``shNNNNNN`` prefixed form) rather than guessing which source answered.
+    """
     for column in ("代码", "code", "symbol"):
         if column in frame.columns:
-            hit = frame[frame[column].astype(str).str.zfill(len(code)) == code]
-            if not hit.empty:
-                return hit.iloc[0]
-    raise RuntimeError(f"code {code} not present in snapshot ({len(frame)} rows)")
+            index = _match_row_index(list(frame[column]), candidates)
+            if index is not None:
+                return frame.iloc[index]
+    accepted = "/".join(c for c in candidates if c)
+    raise RuntimeError(f"code {accepted} not present in snapshot ({len(frame)} rows)")
 
 
 _PERIOD_DAYS = {"1mo": 31, "3mo": 92, "6mo": 183, "1y": 366, "2y": 731}
@@ -302,7 +419,8 @@ def get_cn_quote(symbol: str) -> dict:
     """Real-time A-share quote. Keyless.
 
     symbol: ``600519.SS`` | ``000001.SZ`` | ``430047.BJ`` | bare ``600519``.
-    Returns price, change_pct, open/high/low, prev_close, volume, turnover.
+    Returns price, change_pct, open/high/low, prev_close, volume, turnover,
+    plus ``as_of`` (null + ``as_of_note`` when the snapshot carries no date).
     On failure returns ``{"error": ...}``.
     """
     try:
@@ -318,7 +436,8 @@ def get_cn_quote(symbol: str) -> dict:
             payload = _map_row(dict(zip(frame["item"], frame["value"])))
         else:
             payload = _map_row(_filter_by_code(frame, sym.code).to_dict())
-        return {"symbol": sym.canonical, "market": sym.market, "source": source, **payload}
+        return {"symbol": sym.canonical, "market": sym.market, "source": source,
+                **payload, **_freshness(payload)}
     except Exception as exc:
         return {"error": f"get_cn_quote({symbol!r}) failed: {exc}"}
 
@@ -344,13 +463,15 @@ def get_cn_history(symbol: str, period: str = "3mo") -> dict:
                 start_date=start, end_date=end, adjust="qfq")),
         ])
         bars = [_map_row(row) for row in frame.to_dict(orient="records")]
+        last_bar = bars[-1] if bars else {}
         return {
             "symbol": sym.canonical,
             "period": period,
             "adjust": "qfq",
             "source": source,
             "bar_count": len(bars),
-            "last_bar_date": bars[-1].get("date") if bars else None,
+            "last_bar_date": last_bar.get("date"),
+            **_freshness(last_bar),
             "bars": bars,
         }
     except Exception as exc:
@@ -362,6 +483,7 @@ def get_hk_quote(symbol: str) -> dict:
     """Real-time Hong Kong equity quote. Keyless.
 
     symbol: ``00700.HK`` | bare ``700`` (zero-padded to 5 digits).
+    Slow (~40s): the upstream endpoint only serves the whole HK spot table.
     On failure returns ``{"error": ...}``.
     """
     try:
@@ -374,7 +496,8 @@ def get_hk_quote(symbol: str) -> dict:
             ("stock_hk_spot", ak.stock_hk_spot),
         ])
         payload = _map_row(_filter_by_code(frame, sym.code).to_dict())
-        return {"symbol": sym.canonical, "market": "HK", "source": source, **payload}
+        return {"symbol": sym.canonical, "market": "HK", "source": source,
+                **payload, **_freshness(payload)}
     except Exception as exc:
         return {"error": f"get_hk_quote({symbol!r}) failed: {exc}"}
 
@@ -399,8 +522,12 @@ def get_index_quote(symbol: str) -> dict:
                 ("stock_zh_index_spot_sina", ak.stock_zh_index_spot_sina),
             ]
         frame, source = _first_frame(chain)
-        payload = _map_row(_filter_by_code(frame, sym.code).to_dict())
-        return {"symbol": sym.canonical, "kind": "index", "source": source, **payload}
+        # Both forms: EastMoney rows carry the bare code, Sina rows the
+        # ``sh000001`` prefixed form. Passing only the bare code made the Sina
+        # fallback unreachable (E4).
+        payload = _map_row(_filter_by_code(frame, sym.code, sym.prefixed).to_dict())
+        return {"symbol": sym.canonical, "kind": "index", "source": source,
+                **payload, **_freshness(payload)}
     except Exception as exc:
         return {"error": f"get_index_quote({symbol!r}) failed: {exc}"}
 
@@ -415,7 +542,8 @@ def healthcheck() -> dict:
     quote = get_cn_quote("600519.SS")
     if "error" in quote:
         return {"ok": False, "reason": quote["error"], "akshare": getattr(ak, "__version__", "?")}
-    return {"ok": True, "akshare": getattr(ak, "__version__", "?"), "probe": quote.get("price")}
+    return {"ok": True, "akshare": getattr(ak, "__version__", "?"),
+            "probe": quote.get("price"), "as_of": quote.get("as_of")}
 
 
 # ---------------------------------------------------------------------------
@@ -496,13 +624,149 @@ def _run_derived_cases() -> tuple[int, int]:
     return passed, len(cases)
 
 
+class _FakeFrame:
+    """Minimal DataFrame stand-in — just the surface ``_filter_by_code`` uses.
+
+    Lets the frame-shape regressions run with zero third-party imports, so
+    ``--self-test`` still works in the repo's stdlib-only python.
+    """
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self.rows = rows
+        self.columns = list(rows[0]) if rows else []
+
+    def __getitem__(self, column: str) -> list[Any]:
+        return [row[column] for row in self.rows]
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    @property
+    def iloc(self) -> list[dict[str, Any]]:
+        """Positional row access — a plain list is already ``[i]``-indexable."""
+        return self.rows
+
+
+def _report_cases(cases: Sequence[tuple[Any, str]]) -> tuple[int, int]:
+    """Print one line per boolean case and return ``(passed, total)``."""
+    passed = 0
+    for hit, label in cases:
+        passed += bool(hit)
+        print(f"  {'ok ' if hit else 'XX '} {label}")
+    return passed, len(cases)
+
+
+def _run_frame_cases() -> tuple[int, int]:
+    """Row-selection coverage for both real frame shapes. No pandas, no network."""
+    eastmoney = _FakeFrame([
+        {"代码": "600519", "名称": "贵州茅台", "最新价": 1500.0},
+        {"代码": "000001", "名称": "上证指数", "最新价": 3200.0},
+    ])
+    # Verified live: stock_zh_index_spot_sina really does ship 'sh000001'.
+    sina = _FakeFrame([
+        {"代码": "sh000001", "名称": "上证指数", "最新价": 3200.0},
+        {"代码": "sz399001", "名称": "深证成指", "最新价": 10000.0},
+    ])
+    idx = normalise_symbol("000001.SH")
+    return _report_cases((
+        (_match_row_index(["600519", "000001"], ("000001",)) == 1,
+         "_match_row_index: EastMoney bare code"),
+        (_match_row_index(["sh000001", "sz399001"], ("000001", "sh000001")) == 0,
+         "_match_row_index: Sina prefixed code (E4 regression)"),
+        (_match_row_index(["700", "5"], ("00700",)) == 0,
+         "_match_row_index: zero-padded HK code"),
+        (_match_row_index(["600519"], ("000001", "sh000001")) is None,
+         "_match_row_index: miss returns None"),
+        (_match_row_index(["sh000001"], ("000001",)) is None,
+         "_match_row_index: bare code alone still misses Sina (the E4 bug)"),
+        (_filter_by_code(eastmoney, idx.code, idx.prefixed)["名称"] == "上证指数",
+         "_filter_by_code: EastMoney-shaped frame"),
+        (_filter_by_code(sina, idx.code, idx.prefixed)["名称"] == "上证指数",
+         "_filter_by_code: Sina-shaped frame (E4 regression)"),
+    ))
+
+
+def _run_as_of_cases() -> tuple[int, int]:
+    """Freshness-mapping coverage. Synthetic rows only — no network, no clock."""
+    no_date = _map_row({"代码": "600519", "最新价": 1.0})
+    return _report_cases((
+        (_as_of_from(_map_row({"日期": "2026-09-04"})) == ("2026-09-04", None),
+         "as_of from 日期"),
+        (_as_of_from(_map_row({"最新交易日": "20260904"})) == ("2026-09-04", None),
+         "as_of from 最新交易日 (YYYYMMDD)"),
+        (_as_of_from(_map_row({"日期时间": "2026-09-04 15:00:00"}))[0]
+         == "2026-09-04 15:00:00", "as_of from 日期时间"),
+        (_as_of_from({"ticktime": "2026-09-04 16:08:00"})[0] == "2026-09-04 16:08:00",
+         "as_of from Sina HK ticktime"),
+        # Live stock_hk_spot ships 日期时间 as '2026/09/04 14:20:16' + 中文名称.
+        (_as_of_from(_map_row({"日期时间": "2026/09/04 14:20:16"}))[0]
+         == "2026-09-04 14:20:16", "as_of: Sina slash date -> ISO"),
+        (_map_row({"中文名称": "腾讯控股", "英文名称": "TENCENT"})
+         == {"name": "腾讯控股", "name_en": "TENCENT"},
+         "_map_row: live stock_hk_spot name columns"),
+        (_as_of_from(no_date) == (None, _AS_OF_NOTE),
+         "no date column -> (None, note), never today"),
+        (_freshness(no_date) == {"as_of": None, "as_of_note": _AS_OF_NOTE},
+         "_freshness emits null + note"),
+        (_freshness(_map_row({"日期": "2026-09-04"})) == {"as_of": "2026-09-04"},
+         "_freshness emits bare as_of when dated"),
+        (_normalise_as_of("1757030400") == "2025-09-05T00:00:00+00:00",
+         "_normalise_as_of: epoch seconds"),
+        (_normalise_as_of("1757030400000") == "2025-09-05T00:00:00+00:00",
+         "_normalise_as_of: epoch milliseconds"),
+        (_normalise_as_of("nan") is None and _normalise_as_of("--") is None,
+         "_normalise_as_of: NaN-ish -> None"),
+        (_normalise_as_of("123") is None,
+         "_normalise_as_of: bare counter is not a date"),
+    ))
+
+
 def _self_test() -> int:
     """Deterministic built-in tests: no network, no clock, no randomness."""
-    results = [_run_accept_cases(), _run_reject_cases(), _run_derived_cases()]
+    results = [_run_accept_cases(), _run_reject_cases(), _run_derived_cases(),
+               _run_frame_cases(), _run_as_of_cases()]
     passed = sum(p for p, _ in results)
     total = sum(t for _, t in results)
     print(f"\n{passed}/{total} akshare_mcp unit tests passed.")
     return 0 if passed == total else 1
+
+
+# ---------------------------------------------------------------------------
+# Live probe — OPT-IN, touches the network. Never run automatically.
+# ---------------------------------------------------------------------------
+
+# One real call per tool. Kept under a flag whose spelling deliberately differs
+# from the built-in-test flag, because CI discovers offline tests by grepping
+# for that other literal — a probe found by that sweep would drag mainland-China
+# HTTP endpoints into every CI run.
+_PROBE_CALLS: tuple[tuple[str, Callable[[], dict]], ...] = (
+    ("get_cn_quote", lambda: get_cn_quote("600519.SS")),
+    ("get_cn_history", lambda: get_cn_history("600519.SS", "1mo")),
+    ("get_hk_quote", lambda: get_hk_quote("00700.HK")),
+    ("get_index_quote", lambda: get_index_quote("000001.SH")),
+    ("healthcheck", healthcheck),
+)
+
+
+def _live_probe() -> int:
+    """Call every tool once against the real upstream; report ok/latency/as_of."""
+    print("live probe — one network call per tool (AkShare endpoints are CN-hosted)\n")
+    failures = 0
+    for name, call in _PROBE_CALLS:
+        started = time.perf_counter()
+        try:
+            payload: dict[str, Any] = call()
+        except Exception as exc:  # a tool that raises has broken its contract
+            payload = {"error": f"contract violation, raised {type(exc).__name__}: {exc}"}
+        elapsed = time.perf_counter() - started
+        bad = "error" in payload or payload.get("ok") is False
+        failures += bad
+        detail = str(payload.get("error") or payload.get("reason") or "")[:200]
+        print(f"  {'XX ' if bad else 'ok '} {name:<16} {elapsed:6.2f}s "
+              f"as_of={payload.get('as_of')!r} {detail}")
+    total = len(_PROBE_CALLS)
+    print(f"\n{total - failures}/{total} akshare tools reachable.")
+    return 0 if failures == 0 else 1
 
 
 def main() -> int:
@@ -511,10 +775,14 @@ def main() -> int:
     )
     parser.add_argument("--self-test", action="store_true",
                         help="run deterministic built-in unit tests and exit")
+    parser.add_argument("--probe", action="store_true",
+                        help="OPT-IN live probe: one real network call per tool")
     args = parser.parse_args()
 
     if args.self_test:
         return _self_test()
+    if args.probe:
+        return _live_probe()
     if mcp is None:
         print(f"cannot start MCP server: {_MCP_IMPORT_ERROR}", file=sys.stderr)
         print("Run via `uv run --no-project --quiet --script mcps/akshare_mcp.py` so the "
