@@ -31,6 +31,14 @@ USAGE
 -----
     python scripts/portfolio_check.py --ndq 62.45 --ioo 196.87 --vix 21.51
     python scripts/portfolio_check.py --ndq 62.45 --ioo 196.87 --json
+    python scripts/portfolio_check.py --self-test     # synthetic holdings only
+
+TESTABILITY
+-----------
+``run_check`` takes an injectable ``holdings_source`` and ``run_cli`` takes an
+injectable state path, so the money arithmetic and the exit-code contract can be
+exercised against SYNTHETIC holdings. The self-test never reads
+``data/positions.md`` and never writes the real state file.
 """
 
 from __future__ import annotations
@@ -39,9 +47,11 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TextIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runtime import force_utf8_stdio  # noqa: E402
@@ -163,52 +173,67 @@ def effective_triggers(
     }
 
 
-def run_check(
-    prices: dict[str, float],
-    vix: float | None,
-    budget: float,
-    nvda_weights: dict[str, float],
-    triggers: dict[str, float],
-    atr_pct: dict[str, float] | None = None,
-) -> dict:
-    holdings = parse_positions()
-    if not holdings:
-        raise ValueError("no holdings parsed from positions.md")
-
-    rows = []
-    total_cost = 0.0
-    total_value = 0.0
+def _position_rows(
+    holdings: Sequence[Holding], prices: dict[str, float]
+) -> list[dict]:
+    """Per-holding P&L rows. Raises ValueError when a live price is missing."""
+    rows: list[dict] = []
     for h in holdings:
         if h.ticker not in prices:
             raise ValueError(f"no live price supplied for {h.ticker} (use --ndq/--ioo)")
         p = prices[h.ticker]
+        cost = h.cost()
         rows.append({
             "ticker": h.ticker,
             "units": h.units,
             "avg_cost": h.avg_cost,
             "price": p,
-            "cost": round(h.cost(), 2),
+            "cost": round(cost, 2),
             "value": round(h.value(p), 2),
             "pnl": round(h.pnl(p), 2),
-            "pnl_pct": round(h.pnl(p) / h.cost() * 100, 2),
+            # A zero-cost row (gifted units, bad data) must not crash the report.
+            "pnl_pct": round(h.pnl(p) / cost * 100, 2) if cost else 0.0,
         })
-        total_cost += h.cost()
-        total_value += h.value(p)
+    return rows
 
+
+def _allocation(
+    rows: Sequence[dict], budget: float
+) -> tuple[dict[str, float], dict[str, float], float]:
+    """Return (allocation fractions, drift vs TARGET in pp, cash).
+
+    MAINTAINER DECISION PENDING (finding F-05): the denominator is COST BASIS
+    (``row["cost"] / budget``), not market value, so a price move can never
+    register as allocation drift — only a buy or a sell can. Switching to
+    ``row["value"] / (total_value + cash)`` would make drift respond to prices,
+    but it changes every number in the maintainer's existing reports, so the
+    choice is deliberately left to the maintainer. Do not "fix" this in passing.
+    """
+    if budget <= 0:
+        raise ValueError("budget must be positive")
+    total_cost = sum(r["cost"] for r in rows)
     cash = budget - total_cost
     alloc = {r["ticker"]: r["cost"] / budget for r in rows}
     alloc["CASH"] = cash / budget
     drift = {k: round((alloc.get(k, 0.0) - t) * 100, 1) for k, t in TARGET.items()}
+    return alloc, drift, cash
 
-    # NVDA look-through (the binding concentration constraint)
-    nvda_exposure = sum(
-        r["value"] * nvda_weights.get(r["ticker"], 0.0) for r in rows
-    )
-    nvda_pct_book = nvda_exposure / total_value if total_value else 0.0
 
-    # Trigger-line evaluation (pre-committed, anti-emotion). ATR widening is
-    # applied first so a stale-tight line cannot fire on daily noise.
-    eff = effective_triggers(triggers, prices, atr_pct)
+def _nvda_look_through(
+    rows: Sequence[dict], nvda_weights: dict[str, float], total_value: float
+) -> float:
+    """NVDA exposure held indirectly through the ETFs, as a fraction of book."""
+    exposure = sum(r["value"] * nvda_weights.get(r["ticker"], 0.0) for r in rows)
+    return exposure / total_value if total_value else 0.0
+
+
+def _evaluate_triggers(
+    prices: dict[str, float],
+    vix: float | None,
+    eff: dict[str, float],
+    nvda_pct_book: float,
+) -> list[str]:
+    """Pre-committed trigger lines, evaluated against effective (ATR-widened) levels."""
     fired: list[str] = []
     ndq_price = prices.get("NDQ.AX")
     ioo_price = prices.get("IOO.AX")
@@ -226,9 +251,14 @@ def run_check(
             f"NVDA look-through {nvda_pct_book:.1%} > {SINGLE_NAME_GATE:.0%} gate "
             f"(standing breach — diversify new money, do not add tech)"
         )
+    return fired
 
-    # Monte Carlo distributions (deterministic seed — same inputs, same output)
-    mc = {}
+
+def _monte_carlo(
+    prices: dict[str, float], holdings: Sequence[Holding], paths: int = 50_000
+) -> dict[str, dict]:
+    """Deterministic 2-week terminal distribution per priced ticker."""
+    mc: dict[str, dict] = {}
     for t, p in prices.items():
         avg_cost = next((h.avg_cost for h in holdings if h.ticker == t), None)
         r = simulate(
@@ -237,7 +267,7 @@ def run_check(
             horizon_days=MC_DAYS,
             annual_drift=0.0,
             cost_basis=avg_cost,
-            paths=50_000,
+            paths=paths,
         )
         mc[t] = {
             "p_up": round(r.p_up, 3),
@@ -246,6 +276,34 @@ def run_check(
             "median": round(r.pct[50], 2),
             "pct95": round(r.pct[95], 2),
         }
+    return mc
+
+
+def run_check(
+    prices: dict[str, float],
+    vix: float | None,
+    budget: float,
+    nvda_weights: dict[str, float],
+    triggers: dict[str, float],
+    atr_pct: dict[str, float] | None = None,
+    holdings_source: Callable[[], Sequence[Holding]] = parse_positions,
+    mc_paths: int = 50_000,
+) -> dict:
+    """Run every deterministic check. ``holdings_source`` is injectable for tests."""
+    holdings = list(holdings_source())
+    if not holdings:
+        raise ValueError("no holdings parsed from positions.md")
+
+    rows = _position_rows(holdings, prices)
+    total_cost = sum(r["cost"] for r in rows)
+    total_value = sum(r["value"] for r in rows)
+    alloc, drift, cash = _allocation(rows, budget)
+    nvda_pct_book = _nvda_look_through(rows, nvda_weights, total_value)
+
+    # ATR widening is applied first so a stale-tight line cannot fire on noise.
+    eff = effective_triggers(triggers, prices, atr_pct)
+    fired = _evaluate_triggers(prices, vix, eff, nvda_pct_book)
+    mc = _monte_carlo(prices, holdings, mc_paths)
 
     # Verdict: action only on a fired PRICE/VIX trigger. The NVDA breach is a
     # standing constraint (shapes where NEW money goes), not a sell signal.
@@ -259,7 +317,10 @@ def run_check(
             "cost": round(total_cost, 2),
             "value": round(total_value, 2),
             "pnl": round(total_value - total_cost, 2),
-            "pnl_pct": round((total_value - total_cost) / total_cost * 100, 2),
+            "pnl_pct": (
+                round((total_value - total_cost) / total_cost * 100, 2)
+                if total_cost else 0.0
+            ),
             "cash": round(cash, 2),
             "budget": budget,
         },
@@ -365,10 +426,12 @@ def format_report(r: dict, vix: float | None) -> str:
     return "\n".join(lines)
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Deterministic NDQ/IOO portfolio check")
-    ap.add_argument("--ndq", type=float, required=True, help="NDQ.AX live price")
-    ap.add_argument("--ioo", type=float, required=True, help="IOO.AX live price")
+    # --ndq/--ioo are not argparse-required so `--self-test` can run alone;
+    # run_cli validates them and returns exit code 2 when they are missing.
+    ap.add_argument("--ndq", type=float, default=None, help="NDQ.AX live price")
+    ap.add_argument("--ioo", type=float, default=None, help="IOO.AX live price")
     ap.add_argument("--vix", type=float, default=None, help="current VIX (optional)")
     ap.add_argument("--budget", type=float, default=BUDGET_DEFAULT)
     ap.add_argument("--ndq-nvda-weight", type=float, default=NVDA_WEIGHT_DEFAULT["NDQ.AX"])
@@ -388,10 +451,35 @@ def main() -> int:
     ap.add_argument("--reset-state", action="store_true",
                     help="clear stored trigger history, then run")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
-    args = ap.parse_args()
+    ap.add_argument("--self-test", action="store_true",
+                    help="run built-in unit tests (synthetic holdings, temp state)")
+    return ap
+
+
+def run_cli(
+    args: argparse.Namespace,
+    now: datetime,
+    holdings_source: Callable[[], Sequence[Holding]] = parse_positions,
+    state_path: Path = STATE_PATH,
+    stream: TextIO | None = None,
+    mc_paths: int = 50_000,
+) -> int:
+    """Execute one check and return the process exit code.
+
+    Exit-code contract (load-bearing — ``.claude/commands/portfolio.md`` depends
+    on it): 0 = nothing to dispatch, 1 = dispatch agents, 2 = input error.
+    A trigger suppressed by the TTL exits 0 — that is the cost saved.
+
+    ``now``, ``holdings_source`` and ``state_path`` are injected so the whole
+    contract is testable without the maintainer's real positions or state file.
+    """
+    out = stream if stream is not None else sys.stdout
+    if args.ndq is None or args.ioo is None:
+        print("error: --ndq and --ioo are required", file=sys.stderr)
+        return 2
 
     if args.reset_state:
-        clear_state()
+        clear_state(state_path)
 
     try:
         result = run_check(
@@ -406,6 +494,8 @@ def main() -> int:
                 "vix_max": args.vix_max,
             },
             atr_pct={"NDQ.AX": args.ndq_atr_pct, "IOO.AX": args.ioo_atr_pct},
+            holdings_source=holdings_source,
+            mc_paths=mc_paths,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -415,20 +505,182 @@ def main() -> int:
         result["dispatch"] = result["price_triggers"]
         result["suppressed"] = []
     else:
-        # The clock is read HERE and injected — the filter itself stays pure.
-        result = apply_trigger_state(
-            result, datetime.now(timezone.utc), args.state_ttl_hours
-        )
+        result = apply_trigger_state(result, now, args.state_ttl_hours, state_path)
 
     if args.json:
-        json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
-        print()
+        json.dump(result, out, indent=2, ensure_ascii=False)
+        print(file=out)
     else:
-        print(format_report(result, args.vix))
-    # Exit-code contract (load-bearing — .claude/commands/portfolio.md depends
-    # on it): 0 = nothing to dispatch, 1 = dispatch agents, 2 = input error.
-    # A trigger suppressed by the TTL exits 0 — that is the cost saved.
+        print(format_report(result, args.vix), file=out)
     return 1 if result["dispatch"] else 0
+
+
+# --------------------------------------------------------------------------
+# Built-in unit tests. Synthetic holdings + a temp state path — this NEVER
+# reads data/positions.md and NEVER writes data/portfolio_state.json.
+# Run: python scripts/portfolio_check.py --self-test
+# --------------------------------------------------------------------------
+_FAKE_HOLDINGS = (
+    Holding("NDQ.AX", 100.0, 50.00),   # cost 5000
+    Holding("IOO.AX", 10.0, 150.00),   # cost 1500
+)
+_FAKE_BUDGET = 10_000.0                # -> cash 3500, alloc 50/15/35
+_CALM = {"NDQ.AX": 60.00, "IOO.AX": 200.00}    # both well above every line
+_CRASH = {"NDQ.AX": 50.00, "IOO.AX": 200.00}   # NDQ below the 50d line
+
+
+def _fake_args(
+    parser: argparse.ArgumentParser, prices: dict[str, float], **overrides: object
+) -> argparse.Namespace:
+    argv = ["--ndq", str(prices["NDQ.AX"]), "--ioo", str(prices["IOO.AX"])]
+    for key, value in overrides.items():
+        flag = "--" + key.replace("_", "-")
+        argv += [flag] if value is True else [flag, str(value)]
+    args = parser.parse_args(argv)
+    args.budget = _FAKE_BUDGET
+    return args
+
+
+def _self_test() -> int:  # noqa: C901 - flat list of assertions, no nesting
+    import contextlib
+    import io
+    import tempfile
+
+    src: Callable[[], Sequence[Holding]] = lambda: _FAKE_HOLDINGS
+    weights = {"NDQ.AX": 0.09, "IOO.AX": 0.139}
+    base_triggers = dict(TRIGGERS_DEFAULT)
+    parser = _build_parser()
+    t0 = datetime(2026, 3, 2, 10, 0, tzinfo=timezone.utc)
+
+    calm = run_check(_CALM, None, _FAKE_BUDGET, weights, base_triggers,
+                     holdings_source=src, mc_paths=2000)
+    crash = run_check(_CRASH, None, _FAKE_BUDGET, weights, base_triggers,
+                      holdings_source=src, mc_paths=2000)
+    ndq_row = calm["holdings"][0]
+    alloc = calm["allocation_pct"]
+
+    cases: list[tuple[str, bool]] = [
+        # --- money arithmetic --------------------------------------------
+        ("P&L: 100u NDQ 50 -> 60 is +1000", ndq_row["pnl"] == 1000.0),
+        ("P&L %: +20.0", ndq_row["pnl_pct"] == 20.0),
+        ("cost basis: 100 * 50", ndq_row["cost"] == 5000.0),
+        ("market value: 100 * 60", ndq_row["value"] == 6000.0),
+        ("totals: cost 6500", calm["totals"]["cost"] == 6500.0),
+        ("totals: value 8000", calm["totals"]["value"] == 8000.0),
+        ("totals: pnl 1500", calm["totals"]["pnl"] == 1500.0),
+        ("totals: cash = budget - cost", calm["totals"]["cash"] == 3500.0),
+        # --- allocation ---------------------------------------------------
+        ("allocation: NDQ 50%", alloc["NDQ.AX"] == 50.0),
+        ("allocation: IOO 15%", alloc["IOO.AX"] == 15.0),
+        ("allocation: CASH 35%", alloc["CASH"] == 35.0),
+        ("allocation sums to 100%", abs(sum(alloc.values()) - 100.0) < 1e-9),
+        ("drift vs target is signed pp", calm["drift_vs_target_pp"]["NDQ.AX"] == -10.0),
+        ("budget <= 0 is rejected", _raises(ValueError, _allocation, calm["holdings"], 0.0)),
+        ("missing price is rejected",
+            _raises(ValueError, _position_rows, _FAKE_HOLDINGS, {"NDQ.AX": 60.0})),
+        ("empty holdings rejected",
+            _raises(ValueError, run_check, _CALM, None, _FAKE_BUDGET, weights,
+                    base_triggers, None, list)),
+        # --- look-through --------------------------------------------------
+        ("NVDA look-through = weighted ETF exposure",
+            calm["nvda_look_through_pct"] == round(
+                (6000 * 0.09 + 2000 * 0.139) / 8000 * 100, 1)),
+        # --- triggers -------------------------------------------------------
+        ("calm prices fire nothing", calm["price_triggers"] == []),
+        ("calm verdict is HOLD", calm["verdict"].startswith("HOLD")),
+        ("NDQ under the 50d line fires", len(crash["price_triggers"]) == 1),
+        ("fired message names the 50d line", "50d SMA" in crash["price_triggers"][0]),
+        ("crash verdict is TRIGGER", crash["verdict"].startswith("TRIGGER")),
+        ("VIX above the cap fires",
+            any("VIX" in f for f in run_check(_CALM, 30.0, _FAKE_BUDGET, weights,
+                base_triggers, holdings_source=src, mc_paths=500)["price_triggers"])),
+        ("NVDA breach is NOT a price trigger",
+            run_check(_CALM, None, _FAKE_BUDGET, {"NDQ.AX": 0.9, "IOO.AX": 0.9},
+                      base_triggers, holdings_source=src, mc_paths=500)["price_triggers"] == []),
+        # --- ATR widening only ever loosens ---------------------------------
+        ("ATR widening loosens a too-tight line",
+            widen_for_atr(59.0, 60.0, 3.0) < 59.0),
+        ("ATR never tightens a far line", widen_for_atr(40.0, 60.0, 3.0) == 40.0),
+        ("no ATR flag is a byte-identical no-op", widen_for_atr(56.61, 60.0, None) == 56.61),
+        ("zero/negative ATR is a no-op", widen_for_atr(56.61, 60.0, 0.0) == 56.61),
+        ("ATR widening can silence a noise trigger",
+            run_check(_CRASH, None, _FAKE_BUDGET, weights, base_triggers,
+                      atr_pct={"NDQ.AX": 12.0, "IOO.AX": None},
+                      holdings_source=src, mc_paths=500)["price_triggers"] == []),
+        ("VIX line is a level, ATR must not move it",
+            effective_triggers(base_triggers, _CRASH, {"NDQ.AX": 12.0})["vix_max"]
+            == base_triggers["vix_max"]),
+        # --- determinism ----------------------------------------------------
+        ("same inputs -> same Monte Carlo block",
+            run_check(_CALM, None, _FAKE_BUDGET, weights, base_triggers,
+                      holdings_source=src, mc_paths=2000)["monte_carlo_2wk"]
+            == calm["monte_carlo_2wk"]),
+    ]
+
+    # --- exit-code contract, against a temp state path ----------------------
+    # stderr is captured too: the exit-2 cases legitimately print errors, and
+    # letting them through makes a passing self-test look like a failing one.
+    sink = io.StringIO()
+    with tempfile.TemporaryDirectory() as tmpdir, contextlib.redirect_stderr(sink):
+        state = Path(tmpdir) / "portfolio_state.json"
+
+        def run(prices: dict[str, float], now: datetime, **kw: object) -> int:
+            return run_cli(_fake_args(parser, prices, **kw), now, src, state,
+                           stream=sink, mc_paths=500)
+
+        first_fire = run(_CRASH, t0)
+        repeat = run(_CRASH, t0.replace(hour=14))          # +4h, inside TTL
+        after_ttl = run(_CRASH, datetime(2026, 3, 3, 12, 0, tzinfo=timezone.utc))
+        no_state_run = run(_CRASH, t0.replace(hour=15), no_state=True)
+        missing_price = run_cli(parser.parse_args(["--ioo", "200"]), t0, src, state,
+                                stream=sink, mc_paths=500)
+        bad_budget_args = _fake_args(parser, _CALM)
+        bad_budget_args.budget = 0.0
+        bad_budget = run_cli(bad_budget_args, t0, src, state, stream=sink, mc_paths=500)
+        missing_file = run_cli(
+            _fake_args(parser, _CALM), t0,
+            lambda: parse_positions(Path(tmpdir) / "nope" / "positions.md"),
+            state, stream=sink, mc_paths=500,
+        )
+
+        cases += [
+            ("exit 0: calm run", run(_CALM, t0.replace(hour=16)) == 0),
+            ("exit 1: first trigger dispatches", first_fire == 1),
+            ("exit 0: same trigger suppressed inside TTL", repeat == 0),
+            ("exit 1: same trigger re-fires after TTL", after_ttl == 1),
+            ("exit 1: --no-state bypasses dedup", no_state_run == 1),
+            ("exit 2: missing --ndq", missing_price == 2),
+            ("exit 2: bad budget", bad_budget == 2),
+            ("exit 2: unreadable positions file", missing_file == 2),
+            ("state file written to the injected path, not the real one", state.exists()),
+            ("real state path untouched by the self-test", state != STATE_PATH),
+        ]
+
+    passed = 0
+    for label, ok in cases:
+        passed += ok
+        print(f"  {'ok ' if ok else 'XX '} {label}")
+    print(f"\n{passed}/{len(cases)} portfolio_check unit tests passed.")
+    return 0 if passed == len(cases) else 1
+
+
+def _raises(exc_type: type[BaseException], fn: Callable, *args: object) -> bool:
+    """True iff ``fn(*args)`` raises ``exc_type``."""
+    try:
+        fn(*args)
+    except exc_type:
+        return True
+    except Exception:
+        return False
+    return False
+
+
+def main() -> int:
+    args = _build_parser().parse_args()
+    if args.self_test:
+        return _self_test()
+    # The clock is read HERE and injected — the filter itself stays pure.
+    return run_cli(args, datetime.now(timezone.utc))
 
 
 if __name__ == "__main__":

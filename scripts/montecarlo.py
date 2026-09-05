@@ -42,6 +42,9 @@ CLI
 
     # gold example (GC=F): annualized vol ~16-20%, 2-week horizon
     python scripts/montecarlo.py --price 4479 --vol 0.18 --days 14 --drift 0.04
+
+    # built-in unit tests (no arguments needed)
+    python scripts/montecarlo.py --self-test
 """
 
 from __future__ import annotations
@@ -182,16 +185,110 @@ def format_result(r: SimResult, cost_basis: float | None, currency: str = "") ->
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------
+# Built-in unit tests (deterministic). Run: python scripts/montecarlo.py --self-test
+# --------------------------------------------------------------------------
+def _raises_value_error(**kwargs: object) -> bool:
+    """True iff ``simulate`` rejects these arguments with ValueError."""
+    try:
+        simulate(**kwargs)  # type: ignore[arg-type]
+    except ValueError:
+        return True
+    except Exception:  # any other failure is still a defect
+        return False
+    return False
+
+
+def _monotonic(values: list[float]) -> bool:
+    return all(a <= b for a, b in zip(values, values[1:]))
+
+
+def _self_test() -> int:
+    # A modest path count keeps the test fast; the seed is fixed so the
+    # sampling error below is itself deterministic, not a flaky tolerance.
+    paths = 20_000
+    price0, vol, days = 100.0, 0.20, 21
+    flat = simulate(price0, vol, days, annual_drift=0.0, paths=paths)
+    repeat = simulate(price0, vol, days, annual_drift=0.0, paths=paths)
+    with_cost = simulate(price0, vol, days, annual_drift=0.0, cost_basis=95.0, paths=paths)
+
+    # Closed-form GBM median: S_0 * exp((mu - 0.5*sigma^2) * T). With 20k fixed
+    # -seed paths the empirical median lands within ~0.5% of it.
+    horizon_years = days / TRADING_DAYS_PER_YEAR
+    closed_median = price0 * math.exp((0.0 - 0.5 * vol**2) * horizon_years)
+    median_err = abs(flat.pct[50] - closed_median) / closed_median
+
+    cases: list[tuple[str, bool]] = [
+        ("determinism: same inputs -> identical result", flat == repeat),
+        ("determinism: identical formatted output",
+            format_result(flat, None) == format_result(repeat, None)),
+        ("drift-free median matches the closed form (<0.5%)", median_err < 0.005),
+        ("p_up + p_down == 1", abs(flat.p_up + flat.p_down - 1.0) < 1e-12),
+        ("zero drift -> p_up < 0.5 (the -0.5*sigma^2 median drag)", flat.p_up < 0.5),
+        ("zero drift -> p_up still near coin-flip", flat.p_up > 0.45),
+        ("quantiles are monotonic",
+            _monotonic([flat.pct[p] for p in (5, 10, 25, 50, 75, 90, 95)])),
+        ("cost_basis=None -> p_below_cost is None", flat.p_below_cost is None),
+        ("cost_basis supplied -> probability in [0, 1]",
+            with_cost.p_below_cost is not None and 0.0 <= with_cost.p_below_cost <= 1.0),
+        ("cost basis below the 5th pct is unlikely",
+            with_cost.p_below_cost is not None and with_cost.p_below_cost < 0.5),
+        ("positive drift raises p_up",
+            simulate(price0, vol, days, annual_drift=0.50, paths=paths).p_up > flat.p_up),
+        ("mean end price is near the risk-neutral forward",
+            abs(flat.expected - price0) / price0 < 0.01),
+        ("zero vol collapses the distribution",
+            simulate(price0, 0.0, days, paths=100).pct[5] == price0),
+        ("reported inputs are echoed back",
+            (flat.price0, flat.horizon_days, flat.annual_vol, flat.paths)
+            == (price0, days, vol, paths)),
+        ("rejects price0 <= 0",
+            _raises_value_error(price0=0.0, annual_vol=vol, horizon_days=days)),
+        ("rejects negative price0",
+            _raises_value_error(price0=-1.0, annual_vol=vol, horizon_days=days)),
+        ("rejects negative vol",
+            _raises_value_error(price0=price0, annual_vol=-0.1, horizon_days=days)),
+        ("rejects horizon_days <= 0",
+            _raises_value_error(price0=price0, annual_vol=vol, horizon_days=0)),
+        ("rejects negative horizon_days",
+            _raises_value_error(price0=price0, annual_vol=vol, horizon_days=-5)),
+        ("rejects paths <= 0",
+            _raises_value_error(price0=price0, annual_vol=vol, horizon_days=days, paths=0)),
+    ]
+
+    passed = 0
+    for label, ok in cases:
+        passed += ok
+        print(f"  {'ok ' if ok else 'XX '} {label}")
+    print(f"\n{passed}/{len(cases)} montecarlo unit tests passed.")
+    return 0 if passed == len(cases) else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="GBM Monte Carlo price-path simulator")
-    ap.add_argument("--price", type=float, required=True, help="current price")
-    ap.add_argument("--vol", type=float, required=True, help="annualized volatility, e.g. 0.18 for 18%")
-    ap.add_argument("--days", type=int, required=True, help="horizon in trading days")
+    # --price/--vol/--days are NOT argparse-required so `--self-test` can run
+    # alone; main validates them below instead.
+    ap.add_argument("--price", type=float, default=None, help="current price")
+    ap.add_argument("--vol", type=float, default=None, help="annualized volatility, e.g. 0.18 for 18%")
+    ap.add_argument("--days", type=int, default=None, help="horizon in trading days")
     ap.add_argument("--drift", type=float, default=0.0, help="annualized drift ASSUMPTION (default 0 = no edge)")
     ap.add_argument("--cost", type=float, default=None, help="your cost basis (for P(below cost))")
     ap.add_argument("--paths", type=int, default=100_000, help="number of simulated paths")
     ap.add_argument("--currency", type=str, default="", help="currency label for display, e.g. CNY or USD")
+    ap.add_argument("--self-test", action="store_true", help="run built-in unit tests")
     args = ap.parse_args()
+
+    if args.self_test:
+        return _self_test()
+
+    missing = [
+        name for name, value in
+        (("--price", args.price), ("--vol", args.vol), ("--days", args.days))
+        if value is None
+    ]
+    if missing:
+        print(f"error: missing required argument(s): {', '.join(missing)}", file=sys.stderr)
+        return 2
 
     try:
         r = simulate(
