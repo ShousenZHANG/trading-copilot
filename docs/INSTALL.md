@@ -184,7 +184,7 @@ Two properties still make this worth getting right the first time:
 
 ### Pre-submission checklist
 
-- [ ] `claude plugin validate . --strict` passes. Plain `claude plugin validate .`
+- [ ] `claude plugin validate .` passes. Plain `claude plugin validate .`
       is what the review pipeline runs; `--strict` promotes its warnings to
       errors, so clear it first. **Known open warning**: `CLAUDE.md at the plugin
       root is not loaded as project context` — plain validate passes (exit 0),
