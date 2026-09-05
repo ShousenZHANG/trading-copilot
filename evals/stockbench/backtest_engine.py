@@ -50,6 +50,14 @@ from parse_rating import RATINGS_5_TIER  # noqa: E402
 
 TRADING_DAYS_PER_YEAR = 252
 
+# Below this many trades the inferential metrics (annualisation, IR, volatility,
+# hit rate) are noise dressed as a result: two winning 5-day trades annualise to
+# a three-digit "return". They are published as None instead, with an explicit
+# `insufficient_sample` marker. 20 is the conventional floor for a sample std to
+# mean anything at all — it is a guard against self-deception, not a claim that
+# 20 trades is enough to conclude anything.
+DEFAULT_MIN_TRADES = 20
+
 # Extra calendar days of price history a caller should request beyond the last
 # signal date so that every signal has a full holding window available.
 TAIL_PAD_MULTIPLIER = 2
@@ -302,6 +310,7 @@ def run_backtest(
     *,
     snap_forward: bool = False,
     trading_days_per_year: int = TRADING_DAYS_PER_YEAR,
+    min_trades: int = DEFAULT_MIN_TRADES,
 ) -> BacktestResult:
     """Replay ``signals`` against ``price_source`` on a fixed-hold schedule.
 
@@ -314,6 +323,7 @@ def run_backtest(
     * Edge-triggered arming prevents overlapping duplicate positions.
     * Signals with too little tail data are recorded in ``result.skipped``,
       never silently dropped.
+    * ``min_trades`` gates the inferential metrics — see ``compute_metrics``.
 
     Invariant: ``len(trades) + len(skipped) == len(signals)``.
     """
@@ -342,7 +352,7 @@ def run_backtest(
     periods = periods_per_year_for_hold(holding_days, trading_days_per_year)
     return BacktestResult(
         trades=trades,
-        metrics=compute_metrics(trades, periods_per_year=periods),
+        metrics=compute_metrics(trades, periods_per_year=periods, min_trades=min_trades),
         equity_curve=equity_curve(trades),
         skipped=skipped,
     )
@@ -370,7 +380,8 @@ def equity_curve(trades: Sequence[Trade]) -> list[float]:
 
 
 def compute_metrics(trades: Sequence[Trade],
-                    periods_per_year: float = float(TRADING_DAYS_PER_YEAR)) -> dict[str, object]:
+                    periods_per_year: float = float(TRADING_DAYS_PER_YEAR),
+                    min_trades: int = DEFAULT_MIN_TRADES) -> dict[str, object]:
     """qlib ``risk_analysis``-style metrics over per-trade returns.
 
     Formulas (N = ``periods_per_year``, r = per-trade returns, sample std ddof=1)::
@@ -385,15 +396,30 @@ def compute_metrics(trades: Sequence[Trade],
     ``periods_per_year_for_hold``. ``run_backtest`` passes the derived value;
     the 252 default here only fits a daily-rebalanced series.
 
-    Guards: with fewer than 2 trades the sample std is undefined, and with
-    std == 0 the ratio is undefined. Both return ``None`` — never
-    ``ZeroDivisionError`` and never ``NaN``.
+    Small-sample guard
+    ------------------
+    With ``len(trades) < min_trades`` the four INFERENTIAL metrics —
+    ``annualized_return``, ``information_ratio``, ``volatility``, ``hit_rate`` —
+    are set to ``None`` and ``insufficient_sample`` carries
+    ``{"trade_count": n, "min_trades": min_trades}``. Each of them extrapolates
+    from the sample to a population; on two trades that extrapolation is
+    fiction (two good 5-day holds annualise to a three-digit percentage).
+
+    The three DESCRIPTIVE metrics — ``avg_return``, ``cumulative_return``,
+    ``max_drawdown`` — are still published at any n, because they are literal
+    facts about the trades that actually happened, not estimates of anything.
+
+    Numeric guards remain independent of the sample guard: fewer than 2 trades
+    leaves the sample std undefined and ``std == 0`` leaves the ratio undefined.
+    Both return ``None`` — never ``ZeroDivisionError``, never ``NaN``.
     """
     returns = [t.return_pct for t in trades]
     n = len(returns)
     base: dict[str, object] = {
         "trade_count": n,
         "periods_per_year": round(periods_per_year, 6),
+        "min_trades": min_trades,
+        "insufficient_sample": None,
         "avg_return": None,
         "cumulative_return": None,
         "annualized_return": None,
@@ -402,16 +428,20 @@ def compute_metrics(trades: Sequence[Trade],
         "max_drawdown": None,
         "hit_rate": None,
     }
+    if n < min_trades:
+        base["insufficient_sample"] = {"trade_count": n, "min_trades": min_trades}
     if n == 0:
         return base
 
     mean = sum(returns) / n
     base["avg_return"] = mean
     base["cumulative_return"] = sum(returns)
+    base["max_drawdown"] = _max_drawdown(returns)
+    if base["insufficient_sample"] is not None:
+        return base
+
     base["annualized_return"] = mean * periods_per_year
     base["hit_rate"] = sum(1 for r in returns if r > 0) / n
-    base["max_drawdown"] = _max_drawdown(returns)
-
     if n >= 2:
         variance = sum((r - mean) ** 2 for r in returns) / (n - 1)
         std = math.sqrt(variance)
@@ -457,7 +487,27 @@ def format_metrics(metrics: dict[str, object]) -> str:
     width = max(len(label) for label, _ in rows)
     lines = ["=== Backtest metrics (qlib risk_analysis convention) ==="]
     lines += [f"  {label.ljust(width)} : {value}" for label, value in rows]
+    lines += _sample_banner(metrics)
     return "\n".join(lines)
+
+
+def _sample_banner(metrics: dict[str, object]) -> list[str]:
+    """Loud, unmissable banner when the sample is too small to infer anything."""
+    marker = metrics.get("insufficient_sample")
+    if not isinstance(marker, dict):
+        return []
+    n = marker.get("trade_count")
+    floor = marker.get("min_trades")
+    return [
+        "",
+        "  !!! SAMPLE TOO SMALL — DO NOT QUOTE THESE AS PERFORMANCE !!!",
+        f"      {n} trade(s), below the --min-trades floor of {floor}.",
+        "      annualized return / volatility / information ratio / hit rate are",
+        "      withheld (None) because annualising a handful of trades produces a",
+        "      number that looks like a result and is not one.",
+        "      avg / cumulative return and max drawdown above describe ONLY these",
+        f"      {n} trade(s) — they are not an estimate of future performance.",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +587,8 @@ def _self_test() -> int:  # noqa: C901 - a flat list of independent assertions
     fake = [Trade("X", "d1", 100.0, "d2", 110.0, 1, 0.10),
             Trade("X", "d3", 100.0, "d4", 95.0, 1, -0.05),
             Trade("X", "d5", 100.0, "d6", 120.0, 1, 0.20)]
-    m = compute_metrics(fake, periods_per_year=50.4)
+    # min_trades=1 disables the small-sample guard so the raw formulas are testable.
+    m = compute_metrics(fake, periods_per_year=50.4, min_trades=1)
     mean = 0.25 / 3
     std = math.sqrt(((0.10 - mean) ** 2 + (-0.05 - mean) ** 2 + (0.20 - mean) ** 2) / 2)
     ok = (_approx(m["avg_return"], mean) and                               # type: ignore[arg-type]
@@ -556,16 +607,49 @@ def _self_test() -> int:  # noqa: C901 - a flat list of independent assertions
     check("empty input returns zeroed metrics, no exception", ok)
 
     # 9. single trade: sample std undefined -> None, not NaN / ZeroDivisionError.
-    m = compute_metrics([fake[0]], periods_per_year=50.4)
+    #    min_trades=1 so this exercises the NUMERIC guard, not the sample guard.
+    m = compute_metrics([fake[0]], periods_per_year=50.4, min_trades=1)
     ok = (m["trade_count"] == 1 and m["volatility"] is None
           and m["information_ratio"] is None and _approx(m["hit_rate"], 1.0))  # type: ignore[arg-type]
     check("single trade: std/IR undefined -> None", ok, json.dumps(m, default=str))
 
     # 10. zero-variance returns -> IR None (no ZeroDivisionError).
     flat = [Trade("F", "d1", 50.0, "d2", 50.0, 1, 0.0) for _ in range(3)]
-    m = compute_metrics(flat, periods_per_year=50.4)
+    m = compute_metrics(flat, periods_per_year=50.4, min_trades=1)
     ok = m["information_ratio"] is None and _approx(m["volatility"], 0.0)  # type: ignore[arg-type]
     check("zero-variance returns: IR None, volatility 0", ok)
+
+    # 10a-d. small-sample guard at the n = 1 / 2 / 19 / 20 boundaries.
+    def _n_trades(count: int) -> list[Trade]:
+        return [Trade("N", f"e{i}", 100.0, f"x{i}", 101.0, 1, 0.01) for i in range(count)]
+
+    inferential = ("annualized_return", "information_ratio", "volatility", "hit_rate")
+    for n_trades in (1, 2, 19):
+        m = compute_metrics(_n_trades(n_trades), periods_per_year=50.4, min_trades=20)
+        ok = (m["insufficient_sample"] == {"trade_count": n_trades, "min_trades": 20}
+              and all(m[k] is None for k in inferential)
+              and _approx(m["cumulative_return"], 0.01 * n_trades)  # type: ignore[arg-type]
+              and _approx(m["avg_return"], 0.01))                   # type: ignore[arg-type]
+        check(f"n={n_trades} < min_trades: inferential metrics withheld, descriptive kept",
+              ok, json.dumps(m, default=str))
+        banner = "\n".join(_sample_banner(m))
+        check(f"n={n_trades}: SAMPLE TOO SMALL banner fires",
+              "SAMPLE TOO SMALL" in banner and f"{n_trades} trade(s)" in banner, banner)
+
+    m = compute_metrics(_n_trades(20), periods_per_year=50.4, min_trades=20)
+    ok = (m["insufficient_sample"] is None
+          and _approx(m["annualized_return"], 0.01 * 50.4)  # type: ignore[arg-type]
+          and _approx(m["hit_rate"], 1.0)                   # type: ignore[arg-type]
+          and _approx(m["volatility"], 0.0))                # type: ignore[arg-type]
+    check("n=20 == min_trades: metrics published, no banner", ok, json.dumps(m, default=str))
+    check("n=20: no banner lines", _sample_banner(m) == [])
+
+    # 10e. the default is the guard, not the raw math: run_backtest must inherit it.
+    r = run_backtest([Signal("UP", "2024-01-01", 1.0, "t")], src, holding_days=5)
+    ok = (len(r.trades) == 1 and r.metrics["annualized_return"] is None
+          and isinstance(r.metrics["insufficient_sample"], dict))
+    check("run_backtest defaults to the small-sample guard", ok,
+          json.dumps(r.metrics, default=str))
 
     # 11. rating mapping covers exactly the upstream 5 tiers.
     ok = ([conviction_for_rating(r) for r in RATINGS_5_TIER] == [1.0, 0.5, 0.0, -0.5, -1.0]
