@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A **Claude Code plugin**, not a standalone app. No backend, no build step. The "code" is markdown subagent prompts + slash commands + a thin Python MCP wrapper. The pipeline executes when the user runs a slash command in Claude Code.
 
-Direct port of [TradingAgents](https://github.com/TauricResearch/TradingAgents) (53k+ stars). Reference source vendored at `reference/TradingAgents/` (gitignored locally but used as design source).
+Direct port of [TradingAgents](https://github.com/TauricResearch/TradingAgents) (100k+ stars). Reference source vendored at `reference/TradingAgents/` (gitignored locally but used as design source).
 
 ## Two entry points (different cost/depth tradeoff)
 
@@ -64,7 +64,52 @@ Single source of truth: [.claude/config/output-language.md](.claude/config/outpu
 - **结论卡** opens every terminal report: bold plain-Chinese action + one why-clause, then a ≤12-line table (现在做什么 / 什么时候再看 / 最大风险 / 和上次比变了什么).
 - **白话层**: jargon gets a short parenthetical gloss on FIRST use only — "NVDA 看穿浓度 (通过 ETF 间接持有的 NVDA 占比)".
 - **无废话**: no filler openers, no hedge stacks — but keep **normal full sentences**. This is not caveman fragment style; it is a report a human reads.
-- **Parser safety (hard)**: the card must never contain an English rating word (`Buy`/`Hold`/…) — `parse_rating.py` falls back to "first rating word anywhere in the file" and a stray word would log the wrong rating to memory. `**Rating**` / `**Executive Summary**` / `**Investment Thesis**` stay verbatim at column 0. `assemble_report.py --self-test` covers the extraction, including the fallback for pre-card runs.
+- **Parser safety (hard)**: the card must never contain an English rating word (`Buy`/`Hold`/…) — `parse_rating.py` falls back to "first rating word anywhere in the file" and a stray word would log the wrong rating to memory. `**Rating**` / `**Executive Summary**` / `**Investment Thesis**` stay verbatim at column 0. `assemble_report.py --self-test` covers card extraction; `parse_rating.py --self-test` covers the rating fallback itself, and `memory.py append` refuses to write when the two parsers disagree.
+
+## Subagent `tools:` is an allowlist (do not omit an MCP server)
+
+`tools:` in agent frontmatter is an **allowlist, not an addition**. An agent listing only
+`Read, Write, WebFetch` has **no MCP tools at all** — and it still launches, with no error and no warning,
+silently degrading to WebFetch or invention. Every analyst in this repo sat in that state while its prompt
+instructed it to call `mcp__yahoo-finance__get_stock_info`.
+
+Only the documented server-level spellings work: `mcp__<server>` or `mcp__<server>__*`. A bare `mcp__*` grant
+and partial-name globs are not documented for this field. The value must stay a single-line, comma-separated
+string — the YAML list form is undefined here.
+
+`scripts/check.py` enforces both directions: an agent may not call a server it does not grant, and may not
+grant a server absent from `.mcp.json` and the template (a typo fails silently).
+
+Note the CLI flag is a different axis: `--allowedTools` controls **whether a tool prompts for permission**,
+not whether it exists. Availability on the CLI is `--tools`.
+
+## Scheduled automation runs locally, not in CI
+
+`premarket.yml` and `weekly-review.yml` were deleted, not repaired. The state they operate on
+(`data/memory/trading_memory.md`, `data/decisions/`, `data/positions.md`) is gitignored and absent from every
+checkout, so the weekly job had nothing to resolve and the scan job could not dedup; making them work needs an
+encrypted state store, which is the backend this project declines to be. They also published private state
+from a public repo and double-billed via two DST cron lines. See [docs/continuous-tracking.md](docs/continuous-tracking.md).
+
+`ci.yml` is the only workflow, and it never calls `claude` for analysis. `check.py check_workflows()` blocks
+the specific shapes that went wrong.
+
+## Verification means running the thing
+
+Every check in this repo used to be a *shape* check — JSON parses, frontmatter has a key, a string is present.
+The whole suite stayed green for weeks while three MCP servers could not start and the plugin manifest failed
+the official validator. A `--self-test` cannot catch that class by construction: it is designed to pass
+without the SDK, without a network, and without a running process.
+
+So the suite now also asserts runtime contracts:
+
+```bash
+python scripts/mcp_handshake.py --all     # every server answers JSON-RPC initialize
+claude plugin validate . --strict         # the official validator, not our mirror of it
+```
+
+Both run in CI. When adding a check, ask which of the three it is: shape, contract-consistency (two
+implementations of one rule agreeing), or runtime. The last two are the ones this repo was missing.
 
 ## Memory log — append-only, never edit by hand
 
@@ -88,22 +133,29 @@ Only `scripts/memory.py` should mutate `data/memory/trading_memory.md`. Portfoli
 
 ## MCP servers
 
-Configured in [.mcp.json](.mcp.json). **Only servers without `_` prefix are active.** All others ship disabled.
+Configured in [.mcp.json](.mcp.json), which holds **exactly the servers that should run**. [.mcp.json.template](.mcp.json.template) is the catalog they are copied from; absence is the off switch.
 
-Currently active: `yahoo-finance`, `finnhub`. Disabled-by-default: `_polygon`, `_alpha-vantage`, `_fred`, `_gold`, `_exa`, `_claude-mem`, `_akshare`, `_tushare`.
+> The old scheme prefixed a disabled server's key with `_`. That never disabled anything — Claude Code launches every key under `mcpServers`, so all ten started every session (three connected and exposed tools under a `mcp___name__*` namespace; the rest reported connection errors). Do not reintroduce it.
+
+Active: `yahoo-finance`, `finnhub`. In the catalog, inactive: `akshare`, `fred`, `polygon`, `alpha-vantage`, `gold`, `exa`, `tushare`.
+
+Two invariants in both files: **no `cmd /c` wrapper** (Windows-only, and cmd re-parses the argv — it turned the `mcp<2` pin into a shell redirect) and **no absolute paths** (a relative `--script` path resolves against the project root on every OS).
 
 Toggle:
 ```bash
-python scripts/enable_mcp.py                  # list state
-python scripts/enable_mcp.py fred             # enable (strips _ prefix)
+python scripts/enable_mcp.py                  # list catalog + state
+python scripts/enable_mcp.py fred             # copy from template into .mcp.json
 python scripts/enable_mcp.py polygon --disable
+python scripts/mcp_handshake.py --all         # prove they actually start
 ```
+
+**Both in-repo servers pin `mcp[cli]>=1.2.0,<2`.** The SDK's 2.x line deleted `mcp.server.fastmcp` (FastMCP became MCPServer), so an unpinned resolution makes every FastMCP server die at import and Claude Code reports `-32000 Connection closed`. `yahoo-finance` needs the same pin passed as `--with mcp<2`. Removing any of these three pins breaks the plugin silently.
 
 **Custom Finnhub MCP** at [mcps/finnhub_mcp.py](mcps/finnhub_mcp.py) — replaces the broken npm `finnhub-mcp` (Windows path bug). Run via `uv run --no-project --quiet --script`. Don't replace with the npm version.
 
-**AkShare MCP** at [mcps/akshare_mcp.py](mcps/akshare_mcp.py) — A-share / HK / index coverage (`.SS` `.SZ` `.HK`), **keyless**. Same single-file `uv run --script` shape as finnhub. Ships disabled (`_akshare`) because of the extra dep + slow first import; enable with `python scripts/enable_mcp.py akshare`. Yahoo/Finnhub coverage of `.SS`/`.SZ` is thin-to-absent — that is "not covered", not "nothing happened".
+**AkShare MCP** at [mcps/akshare_mcp.py](mcps/akshare_mcp.py) — A-share / HK / index coverage (`.SS` `.SZ` `.HK`), **keyless**. Same single-file `uv run --script` shape as finnhub. Inactive by default (extra deps + slow first import); enable with `python scripts/enable_mcp.py akshare`. Its `--self-test` makes **zero network calls**, so passing it says nothing about live coverage — run `python mcps/akshare_mcp.py --probe` before relying on it. Yahoo/Finnhub coverage of `.SS`/`.SZ` is thin-to-absent — that is "not covered", not "nothing happened".
 
-API keys live in `.env` (gitignored). On Windows, launch via [scripts/start.ps1](scripts/start.ps1) so it loads `.env` into the PowerShell session before invoking `claude` (MCPs read keys via `${VAR}` substitution in `.mcp.json`).
+API keys live in `.env` (gitignored). On Windows launch via [scripts/start.ps1](scripts/start.ps1); on macOS/Linux via `scripts/start.sh`. Both load `.env` into the session before invoking `claude` (MCPs read keys via `${VAR}` substitution in `.mcp.json`).
 
 ## Pre-trade risk gate (Portfolio Manager enforces)
 
@@ -153,8 +205,9 @@ data/memory/trading_memory.md             ← appended pending entry
 ## Common operations
 
 ```bash
-# Toggle MCPs
+# Toggle MCPs (then prove they start)
 python scripts/enable_mcp.py [name] [--disable]
+python scripts/mcp_handshake.py --all
 
 # Memory log inspection
 python scripts/memory.py list-pending
