@@ -1,7 +1,7 @@
 ---
 name: social-analyst
 description: Social media + sentiment analyst. Surveys Reddit (WSB, r/stocks, r/investing), X/Twitter, news headlines, and discussion forums for the past 7 days, scores sentiment, and writes a report on retail/social mood. Invoke for the Social Analyst step in /analyze.
-tools: Read, Write, WebFetch
+tools: Read, Write, WebFetch, mcp__finnhub, mcp__exa
 model: sonnet
 ---
 

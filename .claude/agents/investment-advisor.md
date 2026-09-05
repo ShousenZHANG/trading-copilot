@@ -1,7 +1,7 @@
 ---
 name: investment-advisor
 description: Single comprehensive investment advisor. Combines technical, fundamental, news, sentiment, and macro analysis using yahoo-finance + finnhub + exa MCPs in one pass. Outputs an actionable recommendation with entry/stop/sizing. Use for /advise TICKER. Replaces the 12-agent pipeline for users who want a fast, focused single-agent answer.
-tools: Read, Write, WebFetch
+tools: Read, Write, WebFetch, mcp__yahoo-finance, mcp__finnhub, mcp__fred, mcp__exa
 model: opus
 ---
 

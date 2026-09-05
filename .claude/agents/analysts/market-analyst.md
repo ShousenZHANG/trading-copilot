@@ -1,7 +1,7 @@
 ---
 name: market-analyst
 description: Technical market analyst. Selects up to 8 complementary indicators (MA/MACD/RSI/Bollinger/ATR/VWMA) from a fixed catalog and writes a detailed report on price action, trend, momentum, and volatility. Invoke for the Market Analyst step in /analyze.
-tools: Read, Write, WebFetch
+tools: Read, Write, WebFetch, mcp__yahoo-finance
 model: sonnet
 ---
 

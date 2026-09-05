@@ -1,7 +1,7 @@
 ---
 name: macro-analyst
 description: Macro analyst. Pulls Fed rates, real yields, CPI, dollar index (DXY), employment data from FRED, and assesses the macro regime. Used in /gold (replaces fundamentals-analyst) and adds context to /analyze for rate-sensitive equities. Invoke for the Macro Analyst step.
-tools: Read, Write, WebFetch
+tools: Read, Write, WebFetch, mcp__fred, mcp__exa
 model: sonnet
 ---
 

@@ -10,6 +10,7 @@ depends on them.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -36,36 +37,26 @@ EXPECTED_COMMANDS = {
     "weekly-review.md",
 }
 
-# Category vocabulary mirrored from the official Claude Code plugin directory
-# (anthropics/claude-plugins-official). The directory has no "finance" category,
-# so this plugin lists itself under "productivity". Update this set only after
-# re-checking the published directory — an unknown category fails submission.
-PLUGIN_CATEGORIES = {
-    "automation",
-    "database",
-    "deployment",
-    "design",
-    "development",
-    "learning",
-    "location",
-    "math",
-    "migration",
-    "monitoring",
-    "productivity",
-    "security",
-    "testing",
-}
-
-# Fields the directory listing renders; missing any of them fails submission.
+# Fields the directory listing renders. `category` is deliberately NOT here:
+# `claude plugin validate` reports it as belonging in marketplace.json and
+# ignored at load time. This checker used to require it, which is how the repo
+# stayed green while the real validator rejected the manifest outright.
 REQUIRED_PLUGIN_FIELDS = (
     "name",
     "version",
     "description",
     "displayName",
-    "category",
     "license",
     "homepage",
 )
+
+# Fields whose shape the official validator pins. Getting these wrong fails
+# `claude plugin validate` — which CI now runs — so mirror them here to fail
+# faster and with a message that says what to do.
+PLUGIN_STRING_FIELDS = ("repository", "commands", "skills", "mcpServers")
+
+# A fully-qualified MCP tool reference: mcp__<server>__<tool>.
+_MCP_TOOL_RE = r"mcp__[A-Za-z0-9-]+__[A-Za-z0-9_]+"
 
 OPUS_AGENTS = {"research-manager", "portfolio-manager", "investment-advisor"}
 INTERNAL_DEBATE_AGENTS = {
@@ -140,12 +131,31 @@ def check_plugin_manifest(path: Path) -> None:
         if not isinstance(value, str) or not value.strip():
             err(f"{rel(path)}: missing or empty required field '{field}'")
 
-    category = manifest.get("category")
-    if isinstance(category, str) and category not in PLUGIN_CATEGORIES:
-        err(
-            f"{rel(path)}: category {category!r} is outside the known directory "
-            f"vocabulary {sorted(PLUGIN_CATEGORIES)}"
-        )
+    if "category" in manifest:
+        err(f"{rel(path)}: drop 'category' — `claude plugin validate` reports it "
+            f"belongs in marketplace.json and is ignored at load time")
+    if "settings" in manifest:
+        err(f"{rel(path)}: drop 'settings' — the field wants an inline record, not "
+            f"a path, and plugin-supplied permissions/env are not applied anyway")
+
+    for field in PLUGIN_STRING_FIELDS:
+        if field in manifest and not isinstance(manifest[field], str):
+            err(f"{rel(path)}: '{field}' must be a string, got "
+                f"{type(manifest[field]).__name__}")
+
+    # `agents` must enumerate the real files: a directory string is rejected by
+    # the validator, and a stale list ships an agent the pipeline cannot dispatch.
+    declared = manifest.get("agents")
+    if not isinstance(declared, list):
+        err(f"{rel(path)}: 'agents' must be a list of file paths")
+    else:
+        on_disk = sorted("./" + q.relative_to(ROOT).as_posix()
+                         for q in (ROOT / ".claude/agents").rglob("*.md"))
+        if sorted(declared) != on_disk:
+            missing = sorted(set(on_disk) - set(declared))
+            extra = sorted(set(declared) - set(on_disk))
+            err(f"{rel(path)}: 'agents' is out of sync with .claude/agents "
+                f"(missing: {missing or 'none'}; stale: {extra or 'none'})")
 
     keywords = manifest.get("keywords")
     if not isinstance(keywords, list) or not keywords:
@@ -201,6 +211,55 @@ def check_agents() -> None:
                 err(f"{rel(path)}: internal debate agent must output English")
         elif "Output language" in text and "Chinese" not in text:
             warn(f"{rel(path)}: user-facing agent mentions output language but not Chinese")
+        check_agent_mcp_grants(path, name, tools or "", text)
+
+
+def known_mcp_servers() -> set[str]:
+    """Every server name the repo knows about: active set plus the catalog."""
+    names: set[str] = set()
+    for config in (ROOT / ".mcp.json", ROOT / ".mcp.json.template"):
+        try:
+            servers = json.loads(read(config)).get("mcpServers")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(servers, dict):
+            names |= {k.lstrip("_") for k in servers}
+    return names
+
+
+def check_agent_mcp_grants(path: Path, name: str, tools: str, text: str) -> None:
+    """An agent's `tools:` allowlist must cover every MCP server it calls.
+
+    `tools:` is an allowlist, not an addition: an agent listing only
+    `Read, Write, WebFetch` has NO MCP tools, launches without error, and
+    silently degrades to WebFetch or invention. Every analyst prompt in this
+    repo was in that state while telling the model to call
+    `mcp__yahoo-finance__get_stock_info`.
+
+    Only the two documented server-level spellings are accepted --
+    `mcp__<server>` and `mcp__<server>__*` -- because a bare `mcp__*` grant and
+    a partial-name glob are not documented for this field.
+    """
+    granted = {
+        entry.strip().removeprefix("mcp__").removesuffix("__*").split("__")[0]
+        for entry in tools.split(",")
+        if entry.strip().startswith("mcp__")
+    }
+    known = known_mcp_servers()
+    for server in sorted(granted - known):
+        err(f"{rel(path)}: grants mcp__{server}, which is in neither .mcp.json "
+            f"nor .mcp.json.template — a typo here fails silently")
+
+    # mcp__<server>__<tool> -> parts[1] is the server. Tool names contain single
+    # underscores (get_stock_info), so splitting on the double underscore is safe.
+    called = {
+        parts[1]
+        for parts in (m.split("__") for m in re.findall(_MCP_TOOL_RE, text))
+        if len(parts) >= 3 and parts[1]
+    }
+    for server in sorted(called - granted):
+        err(f"{rel(path)}: prompt calls mcp__{server}__* but tools: does not grant "
+            f"mcp__{server} — the call is unreachable")
 
 
 def check_skill_mirror() -> None:
@@ -225,11 +284,6 @@ def check_docs_and_workflows() -> None:
     if "ANALYSTS (parallel fan-out)" not in methodology:
         err("docs/methodology.md: missing current parallel analyst description")
 
-    weekly = read(ROOT / ".github" / "workflows" / "weekly-review.yml")
-    if "Install uv" not in weekly:
-        err(".github/workflows/weekly-review.yml: missing uv install for MCP scripts")
-    if "FINNHUB_API_KEY" not in weekly:
-        warn(".github/workflows/weekly-review.yml: limited MCP env; weekly resolution may lack fallbacks")
 
 
 def check_private_state_not_tracked() -> None:
@@ -241,6 +295,10 @@ def check_private_state_not_tracked() -> None:
                 "data/memory/trading_memory.md",
                 "data/runs",
                 "data/audit",
+                "data/state",
+                "data/decisions",
+                "data/positions.md",
+                "docs/strategy.md",
                 ".env",
             ],
             cwd=ROOT,

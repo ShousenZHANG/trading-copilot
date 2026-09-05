@@ -1,7 +1,7 @@
 ---
 name: news-analyst
 description: News and macro analyst. Surveys company news, sector news, insider transactions, and global macro headlines from the past 7 days. Maps news events to potential price impact. Invoke for the News Analyst step in /analyze.
-tools: Read, Write, WebFetch
+tools: Read, Write, WebFetch, mcp__finnhub, mcp__exa
 model: sonnet
 ---
 

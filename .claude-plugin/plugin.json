@@ -3,7 +3,6 @@
   "displayName": "Trading Copilot",
   "version": "0.3.0",
   "description": "Multi-agent trading research copilot for stocks, gold, and macro analysis. Mirrors the TradingAgents architecture as a native Claude Code plugin: 4 analysts -> Bull/Bear debate -> Trader -> 3-way Risk debate -> Portfolio Manager. Educational use only.",
-  "category": "productivity",
   "author": {
     "name": "eddy.zhang24",
     "email": "eddy.zhang24@gmail.com"
@@ -25,13 +24,24 @@
     "mcp"
   ],
   "homepage": "https://github.com/ShousenZHANG/trading-copilot",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/ShousenZHANG/trading-copilot"
-  },
+  "repository": "https://github.com/ShousenZHANG/trading-copilot",
   "commands": "./.claude/commands",
-  "agents": "./.claude/agents",
+  "agents": [
+    "./.claude/agents/analysts/fundamentals-analyst.md",
+    "./.claude/agents/analysts/macro-analyst.md",
+    "./.claude/agents/analysts/market-analyst.md",
+    "./.claude/agents/analysts/news-analyst.md",
+    "./.claude/agents/analysts/social-analyst.md",
+    "./.claude/agents/investment-advisor.md",
+    "./.claude/agents/managers/portfolio-manager.md",
+    "./.claude/agents/managers/research-manager.md",
+    "./.claude/agents/researchers/bear-researcher.md",
+    "./.claude/agents/researchers/bull-researcher.md",
+    "./.claude/agents/risk-debators/aggressive-debator.md",
+    "./.claude/agents/risk-debators/conservative-debator.md",
+    "./.claude/agents/risk-debators/neutral-debator.md",
+    "./.claude/agents/trader.md"
+  ],
   "skills": "./.claude/skills",
-  "settings": "./.claude/settings.json",
   "mcpServers": "./.mcp.json"
 }
