@@ -1,37 +1,43 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "_comment": "Trading Copilot - permissions + env. MCP servers are configured separately in .mcp.json at project root (Claude Code requires that location for project-scope MCPs).",
+  "_comment": "Shipped project settings. Paths are project-relative (a leading / in a permission rule means the project root, not the filesystem root) so this file works on any machine — it previously hardcoded one contributor's D:/ drive and was inert everywhere else. MCP servers are configured separately in .mcp.json at the project root, which is where Claude Code requires project-scope MCPs to live.",
 
   "permissions": {
+    "_comment": "Least privilege for a plugin a stranger installs. Deliberately absent: `Bash(git commit*)` and `Bash(git add*)` (a research pipeline has no business pre-approving commits) and a bare `WebFetch` (analysts fetch attacker-influenced pages; that prompt should be seen). Add those to your own .claude/settings.local.json if you want them.",
     "allow": [
       "Read",
-      "Write(D:/trading-copilot/data/**)",
-      "Write(D:/trading-copilot/docs/samples/**)",
-      "Edit(D:/trading-copilot/data/**)",
       "Glob",
       "Grep",
-      "Bash(git status)",
-      "Bash(git diff*)",
-      "Bash(git log*)",
-      "Bash(git add data/**)",
-      "Bash(git commit*)",
+      "TodoWrite",
+      "Write(/data/**)",
+      "Edit(/data/**)",
+      "Write(/docs/samples/**)",
       "Bash(python scripts/memory.py*)",
       "Bash(python scripts/validate_outputs.py*)",
+      "Bash(python scripts/validate_pm_output.py*)",
       "Bash(python scripts/assemble_report.py*)",
+      "Bash(python scripts/parse_rating.py*)",
+      "Bash(python scripts/portfolio_check.py*)",
+      "Bash(python scripts/benchmarks.py*)",
+      "Bash(python scripts/montecarlo.py*)",
+      "Bash(python scripts/polymarket_odds.py*)",
+      "Bash(python scripts/prices.py*)",
       "Bash(python scripts/check.py*)",
-      "WebFetch",
-      "TodoWrite"
+      "Bash(python scripts/mcp_handshake.py*)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)"
     ],
     "deny": [
+      "Read(/.env)",
+      "Read(/.env.*)",
+      "Write(/.env)",
+      "Write(/.env.*)",
+      "Edit(/.env)",
+      "Edit(/.env.*)",
       "Bash(rm -rf*)",
       "Bash(git push --force*)",
-      "Write(D:/trading-copilot/.env)",
-      "Edit(D:/trading-copilot/.env)"
+      "Bash(git commit --no-verify*)"
     ]
-  },
-
-  "env": {
-    "TRADING_COPILOT_HOME": "D:/trading-copilot",
-    "TRADING_COPILOT_OUTPUT_LANG": "Chinese"
   }
 }

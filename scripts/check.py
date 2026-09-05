@@ -58,6 +58,16 @@ PLUGIN_STRING_FIELDS = ("repository", "commands", "skills", "mcpServers")
 # A fully-qualified MCP tool reference: mcp__<server>__<tool>.
 _MCP_TOOL_RE = r"mcp__[A-Za-z0-9-]+__[A-Za-z0-9_]+"
 
+# A workflow_dispatch input or event payload spliced straight into a run: block.
+# The job that did this held every API secret in the repo.
+_WORKFLOW_INTERPOLATION_RE = r"\$\{\{\s*(inputs\.[A-Za-z0-9_]+|github\.event[A-Za-z0-9_.]*)"
+
+# Tools whose version silently changed under the scheduled workflows.
+_WORKFLOW_PINNED_INSTALLS = (
+    ("npm i -g @anthropic-ai/claude-code", "@anthropic-ai/claude-code@"),
+    ("pip install ruff", "ruff=="),
+)
+
 OPUS_AGENTS = {"research-manager", "portfolio-manager", "investment-advisor"}
 INTERNAL_DEBATE_AGENTS = {
     "bull-researcher",
@@ -286,6 +296,68 @@ def check_docs_and_workflows() -> None:
 
 
 
+def _is_ignored(candidate: str) -> bool:
+    """True when .gitignore covers the path. Fails open if git is unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", candidate],
+            cwd=ROOT, capture_output=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def check_workflows() -> None:
+    """Lint every GitHub workflow for the defects that actually shipped here.
+
+    Two scheduled workflows failed every run for weeks while this checker stayed
+    green, because the only thing it inspected was whether two strings appeared
+    in one file. These are the mechanical halves of what went wrong: a dispatch
+    input interpolated into a shell script in a job holding every API secret,
+    unpinned tool installs that let the CLI change under us, duplicate "DST"
+    crons that doubled the bill, and paths .gitignore covers so the step either
+    did nothing or published private state.
+    """
+    workflow_dir = ROOT / ".github" / "workflows"
+    if not workflow_dir.is_dir():
+        return
+    for path in sorted(workflow_dir.glob("*.yml")) + sorted(workflow_dir.glob("*.yaml")):
+        text = read(path)
+
+        for match in re.findall(_WORKFLOW_INTERPOLATION_RE, text):
+            err(f"{rel(path)}: interpolates '{match}' into the script — pass it "
+                f"through env: and reference it as a quoted variable instead")
+
+        for tool, pin in _WORKFLOW_PINNED_INSTALLS:
+            for line in text.splitlines():
+                if tool in line and pin not in line:
+                    err(f"{rel(path)}: unpinned install '{tool}' — a silent upstream "
+                        f"change is exactly how the scheduled workflows broke")
+
+        crons = re.findall(r"^\s*-\s*cron:", text, re.M)
+        if len(crons) > 1:
+            err(f"{rel(path)}: {len(crons)} cron entries — GitHub cron has no DST "
+                f"awareness, so 'winter' and 'summer' lines both fire every day")
+
+        for token in re.findall(r"git add ([^\n&|;]+)", text):
+            for candidate in token.split():
+                if _looks_like_path(candidate) and _is_ignored(candidate):
+                    err(f"{rel(path)}: 'git add {candidate}' targets a gitignored "
+                        f"path — the step can never stage anything")
+
+        for block in re.findall(r"^\s*path:\s*\|?\s*$((?:\n\s+\S[^\n]*)+)", text, re.M):
+            for candidate in block.split():
+                if _looks_like_path(candidate) and _is_ignored(candidate):
+                    err(f"{rel(path)}: uploads gitignored path '{candidate}' as an "
+                        f"artifact — that publishes private state")
+
+
+def _looks_like_path(token: str) -> bool:
+    token = token.strip("-\"' ")
+    return bool(token) and not token.startswith(("-", "$", "#", "{"))
+
+
 def check_private_state_not_tracked() -> None:
     try:
         result = subprocess.run(
@@ -323,6 +395,7 @@ def main() -> int:
     check_agents()
     check_skill_mirror()
     check_docs_and_workflows()
+    check_workflows()
     check_private_state_not_tracked()
 
     for warning in warnings:
