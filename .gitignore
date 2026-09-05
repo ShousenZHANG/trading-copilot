@@ -10,6 +10,9 @@ data/positions.md
 data/runs/
 data/memory/trading_memory.md
 data/audit/
+# Telegram push dedup: sha256(ticker|date|rating). The preimage space is tiny,
+# so publishing this file publishes the signal history it was meant to dedup.
+data/state/
 
 # Personal decision outputs — each run writes the user's actual analysis here.
 # Instance state, NOT shippable plugin content. Curated demos live in docs/samples/.
