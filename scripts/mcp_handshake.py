@@ -52,6 +52,16 @@ MCP_CONFIG = ROOT / ".mcp.json"
 # cache. The timeout is about "did it ever answer", not about latency.
 DEFAULT_TIMEOUT = 180.0
 
+# What Claude Code actually allows a stdio MCP server before it gives up
+# (CONNECT_TIMEOUT after 30000ms). A server that answers in 90s passes the
+# handshake and is still broken for every user, so "answered" is not the whole
+# contract -- "answered inside the client's budget" is. Measured cold, with an
+# empty uv cache, `uvx --with mcp<2 yahoo-finance-mcp` takes 26.3s: it fits, but
+# only just, and it did time out in a real session when both servers started at
+# once. Hence the warning band below.
+CLIENT_BUDGET_SECONDS = 30.0
+BUDGET_WARN_RATIO = 0.7
+
 INITIALIZE_REQUEST: dict[str, Any] = {
     "jsonrpc": "2.0",
     "id": 1,
@@ -116,6 +126,20 @@ def server_version(line: str) -> str:
         return f"{info.get('name', '?')} {info.get('version', '?')}"
     except Exception:
         return "?"
+
+
+def budget_verdict(elapsed: float, budget: float = CLIENT_BUDGET_SECONDS) -> str:
+    """Classify a successful handshake against the client's startup timeout.
+
+    'ok' comfortably inside, 'tight' inside but with little headroom (a second
+    server starting concurrently or a slower link will push it over), 'over'
+    past the budget -- which means the server works here and fails in Claude Code.
+    """
+    if elapsed > budget:
+        return "over"
+    if elapsed > budget * BUDGET_WARN_RATIO:
+        return "tight"
+    return "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +294,14 @@ def _self_test() -> int:
     check("server_version extracts name and version", server_version(good), "n 1")
     check("server_version degrades to ?", server_version("junk"), "?")
 
+    # --- budget_verdict: measured yahoo-finance cold start is 26.3s against a 30s budget ---
+    check("well inside the budget is ok", budget_verdict(6.0, 30.0), "ok")
+    check("a 26.3s cold start is tight, not ok", budget_verdict(26.3, 30.0), "tight")
+    check("past the budget is over", budget_verdict(31.0, 30.0), "over")
+    check("exactly at the budget is not over", budget_verdict(30.0, 30.0), "tight")
+    check("exactly at the warn line is not tight", budget_verdict(21.0, 30.0), "ok")
+    check("instant is ok", budget_verdict(0.0, 30.0), "ok")
+
     # --- handshake against fixture processes (no SDK, no network) ---
     ok, _, detail = handshake([sys.executable, "-c", _ECHO_OK], timeout=30)
     check("handshake succeeds against a well-behaved fixture", ok, True)
@@ -307,6 +339,10 @@ def main() -> int:
                     help="probe one named server from .mcp.json (repeatable)")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                     help=f"seconds to wait for a reply (default {DEFAULT_TIMEOUT:.0f})")
+    ap.add_argument("--budget", type=float, default=CLIENT_BUDGET_SECONDS,
+                    help=f"Claude Code's own MCP startup timeout in seconds "
+                         f"(default {CLIENT_BUDGET_SECONDS:.0f}); a server slower than "
+                         f"this answers here and still fails in the client")
     ap.add_argument("argv", nargs="*", help="explicit argv to probe instead of .mcp.json")
     args = ap.parse_args()
 
@@ -336,12 +372,29 @@ def main() -> int:
         return 2
 
     failures = 0
+    over_budget = 0
+    tight = 0
     for name, argv in sorted(servers.items()):
         ok, elapsed, detail = handshake(argv, timeout=args.timeout)
-        print(f"{'PASS' if ok else 'FAIL'}  {elapsed:6.1f}s  {name:16} {detail}")
+        verdict = budget_verdict(elapsed, args.budget) if ok else "fail"
+        label = {"ok": "PASS", "tight": "PASS", "over": "SLOW", "fail": "FAIL"}[verdict]
+        note = {"tight": "  [tight: little headroom under the client budget]",
+                "over": f"  [OVER the {args.budget:.0f}s client budget — "
+                        f"Claude Code will report CONNECT_TIMEOUT]"}.get(verdict, "")
+        print(f"{label}  {elapsed:6.1f}s  {name:16} {detail}{note}")
         failures += 0 if ok else 1
+        over_budget += 1 if verdict == "over" else 0
+        tight += 1 if verdict == "tight" else 0
+
     print(f"\n{len(servers) - failures}/{len(servers)} server(s) completed the handshake.")
-    return 1 if failures else 0
+    if tight:
+        print(f"{tight} server(s) answered but with little headroom under the "
+              f"{args.budget:.0f}s client budget. A cold uv cache or two servers "
+              f"starting at once can push them over — pre-warm after install.")
+    if over_budget:
+        print(f"{over_budget} server(s) exceeded the {args.budget:.0f}s budget. They "
+              f"work from a shell and fail inside Claude Code.", file=sys.stderr)
+    return 1 if (failures or over_budget) else 0
 
 
 if __name__ == "__main__":

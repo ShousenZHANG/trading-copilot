@@ -106,6 +106,26 @@ machine.
 ---
 
 ## Verify your install (Path A)
+### Run the handshake once before your first session (it pre-warms `uv`)
+
+Both default servers are provisioned on demand by `uv`, and Claude Code gives a
+stdio MCP server **30 seconds** to answer before reporting `CONNECT_TIMEOUT`.
+Measured on an empty `uv` cache, `uvx --with mcp<2 yahoo-finance-mcp` takes
+**26.3s** to complete its first handshake — inside the budget, but only just, and
+two servers starting at once can push it over. Once the packages are cached it
+answers in 5–9s.
+
+So run the handshake once, from a shell, before you start Claude Code:
+
+```bash
+python scripts/mcp_handshake.py --all
+```
+
+It reports `SLOW` and exits non-zero for any server that answers but exceeds the
+client's budget, and warns when one is inside it without headroom — a server that
+works from a shell and fails inside Claude Code is the exact failure this repo
+spent a release not noticing.
+
 
 ```bash
 python scripts/check.py                       # repo health: should print OK
