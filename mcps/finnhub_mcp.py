@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#   "mcp[cli]>=1.2.0",
+#   "mcp[cli]>=1.2.0,<2",   # 2.x removed mcp.server.fastmcp (FastMCP -> MCPServer)
 #   "httpx>=0.27.0",
 # ]
 # ///
@@ -38,13 +38,33 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+
+_MCP_IMPORT_ERROR: Optional[BaseException] = None
+try:
+    from mcp.server.fastmcp import FastMCP
+except ImportError as exc:  # no SDK, OR an SDK major that moved FastMCP (2.x -> MCPServer)
+    # Never collapse this to "not installed": mcp 2.x ships the package but
+    # deleted mcp.server.fastmcp, and that distinction is the whole diagnosis.
+    _MCP_IMPORT_ERROR = exc
+    FastMCP = None  # type: ignore[assignment]
 
 API_KEY = os.environ.get("FINNHUB_API_KEY", "").strip()
 BASE_URL = "https://finnhub.io/api/v1"
 TIMEOUT_SECONDS = 15
 
-mcp = FastMCP("finnhub")
+
+class _NoServer:
+    """Import-time stand-in so the module stays importable without the SDK."""
+
+    @staticmethod
+    def tool(*_args: Any, **_kwargs: Any) -> Any:
+        def _decorator(fn: Any) -> Any:
+            return fn
+
+        return _decorator
+
+
+mcp: Any = FastMCP("finnhub") if FastMCP is not None else _NoServer()
 
 
 def _require_key() -> None:
@@ -53,6 +73,11 @@ def _require_key() -> None:
             "FINNHUB_API_KEY environment variable not set. "
             "Get a free key at https://finnhub.io/register and put it in .env."
         )
+
+
+def _redact(text: str) -> str:
+    """Strip the API key from anything that may reach the model or a log."""
+    return text.replace(API_KEY, "<redacted>") if API_KEY else text
 
 
 def _get(endpoint: str, **params: Any) -> Any:
@@ -65,12 +90,16 @@ def _get(endpoint: str, **params: Any) -> Any:
             response.raise_for_status()
             return response.json()
     except httpx.HTTPStatusError as e:
-        body = e.response.text[:200]
+        body = _redact(e.response.text[:200])
+        # `from None`: the chained httpx exception carries the full request URL,
+        # and the URL carries ?token=<API_KEY>.
         raise RuntimeError(
             f"Finnhub API error {e.response.status_code} for /{endpoint}: {body}"
-        ) from e
+        ) from None
     except httpx.HTTPError as e:
-        raise RuntimeError(f"Finnhub API request failed for /{endpoint}: {e}") from e
+        raise RuntimeError(
+            f"Finnhub API request failed for /{endpoint}: {_redact(str(e))}"
+        ) from None
 
 
 def _default_date_range(look_back_days: int = 7) -> tuple[str, str]:
@@ -284,12 +313,20 @@ def healthcheck() -> dict:
         result = _get("quote", symbol="AAPL")
         if not isinstance(result, dict) or "c" not in result:
             return {"ok": False, "reason": "Unexpected response shape", "result": result}
-        return {"ok": True, "aapl_price": result.get("c"), "key_prefix": API_KEY[:6] + "..."}
+        # Deliberately no key material in the payload: the result is returned
+        # verbatim to the model and lands in transcripts.
+        return {"ok": True, "aapl_price": result.get("c"), "key_configured": bool(API_KEY)}
     except Exception as e:
-        return {"ok": False, "reason": str(e)}
+        return {"ok": False, "reason": _redact(str(e))}
 
 
 def main() -> None:
+    if mcp is None or isinstance(mcp, _NoServer):
+        print(f"cannot start MCP server: {_MCP_IMPORT_ERROR}", file=sys.stderr)
+        print("Run via `uv run --no-project --quiet --script mcps/finnhub_mcp.py` so the "
+              "pinned PEP 723 dependencies (mcp[cli]>=1.2.0,<2) are provisioned.",
+              file=sys.stderr)
+        raise SystemExit(2)
     if not API_KEY:
         print(
             "WARNING: FINNHUB_API_KEY not set. Server will start but every tool will error.",
