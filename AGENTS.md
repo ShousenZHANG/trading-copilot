@@ -1,12 +1,25 @@
 # AGENTS.md
 
+> **This file is a stale mirror. [CLAUDE.md](CLAUDE.md) is authoritative.**
+>
+> It was produced by search-and-replacing "Claude" with "Codex" in CLAUDE.md and has
+> since drifted: it is missing the parser-safety contract, the subagent `tools:`
+> allowlist rule, the MCP SDK pin, the local-scheduling decision, and the
+> shape/contract/runtime check taxonomy. Only 2 of the 14 agents have a `.codex/`
+> counterpart, that config still hardcodes one machine's `D:/` paths, and nothing
+> here ships in the release zip.
+>
+> Its fate is an open maintainer decision: delete it (and `.codex/`) and state that
+> other runtimes are unsupported, or invest in a real sync with a `check.py` drift
+> rule. Until then, do not treat anything below as current.
+
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## What this project is
 
 A **Codex plugin**, not a standalone app. No backend, no build step. The "code" is markdown subagent prompts + slash commands + a thin Python MCP wrapper. The pipeline executes when the user runs a slash command in Codex.
 
-Direct port of [TradingAgents](https://github.com/TauricResearch/TradingAgents) (53k+ stars). Reference source vendored at `reference/TradingAgents/` (gitignored locally but used as design source).
+Direct port of [TradingAgents](https://github.com/TauricResearch/TradingAgents) (100k+ stars). Reference source vendored at `reference/TradingAgents/` (gitignored locally but used as design source).
 
 ## Two entry points (different cost/depth tradeoff)
 

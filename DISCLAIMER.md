@@ -50,8 +50,8 @@ By using this software you waive any claim against its developers, contributors,
 
 ## License
 
-This software is distributed under the MIT License. See [LICENSE](./LICENSE) (when added).
+This software is distributed under the MIT License. See [LICENSE](./LICENSE).
 
 ---
 
-**Last updated**: 2026-04-27
+**Last updated**: 2026-09-05

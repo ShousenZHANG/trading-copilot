@@ -1,85 +1,72 @@
 ---
-description: Quarterly earnings update for a single ticker. Pulls latest 10-Q + transcript + consensus, computes beat/miss vs estimates, updates thesis. Use after a covered name reports. Direct port of financial-services /earnings pattern, adapted for free-tier MCPs.
+description: "[inactive · 未激活] Quarterly earnings update for a single ticker — NOT IMPLEMENTED. The agent, the validator kind, and the report slot it needs do not exist yet; invoking it does nothing. Kept as the activation spec. Use /advise or /analyze after a company reports."
 argument-hint: <TICKER> [--quarter=Q1-FY27]
 ---
 
-# /earnings — Quarterly Earnings Update
+# /earnings — Quarterly Earnings Update (not implemented)
 
-Run a focused earnings update on `$ARGUMENTS`. Faster + narrower than `/analyze` — only relevant when a quarterly result has just dropped.
+> ⛔ **This command is a specification, not a feature.** It has no
+> `earnings-reviewer` agent to dispatch to, `validate_outputs.py` has no
+> `earnings` kind, and the assembler has no slot for an earnings note. Running it
+> would fail on its first scripted step. Nothing below is executed.
+>
+> **What to run instead, today**: `/advise <TICKER>` for a fast post-print read,
+> or `/analyze <TICKER>` when the quarter genuinely changes the thesis.
 
-> ⚠️ **Status: graduation-phase command.** Until graduation gates pass (see [docs/strategy.md](../../docs/strategy.md), capital ≥$30k AUD), the user holds 100% ETFs. This command only matters when buying individual stocks. Stub kept for future activation.
+## What it would do (design intent)
 
-## When to use
+A focused earnings update — narrower and cheaper than `/analyze` — run when a
+covered name has just reported: pull the quarter's actual EPS/revenue against
+consensus, the call commentary, and the post-print analyst revisions; compute
+beat/miss magnitude, segment surprises, guidance delta and margin direction; and
+write a short earnings note stating whether the prior thesis is intact,
+weakening, or due for a re-rate.
 
-- Company reported within the last 7 days, you have or are considering a position
-- The Q result was a meaningful beat or miss vs consensus
-- Updated forward guidance shifts your thesis
+## When it would be worth using
+
+- Company reported within the last 7 days, and you hold or are considering the name
+- The result was a meaningful beat or miss versus consensus
+- Updated forward guidance shifts the thesis
 
 ## Difference vs `/analyze`
 
 | `/analyze` | `/earnings` |
 |------------|-------------|
-| 13-agent full debate (Bull/Bear + 3-way risk + PM) | 1 specialist agent (earnings-reviewer), no debate |
+| 12-agent full debate (Bull/Bear + 3-way risk + PM) | 1 specialist agent (earnings-reviewer), no debate |
 | 30-60 min, $1-3 | 8-15 min, $0.30-0.80 |
-| Generates new investment thesis | Updates existing thesis with new quarterly data |
-| Produces full decision report | Produces earnings note with delta-from-prior |
+| Generates a new investment thesis | Updates an existing thesis with new quarterly data |
+| Produces a full decision report | Produces an earnings note with delta-from-prior |
 
-## Args
+## Args (design intent)
 
-- **`$ARGUMENTS`**: first token is ticker (preserve exchange suffix)
-- `--quarter=Q1-FY27` (optional): override which quarter to analyze. If omitted, agent infers most-recent reported quarter.
+- **`$ARGUMENTS`**: first token is ticker (preserve the exchange suffix)
+- `--quarter=Q1-FY27` (optional): override which quarter to analyze. If omitted,
+  the agent infers the most-recent reported quarter.
 
-## Execution
+## Memory log: deliberately out of scope
 
-### Step 1: Resolve + freshness check
-
-1. Parse ticker + quarter
-2. Today's date from system clock
-3. Verify `mcp__finnhub__get_earnings_surprise` confirms the quarter exists
-4. If most recent earnings >7 days old, ask user "do you really want a stale earnings update? Run `/analyze` instead"
-
-### Step 2: Single dispatch — `earnings-reviewer` subagent
-
-Run brief:
-
-```
-Ticker: <TICKER>
-Date: <YYYY-MM-DD>
-Quarter: <Q1-FY27 or whatever was inferred>
-Output path: data/runs/<TICKER>-<DATE>/09-earnings-update.md
-User context: AU retail investor in graduation phase, satellite position size 5% of portfolio max.
-```
-
-The agent:
-1. Fetches `mcp__finnhub__get_earnings_surprise` → consensus EPS / Rev vs actual
-2. Fetches `mcp__finnhub__get_company_news` (last 7 days) → call commentary, segment color
-3. Fetches `mcp__yahoo-finance__get_yahoo_finance_news` → analyst reaction notes
-4. Fetches `mcp__yahoo-finance__get_recommendations` → post-earnings target / rating revisions
-5. Computes: beat/miss magnitudes, segment surprises, guidance delta vs prior, margin direction
-6. Writes earnings update report (3-6 sections, 1-2 KB) — NOT a full /analyze report
-
-### Step 3: Update memory + assemble
-
-```bash
-python scripts/validate_outputs.py earnings data/runs/<TICKER>-<DATE>/09-earnings-update.md
-python scripts/memory.py append --ticker <TICKER> --date <DATE> --decision-file data/runs/<TICKER>-<DATE>/09-earnings-update.md
-```
-
-(Note: validator extension for `kind=earnings` is **TBD** — see [TODO](#TODO).)
-
-### Step 4: Reply to user
-
-- Headline: beat/miss + magnitude + thesis-impact verdict (e.g. "thesis intact" / "thesis weakening" / "rerate up")
-- 1 sentence on most consequential item
-- Path to full update
+An earnings note is **evidence, not a decision**, so it must never be appended to
+the memory log: the note's own prose contains the words Buy/Hold/Sell, and the
+rating parser falls back to "first rating word anywhere in the file", so
+appending one writes a rating no agent ever issued — which the weekly review then
+resolves and learns from. See
+[ADR-0002](../../docs/adr/0002-local-scheduling-and-evidence-only-stubs.md).
 
 ## TODO before activation
 
-- [ ] Build `.claude/agents/specialists/earnings-reviewer.md` prompt (modeled on financial-services `earnings-reviewer.md`)
-- [ ] Add `validate_earnings_update(text)` to `scripts/validate_outputs.py`
-- [ ] Add `09-earnings-update.md` to assembler if user wants to surface in main report
-- [ ] Decide: does `/earnings` after a `/analyze` supersede the prior PM rating? Probably yes, with explicit "supersedes 2026-04-27 Buy → updated to Hold post-Q1 miss" annotation in memory log.
+- [ ] Build `.claude/agents/specialists/earnings-reviewer.md` prompt (modeled on financial-services `earnings-reviewer.md`), granting the MCP servers it actually calls in its `tools:` allowlist
+- [ ] Add `validate_earnings_update(text)` and a `kind=earnings` branch to `scripts/validate_outputs.py`
+- [ ] Add `09-earnings-update.md` to the assembler if the note should surface in the main report
+- [ ] Decide how a supersede is recorded: an earnings note must either carry an explicit `**Rating**` written to the 5-tier schema (and be appended with `memory.py append --rating`), or stay out of the log entirely. Never let the parser guess.
+- [ ] Drop the `[inactive · 未激活]` prefix from `description:` and restore an Execution section only once all of the above exist
+
+## Output language
+
+User-facing output follows [.claude/config/output-language.md](../config/output-language.md)
+(currently Chinese 中文). Ticker symbols, indicator names and numbers stay in English.
 
 ## Source
 
 Direct port of [`anthropic/financial-services/plugins/vertical-plugins/equity-research/commands/earnings.md`](https://github.com/anthropics/financial-services/blob/main/plugins/vertical-plugins/equity-research/commands/earnings.md). Adapted: removed DOCX output (markdown only), replaced Bloomberg/FactSet with Finnhub free tier.
+
+> ⚠️ Educational use only. Not investment advice. See [DISCLAIMER.md](../../DISCLAIMER.md).
