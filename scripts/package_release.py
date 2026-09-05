@@ -29,6 +29,7 @@ USAGE
     python scripts/package_release.py            # version from plugin.json
     python scripts/package_release.py --version 0.2.0
     python scripts/package_release.py --stamp 2026-06-01   # date suffix
+    python scripts/package_release.py --self-test          # audit unit tests
 
 Output: dist/trading-copilot-<version>.zip
 """
@@ -158,17 +159,30 @@ def _hardcoded_mcp_secrets(config_text: str) -> list[str]:
     return offenders
 
 
+def _forbidden_archive_name(name: str) -> bool:
+    """True for an archive member that must never ship (secrets/personal state).
+
+    This is the single definition of the leak rule; ``_audit_zip`` is its only
+    caller, and ``main`` runs the audit. Keeping a second inline copy in ``main``
+    is what let the two drift apart in the first place.
+    """
+    low = name.lower()
+    if low.endswith("/.env") or low.endswith("/positions.md"):
+        return True
+    if "trading_memory.md" in low:
+        return True
+    return "/data/decisions/" in low or "/data/runs/" in low
+
+
 def _audit_zip(out: Path) -> list[str]:
     """Post-build verification: no secrets, no personal state, listing complete."""
     problems: list[str] = []
     with zipfile.ZipFile(out) as zf:
         names = zf.namelist()
         for name in names:
+            if _forbidden_archive_name(name):
+                problems.append(name)
             low = name.lower()
-            if low.endswith("/.env") or low.endswith("/positions.md") or "trading_memory.md" in low:
-                problems.append(name)
-            if "/data/decisions/" in low or "/data/runs/" in low:
-                problems.append(name)
             if low.endswith(".mcp.json") or low.endswith(".mcp.json.template"):
                 text = zf.read(name).decode("utf-8", errors="replace")
                 problems += [f"{name}: hardcoded secret at {p}" for p in _hardcoded_mcp_secrets(text)]
@@ -221,30 +235,124 @@ def build(version: str, stamp: str | None) -> Path:
     return out
 
 
+# --------------------------------------------------------------------------
+# Built-in unit tests (deterministic, offline).
+# Run: python scripts/package_release.py --self-test
+# --------------------------------------------------------------------------
+_CLEAN_MCP = json.dumps({
+    "mcpServers": {
+        "finnhub": {"command": "uv", "env": {"FINNHUB_API_KEY": "${FINNHUB_API_KEY}"}},
+        "yahoo-finance": {"command": "uvx"},
+    }
+})
+
+_LEAKY_MCP = json.dumps({
+    "mcpServers": {
+        "finnhub": {"command": "uv", "env": {"FINNHUB_API_KEY": "d1abc23def456"}},
+        "vendor": {"command": "npx", "headers": {"Authorization": "Bearer sk-live-xyz"}},
+    }
+})
+
+
+def _required_files_are_shippable() -> bool:
+    """Every REQUIRED_ARTIFACT_FILES entry must be covered by the allow-list.
+
+    Pure string logic — this is the check that catches the list drifting after
+    a path is dropped from INCLUDE_PATHS (as ``.github/`` was).
+    """
+    for required in REQUIRED_ARTIFACT_FILES:
+        covered = any(
+            required == inc or required.startswith(inc.rstrip("/") + "/")
+            for inc in INCLUDE_PATHS
+        )
+        if not covered or _excluded(required):
+            return False
+    return True
+
+
+def _self_test() -> int:
+    leaky = _hardcoded_mcp_secrets(_LEAKY_MCP)
+    cases: list[tuple[str, bool]] = [
+        # --- _hardcoded_mcp_secrets --------------------------------------
+        ("${VAR} substitution is clean", _hardcoded_mcp_secrets(_CLEAN_MCP) == []),
+        ("literal env key is flagged", "finnhub.env.FINNHUB_API_KEY" in leaky),
+        ("literal header value is flagged", "vendor.headers.Authorization" in leaky),
+        ("exactly the two literals are flagged", len(leaky) == 2),
+        ("server with no env/headers is not flagged",
+            _hardcoded_mcp_secrets(json.dumps({"mcpServers": {"a": {"command": "x"}}})) == []),
+        ("unparseable config is a finding",
+            _hardcoded_mcp_secrets("{not json") == ["<unparseable MCP config>"]),
+        ("config without mcpServers is clean", _hardcoded_mcp_secrets("{}") == []),
+        ("the repo's own .mcp.json files are clean",
+            all(_hardcoded_mcp_secrets((ROOT / name).read_text(encoding="utf-8")) == []
+                for name in (".mcp.json", ".mcp.json.template")
+                if (ROOT / name).exists())),
+        # --- _excluded (path predicate) -----------------------------------
+        ("personal state excluded: positions.md", _excluded("data/positions.md")),
+        ("personal state excluded: trading_memory.md",
+            _excluded("data/memory/trading_memory.md")),
+        ("personal state excluded: per-run analysis",
+            _excluded("data/runs/NVDA-2026-04-27/01-market.md")),
+        ("personal state excluded: assembled decision",
+            _excluded("data/decisions/NVDA-2026-04-27.md")),
+        ("dotenv excluded", _excluded(".env")),
+        ("local settings excluded", _excluded(".claude/settings.local.json")),
+        ("nested __pycache__ excluded", _excluded("scripts/__pycache__/runtime.cpython-312.pyc")),
+        ("allowed path kept: README.md", not _excluded("README.md")),
+        ("allowed nested path kept: a skill file",
+            not _excluded(".claude/skills/trading-copilot/SKILL.md")),
+        ("allowed nested path kept: a script", not _excluded("scripts/montecarlo.py")),
+        ("allowed path kept: .env.example", not _excluded(".env.example")),
+        ("allowed path kept: watchlist", not _excluded("data/watchlist.md")),
+        ("windows separators normalised", _excluded("data\\runs\\NVDA-2026-04-27\\01-market.md")),
+        # --- archive-member predicate + required-file list -----------------
+        ("archive leak: .env member",
+            _forbidden_archive_name("trading-copilot/.env")),
+        ("archive leak: positions.md member",
+            _forbidden_archive_name("trading-copilot/data/positions.md")),
+        ("archive leak: run artifact member",
+            _forbidden_archive_name("trading-copilot/data/runs/NVDA-2026-04-27/01-market.md")),
+        ("archive ok: .env.example member",
+            not _forbidden_archive_name("trading-copilot/.env.example")),
+        ("archive ok: README member",
+            not _forbidden_archive_name("trading-copilot/README.md")),
+        ("required files are all covered by the allow-list",
+            _required_files_are_shippable()),
+        (".github/ is not in the shipped payload",
+            not any(inc.startswith(".github") for inc in INCLUDE_PATHS)),
+    ]
+
+    passed = 0
+    for label, ok in cases:
+        passed += ok
+        print(f"  {'ok ' if ok else 'XX '} {label}")
+    print(f"\n{passed}/{len(cases)} package_release unit tests passed.")
+    return 0 if passed == len(cases) else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Package Trading Copilot release zip")
     ap.add_argument("--version", default=None, help="override version (default: from plugin.json)")
     ap.add_argument("--stamp", default=None, help="optional date suffix, e.g. 2026-06-01")
+    ap.add_argument("--self-test", action="store_true", help="run built-in audit unit tests")
     args = ap.parse_args()
+
+    if args.self_test:
+        return _self_test()
 
     version = args.version or plugin_version()
     out = build(version, args.stamp)
 
-    # Post-build verification: open the zip and assert no secret/personal files.
-    forbidden = []
-    with zipfile.ZipFile(out) as zf:
-        for name in zf.namelist():
-            low = name.lower()
-            if low.endswith("/.env") or low.endswith("/positions.md") or "trading_memory.md" in low:
-                forbidden.append(name)
-            if "/data/decisions/" in low or "/data/runs/" in low:
-                forbidden.append(name)
-    if forbidden:
-        print("ERROR: release zip contains forbidden files:", file=sys.stderr)
-        for n in forbidden:
-            print(f"  {n}", file=sys.stderr)
+    # Post-build verification. This is the security control the module docstring
+    # and the README advertise: no secrets, no personal state, no missing
+    # required file. A non-empty problem list fails the release.
+    problems = _audit_zip(out)
+    if problems:
+        print("ERROR: release audit failed:", file=sys.stderr)
+        for p in problems:
+            print(f"  {p}", file=sys.stderr)
         return 1
-    print("Leak check passed: no secrets or personal state in the zip.")
+    print("Release audit passed: no secrets, no personal state, listing complete.")
     return 0
 
 
