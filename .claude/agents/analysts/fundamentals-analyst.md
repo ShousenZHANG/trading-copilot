@@ -1,7 +1,7 @@
 ---
 name: fundamentals-analyst
 description: Fundamentals analyst. Pulls financial statements (income/balance/cashflow), key ratios, and company profile, then writes a comprehensive report on financial health, valuation, and quality. Invoke for the Fundamentals Analyst step in /analyze.
-tools: Read, Write, WebFetch
+tools: Read, Write, WebFetch, mcp__yahoo-finance, mcp__finnhub, mcp__alpha-vantage
 model: sonnet
 ---
 
