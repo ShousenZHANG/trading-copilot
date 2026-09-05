@@ -1,67 +1,27 @@
 {
+  "_doc": "Active MCP servers. Only what a clean install needs; everything else lives in .mcp.json.template and is added with `python scripts/enable_mcp.py <name>`. Two invariants are load-bearing here: no `cmd /c` wrapper (it is Windows-only AND it re-parses the argv, so `mcp<2` became a shell redirect), and no absolute paths (a relative --script path resolves against the project root on every OS).",
   "mcpServers": {
     "yahoo-finance": {
-      "command": "cmd",
-      "args": ["/c", "uvx", "yahoo-finance-mcp"]
+      "_doc": "Free, no API key. Primary market-data source. `--with mcp<2` is load-bearing: the upstream package imports mcp.server.fastmcp, which mcp 2.x deleted (FastMCP was renamed MCPServer). Without the pin the server dies at import and Claude Code reports -32000 Connection closed.",
+      "command": "uvx",
+      "args": [
+        "--with",
+        "mcp<2",
+        "yahoo-finance-mcp"
+      ]
     },
     "finnhub": {
-      "_doc": "Custom thin Python MCP wrapping Finnhub REST API. Replaces the broken npm finnhub-mcp (Windows path bug). Source: mcps/finnhub_mcp.py.",
-      "command": "cmd",
-      "args": ["/c", "uv", "run", "--no-project", "--quiet", "--script", "D:/trading-copilot/mcps/finnhub_mcp.py"],
+      "_doc": "Custom thin Python MCP wrapping the Finnhub REST API. Replaces the broken npm finnhub-mcp (Windows path bug). Source: mcps/finnhub_mcp.py. Free tier 60 req/min.",
+      "command": "uv",
+      "args": [
+        "run",
+        "--no-project",
+        "--quiet",
+        "--script",
+        "mcps/finnhub_mcp.py"
+      ],
       "env": {
         "FINNHUB_API_KEY": "${FINNHUB_API_KEY}"
-      }
-    },
-    "_polygon": {
-      "command": "cmd",
-      "args": ["/c", "uvx", "mcp_polygon"],
-      "env": {
-        "POLYGON_API_KEY": "${POLYGON_API_KEY}"
-      }
-    },
-    "_alpha-vantage": {
-      "type": "http",
-      "url": "https://mcp.alphavantage.co/mcp",
-      "headers": {
-        "Authorization": "Bearer ${ALPHA_VANTAGE_API_KEY}"
-      }
-    },
-    "_fred": {
-      "command": "cmd",
-      "args": ["/c", "npx", "-y", "fred-mcp-server"],
-      "env": {
-        "FRED_API_KEY": "${FRED_API_KEY}"
-      }
-    },
-    "_gold": {
-      "command": "cmd",
-      "args": ["/c", "uvx", "mcp-metal-price"],
-      "env": {
-        "GOLDAPI_KEY": "${GOLD_API_KEY}"
-      }
-    },
-    "_exa": {
-      "command": "cmd",
-      "args": ["/c", "npx", "-y", "exa-mcp-server"],
-      "env": {
-        "EXA_API_KEY": "${EXA_API_KEY}"
-      }
-    },
-    "_claude-mem": {
-      "command": "cmd",
-      "args": ["/c", "npx", "-y", "claude-mem"]
-    },
-    "_akshare": {
-      "_doc": "Custom thin Python MCP wrapping AkShare for A-share / HK / index data. NO API KEY. Disabled by default: extra deps + slow first import (uv provisions akshare+pandas on first run). Source: mcps/akshare_mcp.py. Enable: python scripts/enable_mcp.py akshare",
-      "command": "cmd",
-      "args": ["/c", "uv", "run", "--no-project", "--quiet", "--script", "D:/trading-copilot/mcps/akshare_mcp.py"]
-    },
-    "_tushare": {
-      "_doc": "Tushare Pro hosted MCP (streamable HTTP). Fallback below AkShare because it requires a token and gates endpoints behind a points quota. Config only - no code in this repo.",
-      "type": "http",
-      "url": "https://mcp.tushare.pro/mcp",
-      "headers": {
-        "X-Tushare-Token": "${TUSHARE_TOKEN}"
       }
     }
   }
