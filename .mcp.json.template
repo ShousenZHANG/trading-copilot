@@ -1,12 +1,34 @@
 {
-  "_doc": "Template showing all 10 supported MCP servers. Copy entries you want into .mcp.json. Restart Claude Code after editing.",
+  "_doc": "Catalog of every supported MCP server. `.mcp.json` holds only the active ones; `python scripts/enable_mcp.py <name>` copies an entry from here into it, and `--disable` removes it again. Edit by hand only if you know why.",
   "_setup_links": "See docs/mcp-setup.md for signup links and free-tier limits.",
+  "_conventions": "No `cmd /c` wrapper: it is Windows-only, and cmd re-parses the argv so a `<` in a version pin turns into a shell redirect. No absolute paths: a relative `--script` path resolves against the project root on every OS. Keys are plain names -- a leading underscore is NOT a disable switch, Claude Code launches every key it finds.",
 
   "mcpServers": {
     "yahoo-finance": {
-      "_doc": "Free, no API key. Primary stock data fallback.",
+      "_doc": "Free, no API key. Primary market-data source. `--with mcp<2` is load-bearing: the upstream package imports mcp.server.fastmcp, which mcp 2.x deleted.",
       "command": "uvx",
-      "args": ["yahoo-finance-mcp"]
+      "args": ["--with", "mcp<2", "yahoo-finance-mcp"]
+    },
+    "finnhub": {
+      "_doc": "News + financials + earnings. Free 60/min. Local Python wrapper; avoids the npm finnhub-mcp Windows path bug.",
+      "command": "uv",
+      "args": ["run", "--no-project", "--quiet", "--script", "mcps/finnhub_mcp.py"],
+      "env": {
+        "FINNHUB_API_KEY": "${FINNHUB_API_KEY}"
+      }
+    },
+    "akshare": {
+      "_doc": "A-share / HK / index data. NO API KEY, no registration. Fills the .SS/.SZ gap Yahoo and Finnhub do not cover. Local Python wrapper, PEP 723 deps provisioned by uv. Not active by default: extra deps and a slow first import. Its endpoints are mainland-China hosted and may be unreachable from some networks -- run `python mcps/akshare_mcp.py --probe` before relying on it.",
+      "command": "uv",
+      "args": ["run", "--no-project", "--quiet", "--script", "mcps/akshare_mcp.py"]
+    },
+    "fred": {
+      "_doc": "Fed economic data: rates, CPI, yields, DXY. Free unlimited. Needed by macro-analyst for /gold.",
+      "command": "npx",
+      "args": ["-y", "fred-mcp-server"],
+      "env": {
+        "FRED_API_KEY": "${FRED_API_KEY}"
+      }
     },
     "polygon": {
       "_doc": "Polygon.io - 35+ tools for stocks/options/forex/crypto. Free tier 5/min.",
@@ -24,22 +46,6 @@
         "Authorization": "Bearer ${ALPHA_VANTAGE_API_KEY}"
       }
     },
-    "finnhub": {
-      "_doc": "News + financials + earnings. Free 60/min. Uses the local Python wrapper to avoid the npm finnhub-mcp Windows path bug.",
-      "command": "cmd",
-      "args": ["/c", "uv", "run", "--no-project", "--quiet", "--script", "D:/trading-copilot/mcps/finnhub_mcp.py"],
-      "env": {
-        "FINNHUB_API_KEY": "${FINNHUB_API_KEY}"
-      }
-    },
-    "fred": {
-      "_doc": "Fed economic data: rates, CPI, yields, DXY. Free unlimited.",
-      "command": "npx",
-      "args": ["-y", "fred-mcp-server"],
-      "env": {
-        "FRED_API_KEY": "${FRED_API_KEY}"
-      }
-    },
     "gold": {
       "_doc": "Spot gold via GoldAPI. Free 100/mo. Optional - yfinance GC=F also works.",
       "command": "uvx",
@@ -49,30 +55,22 @@
       }
     },
     "exa": {
-      "_doc": "Neural web search for Reddit/X/news/filings. $10 free credits.",
+      "_doc": "Neural web search for Reddit/X/news/filings. $10 free credits. The social analyst degrades to keyless Reddit RSS without it (docs/mcp-fallback.md).",
       "command": "npx",
       "args": ["-y", "exa-mcp-server"],
       "env": {
         "EXA_API_KEY": "${EXA_API_KEY}"
       }
     },
-    "claude-mem": {
-      "_doc": "Cross-session memory. Free local SQLite + Chroma. Skip if you already have claude-mem at user level.",
-      "command": "npx",
-      "args": ["-y", "claude-mem"]
-    },
-    "akshare": {
-      "_doc": "A-share / HK / index data. NO API KEY, no registration. Fills the .SS/.SZ gap Finnhub and Yahoo do not cover. Local Python wrapper, PEP 723 deps provisioned by uv. Ships disabled as _akshare (extra deps + slow first import).",
-      "command": "cmd",
-      "args": ["/c", "uv", "run", "--no-project", "--quiet", "--script", "D:/trading-copilot/mcps/akshare_mcp.py"]
-    },
     "tushare": {
-      "_doc": "Tushare Pro hosted MCP (streamable HTTP). Only if AkShare is insufficient - needs a token and a points quota. Get one at https://tushare.pro/register",
+      "_doc": "Tushare Pro hosted MCP (streamable HTTP). Below AkShare in the fallback chain because it needs a token and gates endpoints behind a points quota. Config only - no code in this repo.",
       "type": "http",
       "url": "https://mcp.tushare.pro/mcp",
       "headers": {
         "X-Tushare-Token": "${TUSHARE_TOKEN}"
       }
     }
-  }
+  },
+
+  "_windows_note": "npx-based servers (fred, exa) ship a .cmd shim on Windows. If Claude Code cannot spawn them directly, wrap that one entry: \"command\": \"cmd\", \"args\": [\"/c\", \"npx\", \"-y\", \"<pkg>\"]. Never do this for uv/uvx (real executables), and never put a `<` inside a cmd-wrapped argv."
 }
