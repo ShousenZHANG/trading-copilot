@@ -6,8 +6,10 @@ import tempfile
 from pathlib import Path
 
 from assemble_report import assemble
-from ticker import validate_ticker_component
+from parse_rating import first_rating_word, parse_rating
+from ticker import validate_date_component, validate_ticker_component
 from validate_outputs import (
+    _field,
     validate_portfolio_manager,
     validate_research_plan,
     validate_run_dir,
@@ -25,6 +27,56 @@ def test_ticker_validation() -> None:
             pass
         else:
             raise AssertionError(f"expected unsafe ticker to fail: {bad!r}")
+
+
+def test_date_validation() -> None:
+    """The run date is the other half of every run path; it must be as strict."""
+    for good in ("2026-01-05", "2026-12-31", "2024-02-29"):
+        assert validate_date_component(good) == good
+    bad_dates = (
+        "",                      # empty
+        "2026-1-5",              # unpadded
+        "20260105",              # compact form
+        "2026-13-01",            # month out of range
+        "2026-02-30",            # not a real day
+        "../../etc/passwd",      # traversal
+        "2026-01-05/..",         # traversal suffix
+        "2026-01-05 ",           # trailing space
+        "2026-01-05T00:00:00",   # datetime, not a date
+        None,                    # wrong type
+    )
+    for bad in bad_dates:
+        try:
+            validate_date_component(bad)  # type: ignore[arg-type]
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected unsafe date to fail: {bad!r}")
+
+
+def test_rating_parser_agrees_with_validator() -> None:
+    """C1 regression: the log writer and the validator must read the same line.
+
+    parse_rating used to search each line UNANCHORED, so a conclusion-card
+    bullet beat the real header and memory.py logged the opposite call while
+    validate_outputs happily passed the file.
+    """
+    card = (
+        "**结论卡**\n"
+        "- 现在做什么: 减半, rating: Buy 只是卡片措辞\n"
+        "| rating: Buy | 表格诱饵 |\n\n"
+        "**Rating**: Underweight\n\n"
+        "**Executive Summary**: 降配.\n\n"
+        "**Investment Thesis**: 集中度过高.\n"
+    )
+    assert parse_rating(card) == "Underweight"
+    assert first_rating_word(_field(card, "Rating")) == "Underweight"
+    assert validate_portfolio_manager(card).ok, validate_portfolio_manager(card).errors
+
+    # Full-width colon: both readers must accept it, or they disagree again.
+    fullwidth = "**Rating**：Sell\n\n**Executive Summary**: x\n\n**Investment Thesis**: y\n"
+    assert parse_rating(fullwidth) == "Sell"
+    assert first_rating_word(_field(fullwidth, "Rating")) == "Sell"
 
 
 def test_output_contracts() -> None:
@@ -93,6 +145,8 @@ def test_run_validation_and_assembly() -> None:
 
 if __name__ == "__main__":
     test_ticker_validation()
+    test_date_validation()
+    test_rating_parser_agrees_with_validator()
     test_output_contracts()
     test_run_validation_and_assembly()
     print("ALL TESTS PASSED")

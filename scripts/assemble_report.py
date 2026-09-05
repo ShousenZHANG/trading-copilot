@@ -25,8 +25,9 @@ import re
 import sys
 from pathlib import Path
 
+from parse_rating import first_rating_word, parse_rating
 from runtime import force_utf8_stdio
-from ticker import validate_ticker_component
+from ticker import validate_date_component, validate_ticker_component
 from validate_outputs import validate_run_dir
 
 force_utf8_stdio()
@@ -114,7 +115,10 @@ def _headline_block(pm_text: str) -> str:
 
 
 def assemble(ticker: str, date: str, run_dir: Path, out_path: Path) -> str:
+    # Both halves of the run path are validated. The date used to reach the
+    # filesystem unchecked, so `--date ../../x` escaped data/decisions/.
     validate_ticker_component(ticker)
+    validate_date_component(date)
     result = validate_run_dir(run_dir)
     for warning in result.warnings:
         print(f"warning: {warning}", file=sys.stderr)
@@ -241,10 +245,34 @@ _LEGACY_PM = (
     "**Investment Thesis**: 证据均衡.\n\n"
     "**Time Horizon**: 3-6 months\n"
 )
+# The hazard the parser-safety rule exists for: an English rating word inside
+# the Chinese card. parse_rating's third pass is "first rating word anywhere",
+# so if the anchored `**Rating**:` header were ever dropped or mangled, this
+# document would be logged as Buy when the actual call is Underweight.
+_POISONED_CARD_PM = (
+    "**结论卡**\n"
+    "\n"
+    "**减仓一半.** 看穿浓度越线.\n"
+    "\n"
+    "| 项 | 内容 |\n"
+    "|----|------|\n"
+    "| 现在做什么 | 不要 Buy, 减仓 |\n"
+    "\n"
+    "**Rating**: Underweight\n"
+)
+
+
+def _date_ok(value: str) -> bool:
+    """True when ``value`` survives the shared date-component guard."""
+    try:
+        validate_date_component(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _self_test() -> int:
-    """Deterministic built-in cases for the 结论卡 extraction path."""
+    """Built-in cases for 结论卡 extraction, parser safety, and --date validation."""
     runaway = "**结论卡**\n" + "\n".join(f"line {i}" for i in range(60))
     cases: list[tuple[str, str, bool]] = [
         # (label, pm_text, expect_card)
@@ -272,6 +300,25 @@ def _self_test() -> int:
         ("headline survives without card", _headline_block(_LEGACY_PM) == _headline(_LEGACY_PM)),
         ("runaway bounded to 20 lines", len((_conclusion_card(runaway) or "").splitlines()) <= 20),
         ("extraction is idempotent", _conclusion_card(_CARD_PM) == _conclusion_card(_CARD_PM)),
+        # --- parser safety: the card must not be able to change the logged rating.
+        # parse_rating pass 3 is "first rating word ANYWHERE", so an English
+        # rating word inside the card is a live hazard, not a style nit.
+        ("shipped card template contains no English rating word",
+         first_rating_word(_conclusion_card(_CARD_PM) or "") is None),
+        ("anchored **Rating** beats an English word inside the card",
+         parse_rating(_POISONED_CARD_PM) == "Underweight"),
+        ("assembled report keeps the same rating parse_rating sees",
+         parse_rating(_CARD_PM) == "Hold" and "Rating: Hold" in _headline_block(_CARD_PM)),
+        ("legacy pre-card run parses identically",
+         parse_rating(_LEGACY_PM) == "Hold"),
+        ("card extraction never swallows the **Rating** line",
+         first_rating_word(_conclusion_card(_POISONED_CARD_PM) or "") == "Buy"
+         and "**Rating**" not in (_conclusion_card(_POISONED_CARD_PM) or "")),
+        # --- --date is a path component and is validated like the ticker.
+        ("--date rejects path traversal", not _date_ok("../../etc")),
+        ("--date rejects an unpadded date", not _date_ok("2026-1-5")),
+        ("--date rejects an impossible date", not _date_ok("2026-02-30")),
+        ("--date accepts a real ISO date", _date_ok("2026-06-25")),
     ]
     for label, ok in checks:
         failures += not ok
@@ -296,11 +343,17 @@ def main() -> int:
     if not args.ticker or not args.date:
         parser.error("--ticker and --date are required (or pass --self-test)")
 
-    ticker = validate_ticker_component(args.ticker)
-    run_dir = Path(args.run_dir) if args.run_dir else ROOT / "data" / "runs" / f"{ticker}-{args.date}"
-    out_path = Path(args.out) if args.out else ROOT / "data" / "decisions" / f"{ticker}-{args.date}.md"
     try:
-        print(assemble(ticker, args.date, run_dir, out_path))
+        ticker = validate_ticker_component(args.ticker)
+        run_date = validate_date_component(args.date)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    run_dir = Path(args.run_dir) if args.run_dir else ROOT / "data" / "runs" / f"{ticker}-{run_date}"
+    out_path = Path(args.out) if args.out else ROOT / "data" / "decisions" / f"{ticker}-{run_date}.md"
+    try:
+        print(assemble(ticker, run_date, run_dir, out_path))
         return 0
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
