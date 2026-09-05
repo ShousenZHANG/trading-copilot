@@ -25,9 +25,9 @@ jobs:
         python-version: ['3.11', '3.12', '3.13']
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -83,16 +83,50 @@ jobs:
               print(f"ok  {name}")
           PY
 
+  runtime:
+    name: runtime contracts (MCP handshake + plugin validate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@v10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      # The check nothing else in this repo performed. Every other job asserts
+      # the SHAPE of a file; these two start real processes. Both shipped MCP
+      # servers were unstartable for weeks -- mcp[cli] had no upper bound, the
+      # SDK released 2.x, and 2.x deleted mcp.server.fastmcp -- while the entire
+      # suite stayed green, because a --self-test is designed to pass without
+      # the SDK, without a network and without a running process.
+      - name: Every shipped MCP server completes a JSON-RPC handshake
+        run: python scripts/mcp_handshake.py --all --timeout 300
+
+      # The repo checker and the official validator disagreed for a whole
+      # release: check.py required a `category` field that `plugin validate`
+      # reports as misplaced, while three real schema errors went unnoticed.
+      # Run the validator itself so they cannot drift apart again.
+      - name: Plugin manifest passes the official validator
+        run: |
+          npm i -g @anthropic-ai/claude-code@2.1.148
+          claude plugin validate . --strict
+
   lint:
     name: lint (critical errors only)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-      - run: pip install ruff
+      # Pinned: an unpinned linter can fail a release for a rule that did not
+      # exist when the commit was written.
+      - run: pip install ruff==0.15.15
       # Deliberately the pyflakes critical subset: undefined names, broken
       # f-strings, syntax errors. Real bugs, no style churn — a formatter
       # disagreement must never block a release.
@@ -103,8 +137,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
 
