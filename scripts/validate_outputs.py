@@ -43,11 +43,26 @@ class ValidationResult:
 
 
 def _field(text: str, name: str) -> str | None:
-    pattern = rf"^\s*\*{{0,2}}{re.escape(name)}\*{{0,2}}\s*[:\-]\s*(.+?)\s*$"
+    # Line-anchored on purpose: a conclusion-card bullet ("- rating: Buy") or a
+    # table cell must never be read as the field. `：` is accepted because the
+    # report body is Chinese and a full-width colon is a normal IME slip; keep
+    # this separator class in sync with scripts/parse_rating.py, or the two can
+    # disagree about a decision again (the C1 failure).
+    pattern = rf"^\s*\*{{0,2}}{re.escape(name)}\*{{0,2}}\s*[:\-：]\s*(.+?)\s*$"
     m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
     if not m:
         return None
     return m.group(1).strip().strip("*").strip()
+
+
+def rating_field(text: str) -> str | None:
+    """Public read of the anchored ``**Rating**`` field, for cross-checking.
+
+    ``scripts/memory.py`` compares this against ``parse_rating`` before writing
+    the append-only log: if the two readers disagree the file is ambiguous and
+    neither answer may be written.
+    """
+    return _field(text, "Rating")
 
 
 def _first_word(value: str | None) -> str | None:
