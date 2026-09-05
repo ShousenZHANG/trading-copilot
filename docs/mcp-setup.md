@@ -45,6 +45,12 @@ server is pure-Python-stdlib and neither runs without it. Install from
 python scripts/mcp_handshake.py --all
 ```
 
+Run this **once from a shell before your first Claude Code session**. Claude Code
+allows a stdio MCP server 30 seconds to answer; a cold `uv` cache needs 26.3s just
+to provision `yahoo-finance`, so the first launch inside the client can time out
+while the same server is perfectly healthy. The handshake pre-warms the cache and
+turns that into a one-time 30-second wait you can see.
+
 This spawns each active server exactly the way `.mcp.json` tells Claude Code to,
 speaks the JSON-RPC `initialize` handshake, and requires a `serverInfo` back:
 
