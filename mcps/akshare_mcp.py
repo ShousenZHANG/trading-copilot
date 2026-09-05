@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#   "mcp[cli]>=1.2.0",
+#   "mcp[cli]>=1.2.0,<2",   # 2.x removed mcp.server.fastmcp (FastMCP -> MCPServer)
 #   "akshare>=1.16.0",
 #   "pandas>=2.0.0",
 # ]
@@ -91,12 +91,17 @@ except Exception:  # pragma: no cover - standalone copy without scripts/runtime.
         except Exception:
             pass
 
+_MCP_IMPORT_ERROR: Optional[BaseException] = None
+
 try:
     from mcp.server.fastmcp import FastMCP
 
     mcp: Optional[Any] = FastMCP("akshare")
     tool = mcp.tool
-except ImportError:  # inspection / --self-test path without the MCP SDK installed
+except ImportError as exc:  # no SDK (--self-test path), OR an SDK major that moved FastMCP
+    # Do NOT collapse this to "not installed". mcp 2.x ships the package but
+    # deleted mcp.server.fastmcp, so the honest message is the original error.
+    _MCP_IMPORT_ERROR = exc
     mcp = None
 
     def tool() -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -511,7 +516,9 @@ def main() -> int:
     if args.self_test:
         return _self_test()
     if mcp is None:
-        print("mcp SDK not installed; run via `uv run --no-project --quiet --script`.",
+        print(f"cannot start MCP server: {_MCP_IMPORT_ERROR}", file=sys.stderr)
+        print("Run via `uv run --no-project --quiet --script mcps/akshare_mcp.py` so the "
+              "pinned PEP 723 dependencies (mcp[cli]>=1.2.0,<2) are provisioned.",
               file=sys.stderr)
         return 2
     mcp.run()
