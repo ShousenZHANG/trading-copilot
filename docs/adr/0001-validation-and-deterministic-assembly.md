@@ -1,4 +1,4 @@
-# ADR-0006: Validate Agent Outputs Before Memory and Final Report Assembly
+# ADR-0001: Validate Agent Outputs Before Memory and Final Report Assembly
 
 ## Status
 

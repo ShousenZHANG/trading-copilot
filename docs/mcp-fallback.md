@@ -77,8 +77,8 @@ What to do when an MCP server fails mid-pipeline. Ordered by primary → fallbac
 
 Finnhub and Yahoo Finance coverage of mainland-China listings is **thin-to-absent**. A `[]` or `{}` from those vendors for `600519.SS` means *not covered*, not *nothing happened* — do not read it as "no data exists". Fall through the chain below before concluding anything.
 
-1. **Primary — AkShare (keyless)**: `mcp___akshare__get_cn_quote` / `get_cn_history` / `get_hk_quote` / `get_index_quote`. **No API key, no registration, no token** — that is why it outranks Tushare. Ships disabled (extra deps + slow first import); enable with `python scripts/enable_mcp.py akshare`. Source: [mcps/akshare_mcp.py](../mcps/akshare_mcp.py). Symbols: `600519.SS`, `000001.SZ`, `430047.BJ`, `00700.HK`, `000001.SH` (index).
-2. **Fallback 1 — Tushare** (`mcp___tushare__*`): hosted streamable-HTTP MCP, config-only in `.mcp.json`. Requires `TUSHARE_TOKEN` and burns a points quota, so it sits *below* AkShare. Enable with `python scripts/enable_mcp.py tushare`.
+1. **Primary — AkShare (keyless)**: `mcp__akshare__get_cn_quote` / `get_cn_history` / `get_hk_quote` / `get_index_quote`. **No API key, no registration, no token** — that is why it outranks Tushare. Ships disabled (extra deps + slow first import); enable with `python scripts/enable_mcp.py akshare`. Source: [mcps/akshare_mcp.py](../mcps/akshare_mcp.py). Symbols: `600519.SS`, `000001.SZ`, `430047.BJ`, `00700.HK`, `000001.SH` (index).
+2. **Fallback 1 — Tushare** (`mcp__tushare__*`): hosted streamable-HTTP MCP, config-only in `.mcp.json`. Requires `TUSHARE_TOKEN` and burns a points quota, so it sits *below* AkShare. Enable with `python scripts/enable_mcp.py tushare`.
 3. **Fallback 2 — BaoStock**: keyless Python library (`pip install baostock`), A-share daily/weekly bars back to 1990. Not wired as an MCP here — reach for it only if both of the above are down and the run genuinely needs deep CN history.
 4. **Fallback 3 — WebFetch**: `https://quote.eastmoney.com/<sh600519|sz000001>.html`, or `https://finance.yahoo.com/quote/600519.SS` (often stale/partial for CN names — treat as last resort and label the source).
 5. **All fail**: report `A-share data not available — <symbol> uncertain`. Per the stale-data rule below, the Portfolio Manager data-freshness gate downgrades automatically. Do NOT substitute a US-listed ADR price for the local line and present it as the same instrument.
@@ -91,7 +91,7 @@ Notes for analysts:
 ### Gold spot price
 
 1. **Primary**: `mcp__yahoo-finance__get_stock_info` ticker `GC=F` (futures) or `XAUUSD=X` (spot)
-2. **Fallback 1**: `mcp___gold__*` (metal-price MCP if enabled)
+2. **Fallback 1**: `mcp__gold__*` (metal-price MCP if enabled)
 3. **Fallback 2**: `WebFetch` `https://www.kitco.com/charts/livegold.html`
 4. **All fail**: report `gold spot unavailable`, defer to FRED `GOLDAMGBD228NLBM` for daily fix.
 
@@ -135,13 +135,17 @@ This makes failure modes visible at run-end without burying them in agent prose.
 
 ## Configuration
 
-Active MCPs are tracked in `.mcp.json`. Prefix `_` = disabled. Toggle with:
+`.mcp.json` holds exactly the servers that run — **absence is the off switch**, there is no disable prefix. `.mcp.json.template` is the catalog they are copied from. Toggle with:
 
 ```bash
-python scripts/enable_mcp.py [name] [--disable]
+python scripts/enable_mcp.py                 # list catalog + what is active
+python scripts/enable_mcp.py [name]          # copy from catalog into .mcp.json
+python scripts/enable_mcp.py [name] --disable
 ```
 
-API keys live in `.env` and are substituted into `.mcp.json` via `${VAR}`. On Windows, launch via `scripts/start.ps1` to load `.env` before invoking `claude`.
+Default active set: `yahoo-finance` + `finnhub`. Every other server named on this page must be enabled before its fallback step is reachable — a chain step pointing at a server that is not in `.mcp.json` is a dead step, not a fallback.
+
+API keys live in `.env` and are substituted into `.mcp.json` via `${VAR}`. Launch via `scripts/start.ps1` (Windows) or `scripts/start.sh` (macOS / Linux / WSL) to load `.env` before invoking `claude`.
 
 ## Verifying a fallback chain works
 
@@ -155,3 +159,10 @@ WebFetch url=https://finance.yahoo.com/quote/NVDA
 ```
 
 If all three return reasonable data, the fallback chain is healthy.
+
+Before that, prove the servers can even start — a server that dies on import
+reports the same "Connection closed" as one that is misconfigured:
+
+```bash
+python scripts/mcp_handshake.py --all
+```

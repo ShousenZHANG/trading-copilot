@@ -36,13 +36,34 @@ cp .env.example .env   # add keys
 
 ### As a Claude Code plugin (marketplace-style)
 
-The repo ships `.claude-plugin/plugin.json`. If you maintain a plugin
-marketplace, point it at this repo; otherwise the clone/unzip paths above are
-equivalent — Claude Code reads `.claude/` directly.
+The repo ships `.claude-plugin/plugin.json`. To load it as a plugin without
+installing it anywhere:
 
-**Windows note**: launch via `scripts/start.ps1` so `.env` is loaded into the
-PowerShell session before `claude` starts (MCP servers read keys via `${VAR}`
-substitution in `.mcp.json`).
+```bash
+claude --plugin-dir /path/to/trading-copilot
+```
+
+If you maintain a plugin marketplace, point it at this repo; otherwise the
+clone/unzip paths above are equivalent — Claude Code reads `.claude/` directly.
+
+### Launch it so the MCP servers get their keys
+
+`${VAR}` in `.mcp.json` is substituted from the environment of the process that
+starts Claude Code. Claude Code does **not** read `.env` itself, so starting
+`claude` directly leaves every keyed server (finnhub) with an empty key.
+
+```powershell
+.\scripts\start.ps1     # Windows PowerShell
+```
+
+```bash
+sh scripts/start.sh     # macOS / Linux / WSL / Git Bash
+```
+
+Both load `.env` into the session, then exec `claude`. Neither prints a key.
+
+`uv` must be on your PATH — both default MCP servers are spawned through it.
+Install from <https://docs.astral.sh/uv/>, then check with `uv --version`.
 
 ---
 
@@ -88,11 +109,25 @@ machine.
 
 ```bash
 python scripts/check.py                       # repo health: should print OK
+python scripts/mcp_handshake.py --all         # each MCP server answers a real handshake
 python scripts/montecarlo.py --price 100 --vol 0.2 --days 14   # physics sanity
 /advise NVDA                                  # in Claude Code
 ```
 
-If `check.py` prints `OK` and `/advise` returns a rated report, you are good.
+The handshake is the one that matters for data: it spawns each server the way
+`.mcp.json` tells Claude Code to and demands a JSON-RPC `initialize` reply, so a
+dependency break or a crash-on-import surfaces as a non-zero exit instead of a
+silent "Connection closed" during a run. Expect:
+
+```
+PASS     2.8s  finnhub          finnhub 1.28.1
+PASS     6.0s  yahoo-finance    yfinance 1.29.1
+
+2/2 server(s) completed the handshake.
+```
+
+If `check.py` prints `OK`, the handshake is 2/2, and `/advise` returns a rated
+report, you are good.
 
 ---
 
@@ -108,35 +143,71 @@ See [README.md](../README.md) for the command table and pipeline diagram.
 
 ---
 
-## Submitting to the official plugin directory (maintainers)
+## Submitting to a Claude Code marketplace (maintainers)
 
-[`anthropics/claude-plugins-official`](https://github.com/anthropics/claude-plugins-official)
-is the Anthropic-managed directory. Submission is a **form**, not a pull
-request: <https://clau.de/plugin-directory-submission>. There is no
-`CONTRIBUTING.md` and no review thread you can iterate in.
+Verified against the official docs on 2026-09-05
+([plugins](https://code.claude.com/docs/en/plugins),
+[plugin-marketplaces](https://code.claude.com/docs/en/plugin-marketplaces)).
+Re-check before submitting — this process has already changed once, and the
+version of this section that preceded it described a submission route that no
+longer exists.
 
-Three properties make this a one-shot action — land everything first:
+There are **two** Anthropic-run public marketplaces, and they are not the same
+thing:
+
+| Marketplace | How a plugin gets in |
+|-------------|----------------------|
+| `claude-community` — the public community marketplace, added by users with `/plugin marketplace add anthropics/claude-plugins-community` | Submit through an in-app form; entries land after review. **This is the route open to us.** |
+| `claude-plugins-official` — curated by Anthropic, registered automatically on first interactive launch | **No application process.** Anthropic decides what to include; the submission form does not add anything here. |
+
+Submission forms (pick the one that matches your account):
+
+- **claude.ai** — <https://claude.ai/admin-settings/directory/submissions/plugins/new>
+  (requires a Team or Enterprise organization plus directory-management access;
+  organization Owners have it by default)
+- **Console** — <https://platform.claude.com/plugins/submit> (the route for an
+  individual author with no Team/Enterprise org)
+
+What to expect after approval, per the docs: the plugin is **pinned to a commit
+SHA** in the [`anthropics/claude-plugins-community`](https://github.com/anthropics/claude-plugins-community)
+catalog, and **CI bumps that pin automatically** as you push new commits — so a
+fix does propagate without re-submitting. The public catalog syncs nightly, so
+there is a lag between approval and the plugin being installable. Check by
+searching for the name in the community catalog's `marketplace.json`.
+
+Two properties still make this worth getting right the first time:
 
 | Property | Consequence |
 |----------|-------------|
-| The plugin **name is immutable** once listed | `trading-copilot` is permanent. Decide before submitting. |
-| Listings **pin an exact commit sha** | A bug fix does not propagate; it needs a re-submission / re-pin. |
-| Anthropic **does not vet MCP servers** — the directory README points users at each plugin's homepage instead | Our `README.md` is the de-facto security-review surface. Keep the "Security & data provenance" section accurate. |
+| The plugin **name is the skill namespace** and users type it | `trading-copilot` should be considered permanent. Decide before submitting. |
+| The review pipeline runs `claude plugin validate` plus automated safety screening; **nobody audits the MCP servers a plugin ships** | Our `README.md` is the de-facto security-review surface. Keep the "Security & data provenance" section accurate. |
 
 ### Pre-submission checklist
 
-- [ ] `python scripts/check.py` prints `OK` (it now also validates that
-      `plugin.json` carries `displayName` and a known `category`).
-- [ ] `.claude-plugin/plugin.json` version bumped, `displayName` + `category`
-      present, `homepage` reachable.
+- [ ] `claude plugin validate . --strict` passes. Plain `claude plugin validate .`
+      is what the review pipeline runs; `--strict` promotes its warnings to
+      errors, so clear it first. **Known open warning**: `CLAUDE.md at the plugin
+      root is not loaded as project context` — plain validate passes (exit 0),
+      `--strict` currently fails (exit 1) on that one warning alone.
+- [ ] `python scripts/check.py` prints `OK` (repo-level invariants the official
+      validator does not cover: prompt drift, model tiers, private-state tracking).
+- [ ] `python scripts/mcp_handshake.py --all` — every shipped server completes a
+      real JSON-RPC handshake. A shape check cannot catch a server that dies on
+      import; this can.
+- [ ] **Checked on something that is not Windows** (macOS, Linux, or WSL): the
+      launcher (`scripts/start.sh`), the relative `--script` paths in `.mcp.json`,
+      and every documented path. This repo is developed on Windows, which is the
+      one platform whose breakage we would notice by accident.
+- [ ] `.claude-plugin/plugin.json` version bumped; `homepage` reachable.
 - [ ] `README.md` opens with the educational-use disclaimer and carries the
       security/provenance section in its top third.
 - [ ] No personal state tracked: `git ls-files` shows no `data/positions.md`,
-      `data/runs/`, `data/memory/trading_memory.md`, `data/decisions/`, `.env`.
+      `data/runs/`, `data/memory/trading_memory.md`, `data/decisions/`,
+      `data/state/`, `docs/strategy.md`, `.env`.
 - [ ] `python scripts/package_release.py` builds and its post-build leak check
       passes.
-- [ ] Tag and publish a GitHub release; submit **that** commit sha.
+- [ ] Tag and publish a GitHub release.
 
-Secondary marketplaces accept submissions in parallel and are lower-stakes:
-[`davepoon/buildwithclaude`](https://github.com/davepoon/buildwithclaude),
-[`jeremylongshore/claude-code-plugins-plus-skills`](https://github.com/jeremylongshore/claude-code-plugins-plus-skills).
+You can also distribute without any Anthropic marketplace at all: publish your
+own `.claude-plugin/marketplace.json` in a git repo and have users run
+`/plugin marketplace add <owner>/<repo>`. That path needs no review and no form.

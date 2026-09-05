@@ -1,6 +1,6 @@
 ---
 name: trading-copilot
-description: Multi-agent trading research methodology. Use when the user asks for stock/gold/macro analysis, a buy/sell recommendation, watchlist scan, or weekly portfolio review. Triggers a parallel 4-analyst fan-out -> Bull/Bear debate -> Trader -> 3-way Risk debate -> Portfolio Manager pipeline based on TradingAgents (53k+ stars).
+description: Multi-agent trading research methodology. Use when the user asks for stock/gold/macro analysis, a buy/sell recommendation, watchlist scan, or weekly portfolio review. Triggers a parallel 4-analyst fan-out -> Bull/Bear debate -> Trader -> 3-way Risk debate -> Portfolio Manager pipeline based on TradingAgents (100k+ stars).
 ---
 
 # Trading Copilot — Methodology

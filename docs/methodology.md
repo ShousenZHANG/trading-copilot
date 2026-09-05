@@ -1,6 +1,6 @@
 # Methodology
 
-> Everything Trading Copilot does and why. The "what we believe" doc — built on TradingAgents (53k stars), big-tech standards (Goldman / BlackRock / Bloomberg patterns), and academic results (FinMem, StockBench, FinanceBench).
+> Everything Trading Copilot does and why. The "what we believe" doc — built on TradingAgents (the most-starred open-source multi-agent trading framework), big-tech standards (Goldman / BlackRock / Bloomberg patterns), and academic results (FinMem, StockBench, FinanceBench).
 
 ## Core beliefs
 
@@ -204,7 +204,7 @@ Personal MVP cost: roughly $1-3 per deep `/analyze` run, depending on debate rou
 ## Sources
 
 ### Architecture
-- [TradingAgents](https://github.com/TauricResearch/TradingAgents) — direct port basis (53k stars)
+- [TradingAgents](https://github.com/TauricResearch/TradingAgents) — direct port basis; [live star count](https://github.com/TauricResearch/TradingAgents/stargazers) (>100k as of 2026-09)
 - [TradingAgents arXiv 2412.20138](https://arxiv.org/abs/2412.20138)
 - [FinMem arXiv 2311.13743](https://arxiv.org/abs/2311.13743) — layered memory pattern
 
