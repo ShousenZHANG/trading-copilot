@@ -1,40 +1,36 @@
-# Context — domain glossary
+# Investment conversation glossary
 
-The vocabulary this repo uses. When naming a function, an issue, or a report section, use the term as defined here rather than a synonym.
+Shared terms for interpreting research and user-reported investment activity.
 
-- **Ticker** — an instrument symbol in Yahoo Finance spelling, exchange suffix
-  included (`NVDA`, `VAS.AX`, `0700.HK`, `GC=F`, `XAUUSD=X`). Always uppercase,
-  always English, never translated or localised. A ticker is validated before it
-  is ever used to build a path.
-- **Run** — one execution of the pipeline for a single ticker on a single date.
-  A run owns a directory of numbered markdown artifacts and is resumable: an
-  artifact that already exists is not regenerated.
-- **Decision** — the assembled, user-facing report a run produces. Deterministic
-  layout; the Portfolio Manager supplies the content, an assembler script
-  supplies the shape.
-- **Rating tier** — the discrete verdict. Two scales coexist deliberately and
-  must never be mixed: the deciders use five tiers (Buy / Overweight / Hold /
-  Underweight / Sell), the trader uses three (Buy / Hold / Sell), the single-shot
-  advisor uses its own (Strong Buy / Buy / Hold / Reduce / Avoid). Rating words
-  stay in English so a parser can find them.
-- **Conviction** — how strongly a rating is held, distinct from its direction.
-  The backtester maps a rating tier onto a conviction number; position sizing and
-  entry arming read conviction, not the tier word.
-- **Trigger kind** — the *semantic* identity of a portfolio alert (a drawdown
-  breach, a concentration breach), as opposed to the sentence that describes it.
-  Dedup keys on the kind, because the sentence embeds a price and would change
-  every day.
-- **Pending vs resolved** — a memory-log entry is *pending* from the moment a
-  decision is logged until the outcome window closes; the weekly review then
-  *resolves* it by attaching the realised return and a reflection. The log is
-  append-only; resolution replaces a tag in place, nothing is deleted.
-- **Benchmark** — the index a return is measured against, chosen by the ticker's
-  region rather than assumed. A non-US holding compared to a US index measures
-  market and currency mismatch, not skill.
-- **Alpha** — return minus the region-correct benchmark's return over the same
-  window. Meaningless for commodities, FX and indices; quote the raw return there.
-- **Look-through** — the true exposure to a name once fund holdings are unwrapped,
-  so an ETF position and a direct position in the same company are counted once.
-- **Risk gate** — the fixed pre-trade checklist a bullish rating must clear
-  (concentration, correlation, liquidity, data freshness, stop-loss, drawdown).
-  A failed check downgrades the rating and the reason is stated.
+## Language
+
+**Instrument**: The asset being observed or owned, with a specific currency and unit. Nasdaq indices, QQQ/QQQM and physical bullion are distinct instruments.
+_Avoid_: treating every symbol as a tradable stock.
+
+**Snapshot**: The evidence available for one decision cutoff, retaining observation times, sources, quality and expiry.
+_Avoid_: calling retrieval time the market price date.
+
+**Decision**: An assessed research recommendation tied to evidence and the known portfolio state. It is not an order or a completed trade.
+_Avoid_: report, fill.
+
+**Intent**: A contemplated operation that has not been confirmed completed by the user.
+
+**Execution**: A completed buy or sell reported by the user. Missing required details make it pending and do not change holdings.
+
+**Correction / reversal**: A later statement amending or cancelling a previous recorded operation, retaining its original history.
+
+**Portfolio completeness**: Whether all relevant holdings, cash, obligations and valuation inputs are known. Known holdings alone do not establish completeness.
+
+**Quality status**: Pass, fail or unknown for an observation's identity, freshness and corroboration. Not applicable is reserved for a check outside an instrument's scope.
+
+**Run**: An explicit deep research attempt bound to an evidence snapshot, portfolio version and methodology. Reusing its artifacts requires those bindings to remain valid.
+
+**Gold benchmark**: A reference price such as SGE Au99.99 or SHAU; neither is automatically a customer's retail purchase price.
+
+**Retail quote**: A merchant's timestamped offer for a specified bar/coin, purity, weight, fees and buyback conditions.
+
+**Fine grams**: Pure-gold content calculated from gross weight and fineness, distinct from the total weight of a bar or coin.
+
+**Alpha**: Return above an explicitly identified benchmark over the same period and comparable currency basis.
+
+**Legacy reflection**: An evaluation of a past research recommendation, distinct from the user's realized trading performance.

@@ -1,7 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "_comment": "Shipped project settings. Paths are project-relative (a leading / in a permission rule means the project root, not the filesystem root) so this file works on any machine — it previously hardcoded one contributor's D:/ drive and was inert everywhere else. MCP servers are configured separately in .mcp.json at the project root, which is where Claude Code requires project-scope MCPs to live.",
-
+  "_comment": "Shipped project settings. Paths are project-relative (a leading / in a permission rule means the project root, not the filesystem root) so this file works on any machine \u2014 it previously hardcoded one contributor's D:/ drive and was inert everywhere else. MCP servers are configured separately in .mcp.json at the project root, which is where Claude Code requires project-scope MCPs to live.",
   "permissions": {
     "_comment": "Least privilege for a plugin a stranger installs. Deliberately absent: `Bash(git commit*)` and `Bash(git add*)` (a research pipeline has no business pre-approving commits) and a bare `WebFetch` (analysts fetch attacker-influenced pages; that prompt should be seen). Add those to your own .claude/settings.local.json if you want them.",
     "allow": [
@@ -26,7 +25,13 @@
       "Bash(python scripts/mcp_handshake.py*)",
       "Bash(git status)",
       "Bash(git diff*)",
-      "Bash(git log*)"
+      "Bash(git log*)",
+      "mcp__trading-copilot__collect_market_snapshot",
+      "mcp__trading-copilot__get_evidence_snapshot",
+      "mcp__trading-copilot__get_investment_context",
+      "mcp__trading-copilot__assess_investment_proposal",
+      "mcp__trading-copilot__record_investment_operation",
+      "mcp__trading-copilot__get_data_capabilities"
     ],
     "deny": [
       "Read(/.env)",

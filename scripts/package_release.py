@@ -41,6 +41,7 @@ import fnmatch
 import json
 import re
 import sys
+import tomllib
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -62,6 +63,12 @@ INCLUDE_PATHS = [
     ".claude/config",
     ".claude/settings.json",
     ".claude-plugin",
+    ".codex-plugin",
+    ".codex/config.toml",
+    ".codex/agents",
+    ".agents/skills",
+    "skills",
+    "AGENTS.md",
     "scripts",
     "mcps",
     "docs",
@@ -86,6 +93,9 @@ INCLUDE_PATHS = [
 # The build fails if any of these are absent from the finished zip.
 REQUIRED_ARTIFACT_FILES = [
     ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    ".codex/config.toml",
+    ".agents/skills/investment-chat/SKILL.md",
     "README.md",
     "README_zh.md",
     "LICENSE",
@@ -104,6 +114,8 @@ EXCLUDE_PATTERNS = [
     "*.env", ".env",
     # never ship the author's per-run analysis
     "data/decisions/*", "data/runs/*", "data/audit/*",
+    "data/state/*", "*.sqlite", "*.sqlite-wal", "*.sqlite-shm", "*.db",
+    "docs/strategy.md", "docs/strategy-checklist.md",
     "evals/results/*", "evals/cache/*",
 ]
 
@@ -154,9 +166,19 @@ def _hardcoded_mcp_secrets(config_text: str) -> list[str]:
             if not isinstance(block, dict):
                 continue
             for key, value in block.items():
-                if isinstance(value, str) and value and not _PLACEHOLDER_RE.search(value):
+                if isinstance(value, str) and value and not re.fullmatch(r"(?:Bearer )?\$\{[A-Za-z0-9_]+\}", value):
                     offenders.append(f"{server}.{field}.{key}")
     return offenders
+
+
+def _hardcoded_codex_secrets(config_text: str) -> list[str]:
+    try:
+        servers = tomllib.loads(config_text).get("mcp_servers", {})
+    except tomllib.TOMLDecodeError:
+        return ["<unparseable Codex config>"]
+    normalized = {name: {"env": spec.get("env", {}), "headers": spec.get("http_headers", {})}
+                  for name, spec in servers.items()}
+    return _hardcoded_mcp_secrets(json.dumps({"mcpServers": normalized}))
 
 
 def _forbidden_archive_name(name: str) -> bool:
@@ -171,7 +193,7 @@ def _forbidden_archive_name(name: str) -> bool:
         return True
     if "trading_memory.md" in low:
         return True
-    return "/data/decisions/" in low or "/data/runs/" in low
+    return any(part in low for part in ("/data/decisions/", "/data/runs/", "/data/state/", "/data/audit/")) or low.endswith((".sqlite", ".sqlite-wal", ".sqlite-shm", ".db", "/docs/strategy.md", "/docs/strategy-checklist.md"))
 
 
 def _audit_zip(out: Path) -> list[str]:
@@ -186,6 +208,9 @@ def _audit_zip(out: Path) -> list[str]:
             if low.endswith(".mcp.json") or low.endswith(".mcp.json.template"):
                 text = zf.read(name).decode("utf-8", errors="replace")
                 problems += [f"{name}: hardcoded secret at {p}" for p in _hardcoded_mcp_secrets(text)]
+            if low.endswith("/.codex/config.toml"):
+                text = zf.read(name).decode("utf-8", errors="replace")
+                problems += [f"{name}: hardcoded secret at {p}" for p in _hardcoded_codex_secrets(text)]
         present = {n.split("/", 1)[1] for n in names if "/" in n}
         for required in REQUIRED_ARTIFACT_FILES:
             if required not in present:
@@ -204,6 +229,11 @@ def plugin_version() -> str:
 
 
 def build(version: str, stamp: str | None) -> Path:
+    from sync_runtimes import generated_files
+    drift = [str(p.relative_to(ROOT)) for p, content in generated_files().items()
+             if not p.exists() or p.read_text(encoding="utf-8") != content]
+    if drift:
+        raise ValueError("runtime drift before packaging; run scripts/sync_runtimes.py: " + ", ".join(drift))
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
     suffix = f"-{stamp}" if stamp else ""
@@ -283,6 +313,11 @@ def _self_test() -> int:
         ("unparseable config is a finding",
             _hardcoded_mcp_secrets("{not json") == ["<unparseable MCP config>"]),
         ("config without mcpServers is clean", _hardcoded_mcp_secrets("{}") == []),
+        ("partial placeholder cannot hide literal credential",
+            bool(_hardcoded_mcp_secrets(json.dumps({"mcpServers": {"fixture": {"env": {"API_KEY": "${TOKEN}fixture-secret"}}}})))),
+        ("Codex env literal is rejected", bool(_hardcoded_codex_secrets('[mcp_servers.fixture.env]\nAPI_KEY="fixture-secret"'))),
+        ("Codex header literal is rejected", bool(_hardcoded_codex_secrets('[mcp_servers.fixture.http_headers]\nAuthorization="Bearer fixture-secret"'))),
+        ("Codex environment forwarding is allowed", not _hardcoded_codex_secrets('[mcp_servers.fixture]\nenv_vars=["API_KEY"]')),
         ("the repo's own .mcp.json files are clean",
             all(_hardcoded_mcp_secrets((ROOT / name).read_text(encoding="utf-8")) == []
                 for name in (".mcp.json", ".mcp.json.template")
@@ -296,6 +331,8 @@ def _self_test() -> int:
         ("personal state excluded: assembled decision",
             _excluded("data/decisions/NVDA-2026-04-27.md")),
         ("dotenv excluded", _excluded(".env")),
+        ("journal and WAL excluded", _excluded("data/state/copilot.sqlite") and _excluded("any/copilot.sqlite-wal")),
+        ("private strategy excluded", _excluded("docs/strategy.md")),
         ("local settings excluded", _excluded(".claude/settings.local.json")),
         ("nested __pycache__ excluded", _excluded("scripts/__pycache__/runtime.cpython-312.pyc")),
         ("allowed path kept: README.md", not _excluded("README.md")),

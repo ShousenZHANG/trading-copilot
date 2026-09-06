@@ -12,9 +12,9 @@ endpoint.
 
 OUTPUT FORMAT — do not invent a new one
 ---------------------------------------
-Exactly what ``evals/stockbench/backtest_engine.JsonPriceSource`` reads::
+Backward-compatible with ``evals/stockbench/backtest_engine.JsonPriceSource``::
 
-    {"NVDA": [{"date": "2026-04-01", "close": 123.45}, ...], "SPY": [...]}
+    {"NVDA": [{"date": "2026-04-01", "close": 123.45, "adjustment": "split_dividend"}, ...]}
 
 Keys are ticker symbols verbatim (``GC=F``, ``NDQ.AX``, ``^AXJO``); each value
 is a list of bars sorted by ISO date, one bar per trading day.
@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import urllib.error
 import urllib.parse
@@ -142,15 +143,26 @@ def chart_json_to_bars(payload: object,
         except (TypeError, ValueError):
             dropped += 1
             continue
-        bars.append({"date": epoch_to_iso(epoch, gmtoffset), "close": value})
+        if not math.isfinite(value) or value <= 0 or isinstance(close, bool):
+            dropped += 1
+            continue
+        try:
+            session = epoch_to_iso(epoch, gmtoffset)
+        except (ValueError, TypeError, OverflowError, OSError):
+            dropped += 1
+            continue
+        bars.append({"date": session, "close": value,
+                     "adjustment": "split_dividend" if adjusted else "none"})
     if dropped:
-        notes.append(f"dropped {dropped} bar(s) with a null/unparseable close")
+        notes.append(f"dropped {dropped} bar(s) with a null/unparseable/nonfinite/nonpositive price or time")
     bars.sort(key=lambda b: str(b["date"]))
+    if len({bar["date"] for bar in bars}) != len(bars):
+        raise ValueError("duplicate daily sessions in chart response")
     return bars, notes
 
 
 def _close_series(result: dict[str, object], *, adjusted: bool) -> list[object]:
-    """Adjusted close when present (splits/dividends), else the raw quote close."""
+    """Return exactly the requested price basis; never substitute raw closes."""
     indicators = result.get("indicators")
     if not isinstance(indicators, dict):
         return []
@@ -160,6 +172,7 @@ def _close_series(result: dict[str, object], *, adjusted: bool) -> list[object]:
             series = adj[0].get("adjclose")
             if isinstance(series, list):
                 return series
+        raise ValueError("requested split/dividend adjusted closes are missing; raw close fallback refused")
     quote = indicators.get("quote")
     if isinstance(quote, list) and quote and isinstance(quote[0], dict):
         series = quote[0].get("close")
@@ -177,20 +190,42 @@ def clip_bars(bars: list[dict[str, object]], start: str, end: str) -> list[dict[
 # Pure merging
 # ---------------------------------------------------------------------------
 def merge_price_maps(base: PriceMap, incoming: PriceMap) -> PriceMap:
-    """Merge two price maps. ``incoming`` wins on a same-date conflict.
+    """Merge only when adjustment identity is known and revisions cannot splice.
 
-    Immutable: neither argument is mutated. Per ticker the two series are keyed
-    by date, ``incoming`` overwrites ``base`` for a duplicated date (a refetch
-    is assumed to be the more correct one — adjusted closes move when a split
-    or dividend lands), and the result is sorted by date.
+    Adjusted or legacy unknown-basis histories must be refreshed over the whole
+    retained window, because a dividend/split can revise every historical bar.
+    Separate tickers can still be updated independently. Extra bar metadata is
+    compatible with JsonPriceSource and records the requested basis explicitly.
     """
     merged: PriceMap = {}
     for ticker in sorted(set(base) | set(incoming)):
+        old, new = base.get(ticker, []), incoming.get(ticker, [])
+        for series in (old, new):
+            if not isinstance(series, list) or any(not isinstance(b, dict) or "date" not in b or "close" not in b for b in series):
+                raise ValueError(f"{ticker}: expected price rows with date and close")
+            if len({b.get("adjustment", "unknown") for b in series}) > 1:
+                raise ValueError(f"{ticker}: mixed adjustment basis")
+            if len({b["date"] for b in series}) != len(series):
+                raise ValueError(f"{ticker}: duplicate session in price map")
+            for bar in series:
+                date.fromisoformat(str(bar["date"]))
+                if isinstance(bar["close"], bool) or not math.isfinite(float(bar["close"])) or float(bar["close"]) <= 0:
+                    raise ValueError(f"{ticker}: close must be finite and positive")
+        if old and new:
+            old_basis = {b.get("adjustment", "unknown") for b in old}
+            new_basis = {b.get("adjustment", "unknown") for b in new}
+            if len(old_basis) != 1 or len(new_basis) != 1:
+                raise ValueError(f"{ticker}: mixed adjustment basis")
+            full_refresh = {b["date"] for b in old}.issubset({b["date"] for b in new})
+            if old_basis != new_basis and not full_refresh:
+                raise ValueError(f"{ticker}: adjustment basis changed; refetch full retained window")
+            if old_basis != {"none"} or new_basis != {"none"}:
+                if not full_refresh:
+                    raise ValueError(f"{ticker}: adjusted/unknown history requires full retained-window refresh")
+                old = []
         by_date: dict[str, dict[str, object]] = {}
-        for bar in base.get(ticker, []):
-            by_date[str(bar["date"])] = {"date": str(bar["date"]), "close": float(bar["close"])}
-        for bar in incoming.get(ticker, []):
-            by_date[str(bar["date"])] = {"date": str(bar["date"]), "close": float(bar["close"])}
+        for bar in [*old, *new]:
+            by_date[str(bar["date"])] = {**bar, "date": str(bar["date"]), "close": float(bar["close"])}
         merged[ticker] = [by_date[d] for d in sorted(by_date)]
     return merged
 
@@ -263,8 +298,10 @@ def fetch_bars_yfinance(symbol: str, start: str, end: str,
         ) from exc
     end_exclusive = (date.fromisoformat(end) + timedelta(days=1)).isoformat()
     frame = yfinance.Ticker(symbol).history(start=start, end=end_exclusive, auto_adjust=True)
-    bars = [{"date": str(index.date()), "close": float(row["Close"])}
+    bars = [{"date": str(index.date()), "close": float(row["Close"]), "adjustment": "split_dividend"}
             for index, row in frame.iterrows()]
+    if any(not math.isfinite(b["close"]) or b["close"] <= 0 for b in bars):
+        raise ValueError("yfinance returned nonfinite/nonpositive adjusted prices")
     bars.sort(key=lambda b: str(b["date"]))
     return clip_bars(bars, start, end), []
 
@@ -315,8 +352,8 @@ def _self_test() -> int:  # noqa: C901 - a flat list of independent assertions
     nxt = day + SECONDS_PER_DAY
     bars, notes = chart_json_to_bars(_payload([day, nxt], [100.0, 101.5], gmtoffset=-14400))
     check("well-formed payload -> two dated bars",
-          bars == [{"date": "2026-04-01", "close": 100.0},
-                   {"date": "2026-04-02", "close": 101.5}] and not notes,
+          bars == [{"date": "2026-04-01", "close": 100.0, "adjustment": "split_dividend"},
+                   {"date": "2026-04-02", "close": 101.5, "adjustment": "split_dividend"}] and not notes,
           f"{bars} {notes}")
 
     bars, notes = chart_json_to_bars(_payload([], []))
@@ -349,13 +386,20 @@ def _self_test() -> int:  # noqa: C901 - a flat list of independent assertions
         ok, detail = "chart" in str(exc), str(exc)
     check("non-chart payload raises ValueError", ok, detail)
 
-    # raw quote close is the fallback when adjclose is absent
+    # A missing requested basis is an error, never a switch to raw quotes.
     raw = {"chart": {"error": None, "result": [{
         "meta": {"gmtoffset": 0}, "timestamp": [day],
         "indicators": {"quote": [{"close": [99.0]}]}}]}}
-    bars, _ = chart_json_to_bars(raw)
-    check("falls back to quote.close when adjclose is missing",
-          bars == [{"date": "2026-04-01", "close": 99.0}], str(bars))
+    try:
+        chart_json_to_bars(raw)
+        refused = False
+    except ValueError:
+        refused = True
+    check("missing adjusted price refuses raw fallback", refused)
+    bars, _ = chart_json_to_bars(raw, adjusted=False)
+    check("explicit raw close records its basis", bars[0]["adjustment"] == "none")
+    bars, _ = chart_json_to_bars(_payload([day, nxt, nxt + SECONDS_PER_DAY], [float("nan"), float("inf"), -1]))
+    check("NaN/Inf/nonpositive bars cannot reach price map", not bars)
 
     # --- epoch / date boundaries -------------------------------------------
     check("epoch_to_iso at UTC midnight", epoch_to_iso(iso_to_epoch("2026-04-01")) == "2026-04-01")
@@ -383,6 +427,20 @@ def _self_test() -> int:  # noqa: C901 - a flat list of independent assertions
                                {"date": "2026-04-02", "close": 2.0}]}
     newer: PriceMap = {"AAA": [{"date": "2026-04-02", "close": 2.0},
                                {"date": "2026-04-03", "close": 3.0}]}
+    try:
+        merge_price_maps(older, newer)
+        refused = False
+    except ValueError:
+        refused = True
+    check("partial adjusted/unknown history refresh rejected", refused)
+    try:
+        merge_price_maps({}, {"AAA": [{"date": "2026-04-01", "close": 1, "adjustment": "none"}, {"date": "2026-04-02", "close": 2, "adjustment": "split_dividend"}]})
+        refused = False
+    except ValueError:
+        refused = True
+    check("mixed basis rejected even on first import", refused)
+    for bar in older["AAA"] + newer["AAA"]:
+        bar["adjustment"] = "none"
     merged = merge_price_maps(older, newer)
     check("overlapping ranges dedupe by date",
           [bar["date"] for bar in merged["AAA"]] == ["2026-04-01", "2026-04-02", "2026-04-03"],
@@ -475,9 +533,13 @@ def main() -> int:
         print("error: no bars fetched for any ticker — nothing written", file=sys.stderr)
         return 1
 
-    price_map = merge_price_maps(base, fetched)
+    try:
+        price_map = merge_price_maps(base, fetched)
+    except ValueError as exc:
+        print(f"error: {exc}; nothing written", file=sys.stderr)
+        return 2
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(price_map, indent=2, ensure_ascii=False) + "\n",
+    out_path.write_text(json.dumps(price_map, indent=2, ensure_ascii=False, allow_nan=False) + "\n",
                         encoding="utf-8")
     for symbol in sorted(price_map):
         series = price_map[symbol]

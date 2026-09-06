@@ -2,17 +2,26 @@
   "_doc": "Catalog of every supported MCP server. `.mcp.json` holds only the active ones; `python scripts/enable_mcp.py <name>` copies an entry from here into it, and `--disable` removes it again. Edit by hand only if you know why.",
   "_setup_links": "See docs/mcp-setup.md for signup links and free-tier limits.",
   "_conventions": "No `cmd /c` wrapper: it is Windows-only, and cmd re-parses the argv so a `<` in a version pin turns into a shell redirect. No absolute paths: a relative `--script` path resolves against the project root on every OS. Keys are plain names -- a leading underscore is NOT a disable switch, Claude Code launches every key it finds.",
-
   "mcpServers": {
     "yahoo-finance": {
       "_doc": "Free, no API key. Primary market-data source. `--with mcp<2` is load-bearing: the upstream package imports mcp.server.fastmcp, which mcp 2.x deleted.",
       "command": "uvx",
-      "args": ["--with", "mcp<2", "yahoo-finance-mcp"]
+      "args": [
+        "--with",
+        "mcp<2",
+        "yahoo-finance-mcp"
+      ]
     },
     "finnhub": {
       "_doc": "News + financials + earnings. Free 60/min. Local Python wrapper; avoids the npm finnhub-mcp Windows path bug.",
       "command": "uv",
-      "args": ["run", "--no-project", "--quiet", "--script", "mcps/finnhub_mcp.py"],
+      "args": [
+        "run",
+        "--no-project",
+        "--quiet",
+        "--script",
+        "mcps/finnhub_mcp.py"
+      ],
       "env": {
         "FINNHUB_API_KEY": "${FINNHUB_API_KEY}"
       }
@@ -20,12 +29,21 @@
     "akshare": {
       "_doc": "A-share / HK / index data. NO API KEY, no registration. Fills the .SS/.SZ gap Yahoo and Finnhub do not cover. Local Python wrapper, PEP 723 deps provisioned by uv. Not active by default: extra deps and a slow first import. Its endpoints are mainland-China hosted and may be unreachable from some networks -- run `python mcps/akshare_mcp.py --probe` before relying on it.",
       "command": "uv",
-      "args": ["run", "--no-project", "--quiet", "--script", "mcps/akshare_mcp.py"]
+      "args": [
+        "run",
+        "--no-project",
+        "--quiet",
+        "--script",
+        "mcps/akshare_mcp.py"
+      ]
     },
     "fred": {
       "_doc": "Fed economic data: rates, CPI, yields, DXY. Free unlimited. Needed by macro-analyst for /gold.",
       "command": "npx",
-      "args": ["-y", "fred-mcp-server"],
+      "args": [
+        "-y",
+        "fred-mcp-server"
+      ],
       "env": {
         "FRED_API_KEY": "${FRED_API_KEY}"
       }
@@ -33,7 +51,9 @@
     "polygon": {
       "_doc": "Polygon.io - 35+ tools for stocks/options/forex/crypto. Free tier 5/min.",
       "command": "uvx",
-      "args": ["mcp_polygon"],
+      "args": [
+        "mcp_polygon"
+      ],
       "env": {
         "POLYGON_API_KEY": "${POLYGON_API_KEY}"
       }
@@ -49,7 +69,9 @@
     "gold": {
       "_doc": "Spot gold via GoldAPI. Free 100/mo. Optional - yfinance GC=F also works.",
       "command": "uvx",
-      "args": ["mcp-metal-price"],
+      "args": [
+        "mcp-metal-price"
+      ],
       "env": {
         "GOLDAPI_KEY": "${GOLD_API_KEY}"
       }
@@ -57,7 +79,10 @@
     "exa": {
       "_doc": "Neural web search for Reddit/X/news/filings. $10 free credits. The social analyst degrades to keyless Reddit RSS without it (docs/mcp-fallback.md).",
       "command": "npx",
-      "args": ["-y", "exa-mcp-server"],
+      "args": [
+        "-y",
+        "exa-mcp-server"
+      ],
       "env": {
         "EXA_API_KEY": "${EXA_API_KEY}"
       }
@@ -69,8 +94,17 @@
       "headers": {
         "X-Tushare-Token": "${TUSHARE_TOKEN}"
       }
+    },
+    "trading-copilot": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--no-project",
+        "--quiet",
+        "--script",
+        "mcps/copilot_mcp.py"
+      ]
     }
   },
-
   "_windows_note": "npx-based servers (fred, exa) ship a .cmd shim on Windows. If Claude Code cannot spawn them directly, wrap that one entry: \"command\": \"cmd\", \"args\": [\"/c\", \"npx\", \"-y\", \"<pkg>\"]. Never do this for uv/uvx (real executables), and never put a `<` inside a cmd-wrapped argv."
 }

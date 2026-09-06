@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import tempfile
+import json
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from assemble_report import assemble
-from parse_rating import first_rating_word, parse_rating
+from assemble_report import assemble, load_assessed_decision
+from parse_rating import explicit_rating, first_rating_word, parse_rating
 from ticker import validate_date_component, validate_ticker_component
 from validate_outputs import (
     _field,
@@ -80,6 +84,16 @@ def test_rating_parser_agrees_with_validator() -> None:
 
 
 def test_output_contracts() -> None:
+    for unsupported in ("Reduce", "Avoid", "Strong Buy", "Buy or Sell"):
+        text = f"**Rating**: {unsupported}\nDo not Buy.\n**Executive Summary**: x\n**Investment Thesis**: y"
+        try:
+            explicit_rating(text)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"unsupported scale accepted: {unsupported}")
+        assert not validate_portfolio_manager(text).ok
+    assert parse_rating("**Rating**: Reduce\nDo not Buy") == "Hold"
     assert validate_research_plan(
         "**Recommendation**: Overweight\n\n"
         "**Rationale**: Bull case carried.\n\n"
@@ -143,11 +157,60 @@ def test_run_validation_and_assembly() -> None:
         assert "免责声明" in text
 
 
+def test_report_cli_requires_committed_current_assessment() -> None:
+    from _test_policy import fixture, proposal, seal
+    from copilot.journal import get_context, record_recommendation, save_snapshot
+    from copilot.policy import assess_proposal
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        db = root / "test.sqlite"
+        run = root / "run"
+        run.mkdir()
+        (run / "06-research-plan.md").write_text("**Recommendation**: Hold\n**Rationale**: x\n**Strategic Actions**: observe", encoding="utf-8")
+        (run / "07-trader-proposal.md").write_text("**Action**: Hold\n**Reasoning**: x\nFINAL TRANSACTION PROPOSAL: **HOLD**", encoding="utf-8")
+        (run / "08-portfolio-decision.md").write_text("**Rating**: Hold\n**Executive Summary**: x\n**Investment Thesis**: y\n**Price Target**: 9999", encoding="utf-8")
+        clock = datetime.now(timezone.utc)
+        snapshot = fixture()
+        snapshot["created_at"] = snapshot["decision_at"] = (clock - timedelta(minutes=1)).isoformat()
+        snapshot["valid_until"] = (clock + timedelta(hours=1)).isoformat()
+        snapshot["evidence"][0]["observed_at"] = (clock - timedelta(days=2)).isoformat()
+        snapshot["evidence"][0]["retrieved_at"] = (clock - timedelta(minutes=2)).isoformat()
+        past_session = (clock - timedelta(days=2)).date().isoformat()
+        snapshot["instruments"]["QQQ"].update(latest_session=past_session, expected_session=past_session)
+        seal(snapshot)
+        save_snapshot(snapshot, db_path=db)
+        decision = assess_proposal(proposal(action="hold"), snapshot, get_context(db_path=db), now=clock)
+        record_recommendation(decision, db_path=db)
+        sidecar = root / "assessed.json"
+        sidecar.write_text(json.dumps(decision), encoding="utf-8")
+        out = root / "report.md"
+        cli = [sys.executable, str(Path(__file__).with_name("assemble_report.py")), "--ticker", "QQQ", "--date", clock.date().isoformat(), "--run-dir", str(run), "--out", str(out), "--db", str(db)]
+        missing = subprocess.run(cli, capture_output=True, text=True, encoding="utf-8")
+        assert missing.returncode == 2 and "--assessed-decision" in missing.stderr
+        valid = subprocess.run([*cli, "--assessed-decision", str(sidecar)], capture_output=True, text=True, encoding="utf-8")
+        assert valid.returncode == 0, valid.stdout + valid.stderr
+        text = out.read_text(encoding="utf-8")
+        assert "研究附录" in text and "9999" not in text.split("## 研究附录")[0]
+        try:
+            load_assessed_decision(sidecar, "QQQ", run, db_path=db, now=clock + timedelta(hours=2))
+        except ValueError as exc:
+            assert "expired" in str(exc)
+        else:
+            raise AssertionError("expired report accepted")
+        decision["action"] = "buy"
+        sidecar.write_text(json.dumps(decision), encoding="utf-8")
+        invalid = subprocess.run([*cli, "--assessed-decision", str(sidecar)], capture_output=True, text=True, encoding="utf-8")
+        assert invalid.returncode != 0 and "differs" in invalid.stderr
+        sidecar.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+        invalid = subprocess.run([*cli, "--assessed-decision", str(sidecar)], capture_output=True, text=True, encoding="utf-8")
+        assert invalid.returncode != 0 and "schema" in invalid.stderr
+
+
 if __name__ == "__main__":
     test_ticker_validation()
     test_date_validation()
     test_rating_parser_agrees_with_validator()
     test_output_contracts()
     test_run_validation_and_assembly()
+    test_report_cli_requires_committed_current_assessment()
     print("ALL TESTS PASSED")
-

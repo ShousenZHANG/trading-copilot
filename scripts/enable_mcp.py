@@ -214,9 +214,13 @@ def main() -> int:
 
     if updated != active:
         active_config["mcpServers"] = updated
-        ACTIVE_PATH.write_text(_dump(active_config), encoding="utf-8")
+        ACTIVE_PATH.write_text(_dump(active_config), encoding="utf-8", newline="\n")
+        from sync_runtimes import generated_files
+        for path, content in generated_files().items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8", newline="\n")
         print(message)
-        print("Restart Claude Code for changes to take effect.")
+        print("Shared runtime files updated. Restart Claude Code/Codex for changes to take effect.")
         print(f"Verify it starts: python scripts/mcp_handshake.py --server "
               f"{normalise_name(args.name)}")
     else:

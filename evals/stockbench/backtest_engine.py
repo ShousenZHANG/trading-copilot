@@ -184,7 +184,12 @@ def _coerce_bars(ticker: str, rows: object) -> list[Bar]:
             close = float(row["close"])  # type: ignore[arg-type]
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{ticker}: bad close in {row!r}") from exc
+        if not math.isfinite(close) or close <= 0 or isinstance(row["close"], bool):
+            raise ValueError(f"{ticker}: close must be finite and positive")
+        date.fromisoformat(str(row["date"]))
         bars.append(Bar(date=str(row["date"]), close=close))
+    if len({b.date for b in bars}) != len(bars):
+        raise ValueError(f"{ticker}: duplicate price sessions")
     bars.sort(key=lambda b: b.date)
     return bars
 
@@ -229,10 +234,15 @@ def required_end_date(last_signal_date: str, holding_days: int) -> str:
 
 
 def _entry_index(bars: Sequence[Bar], signal_date: str, snap_forward: bool) -> int | None:
-    """Index of the entry bar, or None when the signal date is untradeable."""
+    """Next close AFTER a daily signal; the signal bar cannot be its fill.
+
+    Without an intraday decision timestamp the safe assumption is that the
+    signal could have consumed its date's close. Off-grid dates still require
+    explicit snap_forward for backward compatibility.
+    """
     for i, bar in enumerate(bars):
         if bar.date == signal_date:
-            return i
+            return i + 1 if i + 1 < len(bars) else None
         if snap_forward and bar.date > signal_date:
             return i
     return None
@@ -255,6 +265,7 @@ def _simulate_ticker(
     trades: list[Trade] = []
     skipped: list[str] = []
     armed = True
+    occupied_until: str | None = None
     for sig in signals:
         strength = abs(sig.conviction)
         if strength < threshold:
@@ -274,6 +285,9 @@ def _simulate_ticker(
             skipped.append(f"{ticker} {sig.date}: signal date is not a trading bar "
                            f"(bar range {bars[0].date}..{bars[-1].date}); "
                            "pass snap_forward=True to enter on the next bar")
+            continue
+        if occupied_until is not None and bars[idx].date <= occupied_until:
+            skipped.append(f"{ticker} {sig.date}: position overlaps existing holding through {occupied_until}")
             continue
         exit_idx = idx + holding_days
         if exit_idx >= len(bars):
@@ -299,6 +313,7 @@ def _simulate_ticker(
             return_pct=direction * (exit_bar.close / entry.close - 1.0),
         ))
         armed = False
+        occupied_until = exit_bar.date
     return trades, skipped
 
 
@@ -317,7 +332,7 @@ def run_backtest(
     Semantics
     ---------
     * The trading-day grid is the bar series itself — never the calendar.
-    * Enter at the CLOSE of the signal date when ``abs(conviction) >= threshold``;
+    * Enter at the next available CLOSE AFTER the signal date when above threshold;
       ``direction = sign(conviction)``.
     * Exit at the CLOSE exactly ``holding_days`` bars later.
     * Edge-triggered arming prevents overlapping duplicate positions.
@@ -334,6 +349,9 @@ def run_backtest(
 
     by_ticker: dict[str, list[Signal]] = {}
     for sig in sorted(signals, key=lambda s: (s.date, s.ticker, s.source)):
+        date.fromisoformat(sig.date)
+        if not math.isfinite(sig.conviction) or not -1 <= sig.conviction <= 1:
+            raise ValueError("conviction must be finite in [-1, 1]")
         by_ticker.setdefault(sig.ticker, []).append(sig)
 
     trades: list[Trade] = []
@@ -343,6 +361,8 @@ def run_backtest(
         start = ticker_signals[0].date
         end = required_end_date(ticker_signals[-1].date, holding_days)
         bars = price_source.get_bars(ticker, start, end)
+        # Custom/YFinance PriceSources must satisfy the same contract as JSON.
+        bars = _coerce_bars(ticker, [{"date": b.date, "close": b.close} for b in bars])
         t, s = _simulate_ticker(ticker, ticker_signals, bars, holding_days,
                                 threshold, snap_forward)
         trades.extend(t)
@@ -370,7 +390,7 @@ def periods_per_year_for_hold(holding_days: int,
 
 
 def equity_curve(trades: Sequence[Trade]) -> list[float]:
-    """Arithmetic cumulative-return series (qlib convention), starting at 0.0."""
+    """Cumulative sum of trade returns, NOT portfolio equity; starts at 0.0."""
     curve = [0.0]
     total = 0.0
     for trade in trades:
@@ -414,8 +434,15 @@ def compute_metrics(trades: Sequence[Trade],
     Both return ``None`` — never ``ZeroDivisionError``, never ``NaN``.
     """
     returns = [t.return_pct for t in trades]
+    if any(not math.isfinite(r) for r in returns):
+        raise ValueError("trade return must be finite")
+    if not math.isfinite(periods_per_year) or periods_per_year <= 0 or min_trades < 1:
+        raise ValueError("periods_per_year and min_trades must be positive")
     n = len(returns)
     base: dict[str, object] = {
+        "metric_scope": "trade_sample_not_portfolio",
+        "execution_assumption": "next_session_close_after_signal_date",
+        "limitations": ["no capital allocation, cash, daily marked equity, fees or slippage", "annualized sample statistics are not strategy returns"],
         "trade_count": n,
         "periods_per_year": round(periods_per_year, 6),
         "min_trades": min_trades,
@@ -477,15 +504,16 @@ def format_metrics(metrics: dict[str, object]) -> str:
         ("trades", str(metrics.get("trade_count", 0))),
         ("periods/year (N)", f"{float(metrics.get('periods_per_year') or 0):.2f}"),
         ("avg return / trade", fmt("avg_return")),
-        ("cumulative return", fmt("cumulative_return")),
-        ("annualized return", fmt("annualized_return")),
-        ("volatility (ann.)", fmt("volatility")),
-        ("information ratio", fmt("information_ratio", pct=False)),
-        ("max drawdown", fmt("max_drawdown")),
+        ("sum of trade returns", fmt("cumulative_return")),
+        ("sample mean x N (hypothetical)", fmt("annualized_return")),
+        ("sample volatility x sqrt(N)", fmt("volatility")),
+        ("sample ratio (no benchmark)", fmt("information_ratio", pct=False)),
+        ("trade-ordered cumulative decline", fmt("max_drawdown")),
         ("hit rate", fmt("hit_rate")),
     ]
     width = max(len(label) for label, _ in rows)
-    lines = ["=== Backtest metrics (qlib risk_analysis convention) ==="]
+    lines = ["=== Trade-sample statistics; NOT portfolio performance ===",
+             "No capital allocation, cash, marked daily equity, fees, or slippage."]
     lines += [f"  {label.ljust(width)} : {value}" for label, value in rows]
     lines += _sample_banner(metrics)
     return "\n".join(lines)
@@ -541,20 +569,20 @@ def _self_test() -> int:  # noqa: C901 - a flat list of independent assertions
 
     src = _demo_source()
 
-    # 1. known-return long: enter 2024-01-01 @100, exit 5 bars later @105.
+    # 1. Daily signal on Jan 1: enter Jan 2 @101, exit Jan 7 @106.
     r = run_backtest([Signal("UP", "2024-01-01", 1.0, "test")], src, holding_days=5)
-    ok = len(r.trades) == 1 and _approx(r.trades[0].return_pct, 0.05)
-    check("long trade returns +5.00%", ok, f"trades={len(r.trades)}")
+    ok = len(r.trades) == 1 and _approx(r.trades[0].return_pct, 106 / 101 - 1) and r.trades[0].entry_date == "2024-01-02"
+    check("long trade enters after signal day", ok, f"trades={len(r.trades)}")
 
     # 2. known-return short: DOWN falls 100 -> 95, short earns +5%.
     r = run_backtest([Signal("DOWN", "2024-01-01", -1.0, "test")], src, holding_days=5)
-    ok = len(r.trades) == 1 and r.trades[0].direction == -1 and _approx(r.trades[0].return_pct, 0.05)
-    check("short trade on falling tape returns +5.00%", ok)
+    ok = len(r.trades) == 1 and r.trades[0].direction == -1 and _approx(r.trades[0].return_pct, 1 - 94 / 99)
+    check("short trade returns use next-session entry", ok)
 
     # 2b. short on a rising tape loses.
     r = run_backtest([Signal("UP", "2024-01-01", -1.0, "test")], src, holding_days=5)
-    ok = len(r.trades) == 1 and _approx(r.trades[0].return_pct, -0.05)
-    check("short trade on rising tape returns -5.00%", ok)
+    ok = len(r.trades) == 1 and _approx(r.trades[0].return_pct, -(106 / 101 - 1))
+    check("short trade on rising tape loses using next entry", ok)
 
     # 3. sub-threshold signal produces no trade but IS recorded.
     r = run_backtest([Signal("UP", "2024-01-01", 0.0, "hold")], src, holding_days=5)
@@ -573,10 +601,20 @@ def _self_test() -> int:  # noqa: C901 - a flat list of independent assertions
               Signal("UP", "2024-01-02", 0.0, "t"),
               Signal("UP", "2024-01-03", 1.0, "t")]
     r = run_backtest(stream, src, holding_days=5)
-    ok = len(r.trades) == 2 and r.trades[0].entry_date == "2024-01-01" \
-        and r.trades[1].entry_date == "2024-01-03"
-    check("edge arming: re-arms after a sub-threshold signal", ok,
+    ok = len(r.trades) == 1 and r.trades[0].entry_date == "2024-01-02" and any("overlaps" in s for s in r.skipped)
+    check("Buy/Hold/Buy cannot overlap an existing holding", ok,
           f"entries={[t.entry_date for t in r.trades]}")
+    stream.extend([Signal("UP", "2024-01-07", 0.0, "t"), Signal("UP", "2024-01-08", 1.0, "t")])
+    r = run_backtest(stream, src, holding_days=1)
+    check("rearmed signal can enter after prior exit", len(r.trades) == 3)
+    check("statistics explicitly declare trade sample scope", r.metrics["metric_scope"] == "trade_sample_not_portfolio")
+    for value in (float("nan"), float("inf"), 0.0):
+        try:
+            JsonPriceSource(prices={"BAD": [{"date": "2024-01-01", "close": value}]})
+            rejected = False
+        except ValueError:
+            rejected = True
+        check(f"invalid close {value} rejected", rejected)
 
     # 6. tail guard: SHORTTAIL has 4 bars, a 5-bar hold cannot complete.
     r = run_backtest([Signal("SHORTTAIL", "2024-01-01", 1.0, "t")], src, holding_days=5)

@@ -1,8 +1,6 @@
 {
-  "_doc": "Active MCP servers. Only what a clean install needs; everything else lives in .mcp.json.template and is added with `python scripts/enable_mcp.py <name>`. Two invariants are load-bearing here: no `cmd /c` wrapper (it is Windows-only AND it re-parses the argv, so `mcp<2` became a shell redirect), and no absolute paths (a relative --script path resolves against the project root on every OS).",
   "mcpServers": {
     "yahoo-finance": {
-      "_doc": "Free, no API key. Primary market-data source. `--with mcp<2` is load-bearing: the upstream package imports mcp.server.fastmcp, which mcp 2.x deleted (FastMCP was renamed MCPServer). Without the pin the server dies at import and Claude Code reports -32000 Connection closed.",
       "command": "uvx",
       "args": [
         "--with",
@@ -11,7 +9,6 @@
       ]
     },
     "finnhub": {
-      "_doc": "Custom thin Python MCP wrapping the Finnhub REST API. Replaces the broken npm finnhub-mcp (Windows path bug). Source: mcps/finnhub_mcp.py. Free tier 60 req/min.",
       "command": "uv",
       "args": [
         "run",
@@ -23,6 +20,16 @@
       "env": {
         "FINNHUB_API_KEY": "${FINNHUB_API_KEY}"
       }
+    },
+    "trading-copilot": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--no-project",
+        "--quiet",
+        "--script",
+        "mcps/copilot_mcp.py"
+      ]
     }
   }
 }

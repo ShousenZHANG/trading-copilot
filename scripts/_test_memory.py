@@ -264,6 +264,18 @@ def test_cli_delimiter_injection() -> None:
         assert len(entries) == 1 and entries[0]["ticker"] == "EVIL", entries
 
 
+def test_cli_rejects_advisor_scales_and_prose() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        log, decision = root / "memory.md", root / "decision.md"
+        for body in ("**Rating**: Reduce\nDo not Buy", "| **评级** | Avoid |\nBuy is inappropriate", "**Rating**: Strong Buy", "Recommendation: Buy"):
+            decision.write_text(body, encoding="utf-8")
+            for override in ((), ("--rating", "Buy")):
+                result = _cli(log, "append", "--ticker", "TEST", "--date", "2026-09-04", "--decision-file", str(decision), *override)
+                assert result.returncode == 2, result.stdout + result.stderr
+                assert not log.exists(), "unsupported rating must never create a memory entry"
+
+
 def test_cli_resolve_pending_dry_run_and_write() -> None:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -340,6 +352,7 @@ TESTS = [
     test_cli_round_trip,
     test_cli_rejects_bad_date_and_rating_disagreement,
     test_cli_delimiter_injection,
+    test_cli_rejects_advisor_scales_and_prose,
     test_cli_resolve_pending_dry_run_and_write,
     test_cli_resolve_pending_refuses_silent_write,
     test_cli_alpha_guard,

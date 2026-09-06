@@ -21,11 +21,13 @@ CLI::
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
-from parse_rating import first_rating_word, parse_rating
+from parse_rating import explicit_rating, first_rating_word, parse_rating
 from runtime import force_utf8_stdio
 from ticker import validate_date_component, validate_ticker_component
 from validate_outputs import validate_run_dir
@@ -114,7 +116,12 @@ def _headline_block(pm_text: str) -> str:
     return f"{card}\n\n{headline}"
 
 
-def assemble(ticker: str, date: str, run_dir: Path, out_path: Path) -> str:
+def assemble(ticker: str, date: str, run_dir: Path, out_path: Path, *, assessed_decision: dict | None = None, snapshot: dict | None = None) -> str:
+    """Format research artifacts; production CLI additionally verifies stored policy output.
+
+    The no-decision call is retained only for legacy formatting/fixture consumers.
+    It does not authorize execution. CLI reports always require assessed output.
+    """
     # Both halves of the run path are validated. The date used to reach the
     # filesystem unchecked, so `--date ../../x` escaped data/decisions/.
     validate_ticker_component(ticker)
@@ -145,6 +152,12 @@ def assemble(ticker: str, date: str, run_dir: Path, out_path: Path) -> str:
     risk = _read(run_dir / "risk_debate_history.md", "risk debate", required=False)
     pm = _read(run_dir / "08-portfolio-decision.md", "portfolio decision")
     past_context = _read(run_dir / "00-past-context.md", "past context", required=False)
+    headline = _headline_block(pm)
+    pm_label = "最终结论 (Portfolio Manager)"
+    if assessed_decision is not None:
+        from copilot.service import render_decision
+        headline = render_decision(assessed_decision, snapshot or {})
+        pm_label = "研究附录 (Portfolio Manager；执行边界以上方政策结果为准)"
 
     report = f"""# {ticker} 决策报告 — {date}
 
@@ -152,9 +165,9 @@ def assemble(ticker: str, date: str, run_dir: Path, out_path: Path) -> str:
 
 ## 头条结论
 
-{_headline_block(pm)}
+{headline}
 
-## 最终结论 (Portfolio Manager)
+## {pm_label}
 
 {pm}
 
@@ -335,6 +348,8 @@ def main() -> int:
     parser.add_argument("--date", help="YYYY-MM-DD")
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--out", default=None)
+    parser.add_argument("--assessed-decision", help="JSON decision returned by shared policy and recorded in the local journal")
+    parser.add_argument("--db", default=None, help="local journal database path (normally omit)")
     parser.add_argument("--self-test", action="store_true", help="run built-in unit tests")
     args = parser.parse_args()
 
@@ -342,6 +357,8 @@ def main() -> int:
         return _self_test()
     if not args.ticker or not args.date:
         parser.error("--ticker and --date are required (or pass --self-test)")
+    if not args.assessed_decision:
+        parser.error("--assessed-decision is required; markdown validation alone cannot authorize a recommendation")
 
     try:
         ticker = validate_ticker_component(args.ticker)
@@ -353,13 +370,55 @@ def main() -> int:
     run_dir = Path(args.run_dir) if args.run_dir else ROOT / "data" / "runs" / f"{ticker}-{run_date}"
     out_path = Path(args.out) if args.out else ROOT / "data" / "decisions" / f"{ticker}-{run_date}.md"
     try:
-        print(assemble(ticker, run_date, run_dir, out_path))
+        decision, snapshot = load_assessed_decision(Path(args.assessed_decision), ticker, run_dir, db_path=args.db)
+        print(assemble(ticker, run_date, run_dir, out_path, assessed_decision=decision, snapshot=snapshot))
         return 0
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
 
+def load_assessed_decision(path: Path, ticker: str, run_dir: Path, *, db_path=None, now=None) -> tuple[dict, dict]:
+    """Require the exact committed decision, current snapshot and portfolio version.
+
+    A model-written file saying 'pass' is insufficient: the same object must be
+    present in the local recommendation ledger. Sidecars are a selector/export,
+    not the authority for their own validation.
+    """
+    from copilot.journal import get_context, load_decision, load_snapshot
+    from copilot.market_data import verify_snapshot
+    from copilot.policy import POLICY_VERSION
+    from copilot.service import database_path
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(value, dict) and "decision" in value:
+        value = value["decision"]
+    if not isinstance(value, dict) or value.get("schema_version") != 1 or not isinstance(value.get("decision_id"), str):
+        raise ValueError("invalid assessed Decision schema")
+    stored = load_decision(value["decision_id"], db_path=database_path(db_path))
+    if stored != value:
+        raise ValueError("assessed sidecar differs from the committed policy decision")
+    if stored.get("instrument_id") != ticker or stored.get("policy_version") != POLICY_VERSION or stored.get("data_status") != "ready":
+        raise ValueError("decision instrument, policy version or data eligibility is invalid")
+    snapshot = load_snapshot(stored["snapshot_id"], db_path=database_path(db_path))
+    if not verify_snapshot(snapshot):
+        raise ValueError("snapshot integrity verification failed")
+    clock = now or datetime.now(timezone.utc)
+    for owner in (stored, snapshot):
+        try:
+            expiry = datetime.fromisoformat(owner["valid_until"].replace("Z", "+00:00"))
+            created = datetime.fromisoformat(owner["created_at"].replace("Z", "+00:00"))
+            if expiry.tzinfo is None or created.tzinfo is None or created > clock or clock >= expiry:
+                raise ValueError("expired/future assessed decision; collect and assess again")
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise ValueError("decision timestamps are invalid") from exc
+    if stored.get("portfolio_version") != get_context(db_path=database_path(db_path))["portfolio_version"]:
+        raise ValueError("portfolio changed after assessment; assess again")
+    rating = explicit_rating(_read(run_dir / "08-portfolio-decision.md", "portfolio decision"))
+    mapped = {"Buy": "buy", "Overweight": "buy", "Hold": "hold", "Underweight": "reduce", "Sell": "sell"}[rating]
+    if mapped != stored.get("action"):
+        raise ValueError("PM rating conflicts with assessed action; do not publish the old recommendation")
+    return stored, snapshot
+
+
 if __name__ == "__main__":
     sys.exit(main())
-
