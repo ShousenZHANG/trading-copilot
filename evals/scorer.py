@@ -8,11 +8,11 @@ without any LLM call — pure, unit-testable Python. Once answers are collected
 
 Scoring modes
 -------------
-1. **numeric**: extract the leading numeric magnitude from both answer and
+1. **numeric**: extract one unambiguous non-calendar magnitude from answer and
    reference (handles $, commas, %, and the scale words k/m/bn/b/billion/
    million/trillion). PASS if within `tolerance_pct`.
-2. **textual**: case-insensitive containment / token-overlap fallback when no
-   number is present.
+2. **textual**: exact phrase containment with a conservative negation check.
+   Ambiguous values and complex paraphrases require manual grading.
 3. **hallucination**: the answer asserts a confident numeric claim that is
    *materially* different from the reference (> 5x tolerance) — worse than a
    plain miss, flagged separately because a confident wrong number is the most
@@ -29,6 +29,7 @@ CLI
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import sys
 from dataclasses import dataclass
@@ -53,7 +54,7 @@ _SCALE = {
 # leading signed number with optional thousands separators + decimals,
 # optionally followed by a scale word (possibly after a space).
 _NUM_RE = re.compile(
-    r"(-?\$?\s*[\d,]+(?:\.\d+)?)\s*(k|kk|mm|m|bn|b|tn|t|thousand|million|billion|trillion)?",
+    r"(?<![\w.])(-?\$?\s*\d[\d,]*(?:\.\d+)?)\s*(thousand|million|billion|trillion|kk|mm|bn|tn|k|m|b|t)?\b",
     re.IGNORECASE,
 )
 
@@ -68,24 +69,36 @@ class Verdict:
 
 
 def extract_magnitude(text: str) -> float | None:
-    """Return the first numeric magnitude in `text` in base units, or None.
+    """Return one unambiguous non-calendar magnitude, otherwise None.
 
     "$383.285 billion" -> 3.83285e11 ; "12.5%" -> 12.5 ; "1,250" -> 1250.0
     """
     if text is None:
         return None
-    m = _NUM_RE.search(text)
-    if not m:
-        return None
-    raw = m.group(1).replace("$", "").replace(",", "").replace(" ", "")
-    try:
-        value = float(raw)
-    except ValueError:
-        return None
-    scale_word = (m.group(2) or "").lower()
-    if scale_word in _SCALE:
-        value *= _SCALE[scale_word]
-    return value
+    date_spans = [m.span() for m in re.finditer(r"\b\d{4}-\d{2}-\d{2}\b", text)]
+    values = []
+    for m in _NUM_RE.finditer(text):
+        if any(a <= m.start() < b for a, b in date_spans):
+            continue
+        raw = m.group(1).replace("$", "").replace(",", "").replace(" ", "")
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        scale_word = (m.group(2) or "").lower()
+        # Bare years are context, not the financial answer. An explicitly
+        # currency/scale-marked 2023 is still a financial amount.
+        if 1900 <= value <= 2100 and value.is_integer() and not scale_word and "$" not in m.group(1) and not text[m.end():].startswith("%"):
+            continue
+        value *= _SCALE.get(scale_word, 1)
+        if math.isfinite(value):
+            values.append(value)
+    unique = set(values)
+    return next(iter(unique)) if len(unique) == 1 else None
+
+
+_NEGATION = re.compile(r"\b(?:not|no|never|neither|without|cannot|can't|don't|doesn't|isn't|wasn't)\b|不|没有|并非", re.I)
+_UNCERTAIN = re.compile(r"\b(?:maybe|perhaps|might|could|unknown|uncertain)\b|可能|不确定", re.I)
 
 
 def _token_overlap(a: str, b: str) -> float:
@@ -105,6 +118,12 @@ def score(answer: str, reference: str, tolerance_pct: float = 1.0) -> Verdict:
         return Verdict("no-reference", "empty reference", None, None, None)
     if answer is None or not answer.strip():
         return Verdict("fail", "empty answer", None, None, None)
+    if not math.isfinite(tolerance_pct) or tolerance_pct < 0:
+        raise ValueError("tolerance_pct must be finite and nonnegative")
+    if bool(_NEGATION.search(answer)) != bool(_NEGATION.search(reference)):
+        return Verdict("fail", "negation differs; lexical overlap is not entailment", None, None, None)
+    if _UNCERTAIN.search(answer) and not _UNCERTAIN.search(reference):
+        return Verdict("fail", "answer is conditional or uncertain", None, None, None)
 
     ref_val = extract_magnitude(reference)
     ans_val = extract_magnitude(answer)
@@ -131,7 +150,9 @@ def score(answer: str, reference: str, tolerance_pct: float = 1.0) -> Verdict:
 
     # Textual path.
     overlap = _token_overlap(answer, reference)
-    if reference.strip().lower() in answer.strip().lower() or overlap >= 0.6:
+    # Token overlap alone cannot prove the same assertion. Keep only an exact
+    # phrase with matching polarity; complex paraphrases require human grading.
+    if re.search(r"(?<!\w)" + re.escape(reference.strip().lower()) + r"(?!\w)", answer.strip().lower()):
         return Verdict("pass", f"textual match (overlap {overlap:.2f})", None, None, None)
     return Verdict("fail", f"textual mismatch (overlap {overlap:.2f})", None, None, None)
 
@@ -178,6 +199,14 @@ def _self_test() -> int:
         ("the rating is buy now", "Buy", 1.0, "pass"),
         ("Sell", "Buy", 1.0, "fail"),
         ("anything", "", 1.0, "no-reference"),
+        ("In 2023 revenue was $50 billion", "$383.285 billion", 0.5, "hallucination"),
+        ("In 2023 revenue was $383.3 billion", "$383.285 billion", 0.5, "pass"),
+        ("2023 revenue: $50 billion", "2023 revenue: $383.285 billion", 0.5, "hallucination"),
+        ("Do not Buy", "Buy", 1.0, "fail"),
+        ("not $100", "$100", 1.0, "fail"),
+        ("maybe Buy", "Buy", 1.0, "fail"),
+        ("$100 or $200", "$100", 1.0, "fail"),
+        ("buyback", "Buy", 1.0, "fail"),
     ]
     passed = 0
     for ans, ref, tol, expected in cases:

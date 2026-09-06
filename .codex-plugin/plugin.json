@@ -1,0 +1,20 @@
+{
+  "name": "trading-copilot",
+  "version": "0.4.0",
+  "description": "Conversational daily investment research with verified free-data snapshots and a local operation journal. US stocks/ETFs, Nasdaq and Chinese investment bullion; optional deep analysis.",
+  "author": {
+    "name": "eddy.zhang24",
+    "email": "eddy.zhang24@gmail.com"
+  },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Trading Copilot",
+    "shortDescription": "Verified research and local investment records.",
+    "longDescription": "Conversational daily investment research with verified free-data snapshots and a local operation journal. US stocks/ETFs, Nasdaq and Chinese investment bullion; optional deep analysis.",
+    "developerName": "eddy.zhang24",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Review an investment using current evidence, or record my completed operation."
+  }
+}

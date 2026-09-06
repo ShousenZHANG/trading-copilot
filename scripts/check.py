@@ -273,7 +273,14 @@ def check_agent_mcp_grants(path: Path, name: str, tools: str, text: str) -> None
 
 
 def check_skill_mirror() -> None:
-    # Cross-runtime mirror (.agents/) is optional. Validate only if present.
+    from sync_runtimes import generated_files
+    for path, expected in generated_files().items():
+        if not path.exists() or read(path) != expected:
+            err(f"{rel(path)}: runtime drift; run python scripts/sync_runtimes.py")
+    for relative in (".codex-plugin/plugin.json", "mcps/copilot_mcp.py", "scripts/copilot/service.py"):
+        if not (ROOT / relative).is_file():
+            err(f"missing shared runtime component: {relative}")
+    # Preserve the original named mirror check for readable diagnostics.
     source = ROOT / ".claude" / "skills" / "trading-copilot" / "SKILL.md"
     mirror = ROOT / ".agents" / "skills" / "trading-copilot" / "SKILL.md"
     if not mirror.exists():

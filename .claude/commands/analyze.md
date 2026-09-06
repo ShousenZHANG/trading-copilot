@@ -1,191 +1,91 @@
 ---
-description: Run the full Trading Copilot pipeline on one instrument (4 analysts -> Bull/Bear debate -> Trader -> 3-way Risk debate -> Portfolio Manager). Use for stocks, ETFs, futures.
-argument-hint: <TICKER> [--debate-rounds=1] [--risk-rounds=1]
+description: Explicit deep research using four parallel analysts, sequential debates, one stored evidence snapshot and the shared decision policy. Ordinary guidance uses investment-chat.
+argument-hint: <TICKER> [--mode=tactical|accumulation] [--horizon=daily|swing|long_term] [--debate-rounds=1] [--risk-rounds=1] [--resume=<RUN_ID>]
 ---
 
-Run the full Trading Copilot pipeline on `$ARGUMENTS`.
+Run this pipeline only when the user explicitly invokes /analyze or requests the full deep pipeline. Ordinary investment questions use investment-chat. A long report is produced only when expressly requested.
 
-**Ticker**: parse from `$ARGUMENTS` — first token. Preserve any exchange suffix exactly (`.HK`, `.T`, `.L`, `.TO`, `=F`, `=X`).
-**Date**: today (read from system clock, format `YYYY-MM-DD`).
-**Debate rounds**: default 1 (= 1 Bull + 1 Bear). Override via `--debate-rounds=N`.
-**Risk rounds**: default 1 (= Aggressive + Conservative + Neutral). Override via `--risk-rounds=N`.
+Resolve the first argument to a supported US stock/ETF, ^NDX, ^IXIC, or GOLD.CNY. Index levels are research benchmarks. GOLD.CNY means Chinese investment bars/coins bought in RMB; SGE prices remain benchmarks, not merchant prices. The shared core resolves supported aliases. Default debate/risk rounds are 1; preserve the user's accumulation mode or horizon.
 
 ## Execution plan
 
-Follow this order **strictly**. Use the Agent tool with the named subagent for each step. Wait for each subagent to finish and save its report before starting the next.
+### Step 0: Prepare or explicitly resume a validated run
 
-### Step 0: Setup + RESUME DETECTION
+From the project root run:
 
-1. Create run dir: `data/runs/<TICKER>-<DATE>/` (or reuse if exists).
+    uv run --no-project --quiet --script scripts/copilot_cli.py prepare-run <INSTRUMENT> --mode <MODE> --horizon <HORIZON>
 
-2. **RESUME CHECK** — list existing files in the run dir. For each step below, if its output file already exists with non-trivial size (> 50 bytes), **SKIP that step** and use the existing file. Resume from the first incomplete step.
+The result contains run_id, run_dir, manifest and snapshot. Use its actual canonical instrument_id, snapshot_id, portfolio_version, valid_until, mode and horizon in every brief. The run directory identifies immutable inputs, not a ticker/date folder convention. Read mcp__trading-copilot__get_investment_context and save the exact returned context as <run_dir>/context.json. Missing portfolio completeness remains unknown; old recommendation memory and data/positions.md do not establish actual complete holdings.
 
-   Decision table:
+If the user supplies --resume=<RUN_ID>, run:
 
-   | File found | Action |
-   |------------|--------|
-   | `00-past-context.md` exists | Skip Step 0 step 2-3 |
-   | `01-market.md` (>500 bytes) exists | Skip market-analyst |
-   | `02-social.md` (>500 bytes) exists | Skip social-analyst |
-   | `03-news.md` (>500 bytes) exists | Skip news-analyst |
-   | `04-fundamentals.md` (>500 bytes) exists | Skip fundamentals-analyst |
-   | `debate_history.md` exists | Inspect content: count `## Bull (round N)` and `## Bear (round N)` headers. Resume from the next-needed turn (e.g. Bull done, Bear missing → start Step 2 at Bear) |
-   | `06-research-plan.md` (>200 bytes) exists | Skip Research Manager |
-   | `07-trader-proposal.md` (>200 bytes) exists | Skip Trader |
-   | `risk_debate_history.md` exists | Count Aggressive/Conservative/Neutral headers, resume next-needed |
-   | `08-portfolio-decision.md` (>200 bytes) exists | Skip Portfolio Manager — go to Step 7 (assemble final report) |
-   | `data/decisions/<TICKER>-<DATE>.md` exists | Pipeline already complete — print summary and return |
+    uv run --no-project --quiet --script scripts/copilot_cli.py resume-run <RUN_ID>
 
-3. Tell the user explicitly which steps you're skipping (e.g. "Resuming /analyze NVDA — skipping completed: market-analyst, social-analyst, news-analyst, fundamentals-analyst, Bull researcher. Continuing from: Bear researcher.").
+Proceed only when the core accepts snapshot expiry, portfolio version and code/prompt version. Rejected resume requires fresh prepare-run. Re-run stages against the accepted immutable snapshot: there is no typed stage-completion record, so file existence, byte count, same-day filenames and an old report never authorize a stage skip or final recommendation. Start fresh debate histories for the rerun.
 
-4. If 00-past-context.md does not exist: read `data/memory/trading_memory.md` and extract:
-   - Last 5 resolved entries for `<TICKER>` (full DECISION + REFLECTION)
-   - Last 3 resolved entries for OTHER tickers (REFLECTION only)
-   Save as `00-past-context.md`. If memory log empty, write `(no past context)`.
+Build one common brief: {instrument_id, snapshot_id, portfolio_version, run_dir, mode, horizon, decision_at, valid_until}. Every analyst reads mcp__trading-copilot__get_evidence_snapshot(snapshot_id). All numeric claims cite actual evidence IDs and fields from that same snapshot. The service attaches per-instrument research sections and research_issues; inspect their status and critical_evidence_eligible flags separately from market quality. Missing SEC, FRED, news or ETF evidence is a gap, not proof that nothing changed.
 
-5. Read `data/positions.md` for the Portfolio Manager risk gate (don't skip even on resume).
+Read docs/strategy.md if present. If historical recommendation reflections are relevant, use scripts/memory.py past-context read-only and save a clearly labeled slice as 00-past-context.md; otherwise put the journal's prior-decision summary there. Reflections are not fills or proof of strategy effectiveness.
 
 ### Step 1: Analysts (PARALLEL — fan out 4 in a single message)
 
-The 4 analysts have **no inter-dependencies** (each writes a different report field, none reads another analyst's output). Dispatch all four in **a single message containing 4 Agent tool calls**, so Claude Code runs them concurrently. This cuts wall-clock time from ~15-20 min (serial) to ~5-7 min (parallel).
+Dispatch a single message containing 4 Agent tool calls, using the identical common brief:
 
-In ONE message, fan out:
-- **`market-analyst`** with run brief `{ticker, date, run_dir}` → writes `01-market.md`
-- **`social-analyst`** with same brief → writes `02-social.md`
-- **`news-analyst`** with same brief → writes `03-news.md`
-- **`fundamentals-analyst`** with same brief → writes `04-fundamentals.md`
+- market-analyst → <run_dir>/01-market.md
+- social-analyst → <run_dir>/02-social.md
+- news-analyst → <run_dir>/03-news.md
+- fundamentals-analyst → <run_dir>/04-fundamentals.md
 
-**Wait for all four to complete** before proceeding to Step 2. Verify each file exists. If any failed, log to `data/runs/<TICKER>-<DATE>/_errors.md` and continue with the analysts that succeeded — Bull/Bear can still debate from partial reports.
+For explicit deep GOLD.CNY research replace fundamentals-analyst with macro-analyst → <run_dir>/05-macro.md. This does not change normal concise /gold behavior.
 
-**Rate-limit guardrail**: if Claude Code returns rate-limit errors during parallel dispatch, fall back to serial (a → b → c → d). Document the fallback in `_errors.md`.
-
-**Cost note**: parallel does not increase total tokens — same total work, different timing. Peak concurrent context is 4× higher (4 analyst contexts in flight), still well within Sonnet limits.
+Wait for all four. Each artifact identifies its snapshot and coverage gaps. Log failures to <run_dir>/_errors.md; a missing report remains a missing input. On an actual dispatch rate limit, fall back to serial and record it. Analysts have no dependencies on each other. A coverage-gap note is legitimate output; absent social/news access does not establish neutral sentiment.
 
 ### Step 2: Bull/Bear debate
 
-Maintain a `data/runs/<TICKER>-<DATE>/debate_history.md` file.
-
-For each round (default 1):
-1. Dispatch **`bull-researcher`** with: all 4 analyst reports + current `debate_history.md` + last bear arg (empty on round 1). Append the Bull's response to `debate_history.md` as `## Bull (round N)\n<text>`.
-2. Dispatch **`bear-researcher`** with: all 4 analyst reports + current `debate_history.md` + the Bull arg just produced. Append `## Bear (round N)\n<text>`.
+Within each round run bull-researcher, then bear-researcher sequentially. Supply the common brief, available analyst artifacts, current transcript and preceding opposing argument. Append to <run_dir>/debate_history.md under "## Bull (round N)" and "## Bear (round N)". Internal debate remains English. Debaters may challenge interpretation, not upgrade evidence quality or invent missing facts.
 
 ### Step 3: Research Manager
 
-Dispatch **`research-manager`** (Opus tier) with: ticker context + full `debate_history.md`. It produces the structured ResearchPlan to `06-research-plan.md`.
+Dispatch research-manager (Opus) with the common brief, analyst reports and debate. It writes <run_dir>/06-research-plan.md, preserving the five-tier Recommendation/Rationale/Strategic Actions schema. This is a research proposal, not policy approval.
 
 ### Step 4: Trader
 
-Dispatch **`trader`** with: ticker context + `06-research-plan.md` + all 4 analyst reports. Produces `07-trader-proposal.md`.
+Dispatch trader with the same snapshot/context, research plan and analyst artifacts. It writes <run_dir>/07-trader-proposal.md. Preserve its three-tier action contract. Exact sizing requires actual complete portfolio inputs and policy authorization, not a confidence-to-percentage rule.
 
 ### Step 5: Risk debate (3-way, fixed order)
 
-Maintain `data/runs/<TICKER>-<DATE>/risk_debate_history.md`.
-
-For each round (default 1), dispatch in order:
-1. **`aggressive-debator`** with: all analyst reports + trader proposal + current `risk_debate_history.md`. Append `## Aggressive (round N)\n<text>`.
-2. **`conservative-debator`** — same context. Append `## Conservative (round N)\n<text>`.
-3. **`neutral-debator`** — same context. Append `## Neutral (round N)\n<text>`.
+Within each round dispatch aggressive-debator → conservative-debator → neutral-debator, strictly sequentially. Supply the common brief, analyst reports, trader proposal, journal context and preceding risk transcript. Append role/round sections to <run_dir>/risk_debate_history.md. Internal debate stays English. Unknown risk inputs remain unknown; a persuasive argument cannot make a machine check pass.
 
 ### Step 6: Portfolio Manager
 
-Dispatch **`portfolio-manager`** (Opus tier) with:
-- ticker context
-- `06-research-plan.md`
-- `07-trader-proposal.md`
-- `risk_debate_history.md`
-- `00-past-context.md`
-- `data/positions.md`
+Dispatch portfolio-manager (Opus) with all prior artifacts, common brief and journal context. It writes <run_dir>/08-portfolio-decision.md as a five-tier research proposal with missing inputs disclosed. It neither records a trade nor approves its own risk gate.
 
-It runs the pre-trade risk gate, applies past lessons, and produces `08-portfolio-decision.md`. The orchestrator, not the Portfolio Manager, appends memory and assembles the final report after deterministic validation passes.
+### Step 7: Validate shape, assess policy, return the conversation decision
 
-### Step 7: Validate, append memory, assemble final user-facing report
+First check artifact shape:
 
-Run the deterministic validation gate before any final report or memory write:
+    python scripts/validate_outputs.py run <RUN_DIR>
 
-```bash
-python scripts/validate_outputs.py run data/runs/<TICKER>-<DATE>
-```
+Repair failures before proceeding. Success establishes markdown contracts only, not current-data/risk eligibility.
 
-If validation fails, stop and show the error. Do not append memory and do not present a final rating.
+Read the PM's explicit Rating field once. Map Buy/Overweight → buy, Hold → hold, Underweight → reduce, Sell → sell. The advisor's Strong Buy/Reduce/Avoid scale is separate; never parse rating words from prose or append that scale to legacy memory.
 
-After validation passes, append the Portfolio Manager decision through the hardened memory CLI (rating is parsed deterministically from the decision file):
+Build the structured proposal with instrument_id, action, mode, horizon, reasons, conditions, actual evidence_ids, plus the manifest's snapshot_id and portfolio_version. Include required_indicators when an indicator is necessary to the thesis. Optional price/quantity/target_weight/stop_loss values need the correct instrument units and supported evidence; omit unsupported fields. Critical research claims require critical_evidence_eligible=true and the actual matching research evidence ID. An unverified source may explain a gap, not justify an actionable thesis.
 
-```bash
-python scripts/memory.py append --ticker <TICKER> --date <DATE> --decision-file data/runs/<TICKER>-<DATE>/08-portfolio-decision.md
-```
+Every literal numerical fact in reasons/conditions requires claims=[{evidence_id, path, value}]. Use a JSON Pointer relative to the cited stored evidence record, such as /data/value, or /instruments/<INSTRUMENT>/price and /instruments/<INSTRUMENT>/indicators/<field> for computed values linked to market evidence. The claim value must exactly match the stored scalar; normal displayed rounding is allowed, arbitrary rescaling is not. Dates and indicator labels such as RSI14 are labels rather than metric values. Unsupported future price thresholds stay out of reasons/conditions. Prefer a supported qualitative reconsideration condition when no computed threshold exists. The machine checks source/value identity, not the truth of every qualitative interpretation.
 
-Then assemble `data/decisions/<TICKER>-<DATE>.md` deterministically:
+Call mcp__trading-copilot__assess_investment_proposal(snapshot_id, proposal). If MCP is unavailable, save proposal JSON and use the same implementation:
 
-```bash
-python scripts/assemble_report.py --ticker <TICKER> --date <DATE>
-```
+    uv run --no-project --quiet --script scripts/copilot_cli.py review <SNAPSHOT_ID> --input <PROPOSAL_JSON>
 
-The assembler uses this report shape:
+The tool commits the assessed recommendation and returns {decision, message}. Save its exact decision object to <run_dir>/assessed-decision.json. Preserve action, scope, evidence, timestamps and versions. Expiry during this long pipeline requires fresh collection and renewed affected analysis; never relabel old evidence as current.
 
-```markdown
-# <TICKER> 决策报告 — <DATE>
+Return the assessed message in concise Chinese: action/view and horizon, at most two reasons, reconsideration conditions, data date/source links and gaps. data_insufficient pauses affected advice; it never means sell. A research-only index/gold view is not an executable purchase. No default long report or automatic legacy memory append.
 
-> ⚠️ 教育与研究用途. 非投资建议. 详见 [DISCLAIMER.md](../../DISCLAIMER.md).
+Only when the user expressly requests a report, align the PM's explicit rating and scope with the assessed outcome, then run:
 
-## 最终结论 (Portfolio Manager)
-<paste 08-portfolio-decision.md content>
+    python scripts/assemble_report.py --ticker <INSTRUMENT> --date <YYYY-MM-DD> --run-dir <RUN_DIR> --assessed-decision <RUN_DIR>/assessed-decision.json --out <RUN_DIR>/report.md
 
-## 交易员方案 (Trader)
-<paste 07-trader-proposal.md content>
+The assembler verifies the exact committed Decision, snapshot expiry and current portfolio version. Its top conclusion is assessed output; agent prose is a research appendix. A rejected/data-insufficient decision is not publishable as a Buy report.
 
-## 研究主管摘要 (Research Manager)
-<paste 06-research-plan.md content>
-
----
-
-<details>
-<summary>📊 4位分析师报告 (展开查看)</summary>
-
-### 技术面 (Market)
-<paste 01-market.md>
-
-### 情绪面 (Social)
-<paste 02-social.md>
-
-### 新闻面 (News)
-<paste 03-news.md>
-
-### 基本面 (Fundamentals)
-<paste 04-fundamentals.md>
-
-</details>
-
-<details>
-<summary>🥊 Bull/Bear 辩论纪要 (英文, 展开查看)</summary>
-
-<paste debate_history.md>
-
-</details>
-
-<details>
-<summary>⚖️ 风险辩论纪要 (Aggressive/Conservative/Neutral, 英文)</summary>
-
-<paste risk_debate_history.md>
-
-</details>
-
----
-
-**过往决策上下文** (用于本次复盘):
-
-<paste 00-past-context.md>
-
----
-
-⚠️ **免责声明**: 本报告由 trading-copilot 多 agent 生成. 仅供教育研究, 非投资建议. 模型可能产生幻觉/错误/遗漏. 你对所有投资决定负全责. 详见 [DISCLAIMER.md](../../DISCLAIMER.md).
-```
-
-### Step 8: Reply to user
-
-Show the user:
-- The headline rating + price target (1 line)
-- The executive summary (2-4 sentences)
-- The path to the full report: `data/decisions/<TICKER>-<DATE>.md`
-- Brief warning: "教育用途, 不是投资建议"
-
-Do NOT dump the full report into chat — it's long. The user can open the markdown file or ask to see specific sections.
+Actual purchases/sales use investment-chat's record_investment_operation workflow with the user's original statement and stable idempotency key. This pipeline's proposals and recommendations never become fills.

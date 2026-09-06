@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from runtime import force_utf8_stdio
+from parse_rating import explicit_rating
 
 force_utf8_stdio()
 
@@ -128,6 +129,10 @@ def validate_portfolio_manager(text: str) -> ValidationResult:
     _nonempty_field(text, "Executive Summary", errors)
     thesis = _nonempty_field(text, "Investment Thesis", errors)
     rating_word = _first_word(rating)
+    try:
+        rating_word = explicit_rating(text)
+    except ValueError as exc:
+        errors.append(str(exc))
     if rating_word and rating_word not in RATINGS_5_TIER:
         errors.append(f"invalid Rating '{rating}'. Expected one of {list(RATINGS_5_TIER)}")
     if thesis and rating_word in {"Buy", "Overweight"}:
@@ -139,6 +144,7 @@ def validate_portfolio_manager(text: str) -> ValidationResult:
                 "Buy/Overweight thesis may not explicitly document risk gate terms: "
                 + ", ".join(missing)
             )
+    warnings.append("legacy markdown validation checks shape only; executable recommendations require copilot policy with a current evidence snapshot")
     return ValidationResult(not errors, errors, warnings)
 
 
@@ -268,4 +274,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

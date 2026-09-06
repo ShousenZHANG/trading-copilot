@@ -2,9 +2,9 @@
 """Deterministic 5-tier rating parser.
 
 Direct port of TradingAgents' ``agents/utils/rating.py``. Used by:
-- ``scripts/memory.py`` when appending pending entries (defends against
-  Portfolio Manager prompt drift that produces non-standard rating headers).
-- Anywhere else trading-copilot needs to extract a rating from prose.
+- ``scripts/memory.py`` uses explicit_rating for new five-tier writes.
+- parse_rating retains historical prose inspection with a defensive fallback;
+  it is not a parser for the advisor's different rating scale.
 
 WHY THE PASSES ARE ORDERED THE WAY THEY ARE
 -------------------------------------------
@@ -77,6 +77,28 @@ _LOOSE_LABEL_RE = re.compile(rf"rating.*?[{_SEPARATORS}]\s*(.+)$", re.IGNORECASE
 _ASCII_WORD_RE = re.compile(r"[A-Za-z]+")
 
 
+def explicit_rating(text: str) -> str:
+    """Read a single explicit five-tier header for NEW writes, never prose.
+
+    Other scales (Reduce, Avoid, Strong Buy), missing labels and conflicting
+    labels require a deliberate migration/schema; they cannot become Buy.
+    Chinese translations surrounding one canonical token remain compatible.
+    """
+    labels = [m.group(1) for line in text.splitlines()
+              if (m := _ANCHORED_LABEL_RE.search(line))]
+    if not labels:
+        raise ValueError("missing explicit five-tier Rating header; historical fallback is read-only")
+    ratings = []
+    for value in labels:
+        words = _ASCII_WORD_RE.findall(value)
+        if len(words) != 1 or words[0].lower() not in _RATING_SET:
+            raise ValueError(f"unsupported or ambiguous rating scale: {value!r}")
+        ratings.append(words[0].capitalize())
+    if len(set(ratings)) != 1:
+        raise ValueError("rating disagreement between explicit headers")
+    return ratings[0]
+
+
 def first_rating_word(value: Optional[str]) -> Optional[str]:
     """Return the first 5-tier rating word inside ``value``, else None.
 
@@ -101,6 +123,15 @@ def parse_rating(text: str, default: str = "Hold") -> str:
     if not text:
         return default
     lines = text.splitlines()
+
+    # A declared unsupported rating has authority over incidental words in the
+    # body. Historical readers degrade to Hold, while explicit_rating rejects
+    # the ambiguity for new writes.
+    declared = [m.group(1) for line in lines if (m := _ANCHORED_LABEL_RE.search(line))]
+    if any(re.search(r"\b(?:reduce|avoid|strong\s+buy)\b", value, re.I) for value in declared):
+        return default
+    if re.search(r"\|\s*\*{0,2}评级\*{0,2}\s*\|\s*(?:Reduce|Avoid|Strong Buy)\s*\|", text, re.I):
+        return default
 
     for pattern in (_ANCHORED_LABEL_RE, _LOOSE_LABEL_RE):
         for line in lines:

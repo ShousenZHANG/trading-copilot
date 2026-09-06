@@ -1,6 +1,7 @@
 name: CI
 
-# Every script in this repo is stdlib-only and self-testing. CI's job is to
+# Offline core contracts are stdlib-only; real calendars and MCP have pinned dependencies.
+# CI's job is to
 # prove that on a clean machine, on every supported Python, before a commit
 # becomes a directory-pinned release sha.
 
@@ -37,6 +38,9 @@ jobs:
       - name: Repo health check
         run: python scripts/check.py
 
+      - name: Shared core behavioral contracts
+        run: python -m unittest discover -s scripts -p '_test_*.py'
+
       - name: Self-tests (auto-discovered)
         run: |
           set -euo pipefail
@@ -45,7 +49,7 @@ jobs:
           # -e is required: a bare '--self-test' pattern would be parsed as a
           # grep option, and using '--' to stop parsing swallows --include.
           mapfile -t modules < <(
-            grep -rl --include='*.py' -e '--self-test' scripts evals mcps | sort
+            grep -rl --include='*.py' --exclude='_test_*.py' -e '--self-test' scripts evals mcps | sort
           )
           if [ ${#modules[@]} -eq 0 ]; then
             echo "::error::no self-testing modules found — discovery is broken"
@@ -108,6 +112,11 @@ jobs:
       - name: Every shipped MCP server completes a JSON-RPC handshake
         run: python scripts/mcp_handshake.py --all --timeout 300
 
+      - name: Pinned calendars and real MCP tool persistence
+        run: |
+          uv run --no-project --with yfinance==1.7.0 --with exchange-calendars==4.13.2 --with tzdata==2026.3 python scripts/_test_market_data.py --calendars
+          uv run --no-project --quiet --script scripts/copilot_probe.py
+
       # The repo checker and the official validator disagreed for a whole
       # release: check.py required a `category` field that `plugin validate`
       # reports as misplaced, while three real schema errors went unnoticed.
@@ -169,6 +178,8 @@ jobs:
               "scripts/parse_rating.py", "scripts/assemble_report.py",
               "evals/scorer.py", "evals/stockbench/backtest_engine.py",
               "mcps/finnhub_mcp.py", "mcps/akshare_mcp.py",
+              "mcps/copilot_mcp.py", "scripts/copilot/service.py",
+              ".codex/config.toml", ".codex-plugin/plugin.json", "AGENTS.md",
               ".claude-plugin/plugin.json", "README.md", "DISCLAIMER.md",
           ]
           missing = [r for r in required
@@ -181,7 +192,8 @@ jobs:
           leaked = [n for n in names
                     if "positions.md" in n or "trading_memory" in n
                     or n.endswith(".env") or "/data/runs/" in n
-                    or "/data/decisions/" in n or "portfolio_state.json" in n]
+                    or "/data/decisions/" in n or "/data/state/" in n
+                    or n.endswith((".sqlite", ".sqlite-wal", ".sqlite-shm")) or "portfolio_state.json" in n]
           if leaked:
               sys.exit("personal state leaked into zip: " + ", ".join(leaked))
 

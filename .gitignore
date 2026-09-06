@@ -66,6 +66,11 @@ logs/
 .claude/settings.local.json
 .claude/projects/
 .claude/.credentials.json
+.codex/settings.local.json
+.codex/history.jsonl
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
 
 # Eval artifacts
 evals/results/

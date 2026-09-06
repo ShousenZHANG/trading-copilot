@@ -76,7 +76,7 @@ REFLECTION_PLACEHOLDER = (
 # Re-exported from parse_rating.py to keep validation logic in one place.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchmarks import is_alpha_meaningful, resolve_benchmark  # noqa: E402
-from parse_rating import RATINGS_5_TIER, first_rating_word, parse_rating  # noqa: E402
+from parse_rating import RATINGS_5_TIER, explicit_rating, first_rating_word, parse_rating  # noqa: E402
 from ticker import validate_date_component, validate_ticker_component  # noqa: E402
 from validate_outputs import rating_field  # noqa: E402
 
@@ -690,6 +690,14 @@ def main() -> int:
     if args.cmd == "append":
         decision_text = Path(args.decision_file).read_text(encoding="utf-8").strip()
         rating = args.rating
+        try:
+            declared = explicit_rating(decision_text)
+        except ValueError as exc:
+            print(f"error: {exc}; refusing to append an ambiguous legacy rating", file=sys.stderr)
+            return 2
+        if rating is not None and rating != declared:
+            print(f"rating disagreement: --rating {rating} versus explicit header {declared}", file=sys.stderr)
+            return 2
         if rating is None:
             # /analyze and /gold call append WITHOUT --rating, so this parser is
             # the final authority on what enters the append-only log. Cross-check
@@ -697,13 +705,7 @@ def main() -> int:
             # disagree the file is ambiguous, and writing either one is a guess.
             parsed = parse_rating(decision_text)
             validated = first_rating_word(rating_field(decision_text))
-            if validated is None:
-                print(
-                    f"warning: {args.decision_file} has no anchored '**Rating**:' field; "
-                    f"falling back to parse_rating -> {parsed}",
-                    file=sys.stderr,
-                )
-            elif validated != parsed:
+            if validated != parsed:
                 print(
                     f"rating disagreement in {args.decision_file}: "
                     f"parse_rating -> {parsed}, **Rating** field -> {validated}. "
