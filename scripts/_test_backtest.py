@@ -53,6 +53,18 @@ class UniverseTiers(unittest.TestCase):
     def test_default_candidates_are_exactly_the_qualified_tier(self):
         self.assertEqual(universe.default_candidates(), tuple(sorted(universe.QUALIFIED)))
 
+    def test_classify_normalizes_lowercase(self):
+        self.assertEqual(universe.classify("spy").tier, "qualified")
+
+    def test_classify_rejects_non_string(self):
+        with self.assertRaises(ValueError):
+            universe.classify(None)
+
+    def test_classify_flags_provenance_caveat_in_reason_and_flag(self):
+        smh = universe.classify("SMH")
+        self.assertIn(universe._PROVENANCE_CAVEAT, smh.reason)
+        self.assertTrue(smh.provenance_unverified)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,6 +41,11 @@ INCOME_PROXY_ONLY = frozenset({"QQQI", "JEPQ", "JEPI"})
 #: current fund (no issuer page fetched). Usable; reported as a caveat.
 PROVENANCE_UNVERIFIED = frozenset({"SMH"})
 
+#: Appended to `reason` for any symbol in PROVENANCE_UNVERIFIED, so a caller
+#: that only surfaces `reason` still sees the caveat. bxn.py and the CLI cite
+#: this same text rather than restating it.
+_PROVENANCE_CAVEAT = "; pre-2011 series not confirmed to belong to the current fund"
+
 _REASONS = {
     "qualified": "daily bars from at least 2007-07-26 with full 2008/2020/2022 coverage",
     "no_2008_bars": "fund did not exist in 2008; zero bars in the GFC window",
@@ -61,6 +66,8 @@ class Classification:
 
 def classify(symbol: str) -> Classification:
     """Tier a registry symbol. Raises for anything not in ETF_REGISTRY."""
+    if not isinstance(symbol, str) or not symbol.strip():
+        raise ValueError("symbol must be a non-empty string")
     key = symbol.upper()
     if key not in ETF_REGISTRY:
         raise ValueError(f"{key} is not in the ETF registry")
@@ -70,9 +77,10 @@ def classify(symbol: str) -> Classification:
                           ("partial_2008", PARTIAL_2008), ("unfetchable", UNFETCHABLE),
                           ("income_proxy_only", INCOME_PROXY_ONLY)):
         if key in members:
+            unverified = key in PROVENANCE_UNVERIFIED
+            reason = _REASONS[tier] + (_PROVENANCE_CAVEAT if unverified else "")
             return Classification(symbol=key, tier=tier, admissible=(tier == "qualified"),
-                                  reason=_REASONS[tier],
-                                  provenance_unverified=key in PROVENANCE_UNVERIFIED)
+                                  reason=reason, provenance_unverified=unverified)
     raise ValueError(f"{key} is registered but untiered; add it to scripts/copilot/backtest/universe.py")
 
 
