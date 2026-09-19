@@ -221,12 +221,8 @@ def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None,
             blockers.append(f"instrument {key} does not match canonical identity")
     if identity["asset_class"] in {"index", "physical_gold"} and item.get("asset_class") != identity["asset_class"]:
         blockers.append("benchmark instrument class cannot be changed")
-    if identity["asset_class"] in {"stock", "etf"} and item.get("asset_class") not in {"stock", "etf"}:
-        blockers.append("unsupported asset class for a US stock/ETF")
-    if identity.get("identity_status") == "registered" and item.get("asset_class") != identity["asset_class"]:
-        blockers.append("registered instrument class cannot be changed")
-    dynamic_etf = (identity.get("identity_status") == "requires_provider_confirmation"
-                   and identity["asset_class"] == "stock" and item.get("asset_class") == "etf")
+    if identity["asset_class"] == "etf" and item.get("asset_class") != "etf":
+        blockers.append("registered ETF class cannot be changed")
     # Import lazily so CLI clients need not load adapters until a real snapshot
     # is assessed. A matching digest checks identity; it is not provenance proof.
     from .market_data import verify_snapshot
@@ -267,20 +263,6 @@ def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None,
         if eid in evidence:
             raise ValueError("duplicate evidence_id")
         evidence[eid] = record
-    if dynamic_etf:
-        # The registry's generic US-stock default is provisional. Only the
-        # adapters that actually verify provider metadata can establish ETF
-        # identity; a proposal flag or a research record cannot establish it.
-        confirmations = [evidence[eid] for eid in market_ids if eid in evidence
-                         and (evidence[eid].get("provider"), evidence[eid].get("upstream")) in {
-                             ("yahoo", "Yahoo Finance"), ("nasdaq", "Nasdaq US market data")}
-                         and evidence[eid].get("status") == "ok"
-                         and evidence[eid].get("instrument_id") == instrument_id
-                         and evidence[eid].get("asset_class") == "etf"
-                         and all(evidence[eid].get(key) == identity[key]
-                                 for key in ("currency", "unit", "price_kind"))]
-        if item.get("identity_status") != "provider_confirmed" or not confirmations:
-            blockers.append("dynamic ETF identity lacks matching verified market-source metadata")
     if not ids or not set(ids).intersection(market_ids):
         blockers.append("proposal has no evidence for this instrument")
     for eid in sorted(set(ids) | market_ids):

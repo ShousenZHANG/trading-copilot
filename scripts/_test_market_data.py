@@ -90,7 +90,7 @@ class SnapshotContracts(unittest.TestCase):
         self.assertNotIn("stale", str(result))
         self.assertTrue(any("deadline_exceeded" in issue for issue in result["issues"]))
 
-    def test_dynamic_etf_identity_routes_later_providers_as_etf(self):
+    def test_registered_etf_is_confirmed_by_provider_metadata(self):
         seen = []
         class Corroborator(FixtureProvider):
             def fetch(self, instrument, *args):
