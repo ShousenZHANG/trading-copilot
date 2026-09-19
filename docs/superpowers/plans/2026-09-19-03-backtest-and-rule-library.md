@@ -2084,6 +2084,16 @@ class CliContract(unittest.TestCase):
         module = importlib.import_module("backtest_cli")
         self.assertTrue(hasattr(module, "main"))
 
+    def test_universe_is_fetched_once_not_once_per_family(self):
+        # Three families over 12 symbols would be 36 Yahoo requests if each
+        # family loaded its own data, against a rate-limit evidence base of one
+        # 30-request run. It also lets the three backtests disagree if Yahoo
+        # revised a bar mid-run.
+        import backtest_cli
+        source = Path(backtest_cli.__file__).read_text(encoding="utf-8")
+        self.assertEqual(source.count("history.fetch("), 1)
+        self.assertIn("def load_universe(", source)
+
     def test_sensitivity_walks_each_parameter_both_ways(self):
         import backtest_cli
         grid = backtest_cli.sensitivity_grid({"lookback_days": 252.0, "top_n": 5.0})
@@ -2218,14 +2228,26 @@ def verify_calendars() -> int:
     return problems
 
 
-def run_family(symbols: tuple[str, ...], rule, *, start_cash: float, cash_floor_pct: float) -> dict:
-    series = []
+def load_universe(symbols: tuple[str, ...]) -> tuple:
+    """Fetch every symbol once. Returns (frame, alignment, caveats).
+
+    Once, not once per family: three families over 12 symbols would otherwise
+    make 36 Yahoo requests, and the only rate-limit evidence we have is a single
+    run of 30 consecutive requests. Re-fetching the same bars three times also
+    risks the three backtests disagreeing because Yahoo revised a bar mid-run.
+    """
+    series, caveats = [], []
     for symbol in symbols:
         classification = universe.classify(symbol)
         if not classification.admissible:
             raise SystemExit(f"{symbol} is tier '{classification.tier}': {classification.reason}")
+        if classification.provenance_unverified:
+            caveats.append(f"{symbol}: {classification.reason}")
         series.append(history.fetch(symbol))
-    frame = history.to_frame(series)
+    return history.to_frame(series), history.alignment(series), caveats
+
+
+def run_family(frame, rule, *, start_cash: float, cash_floor_pct: float) -> dict:
     result = engine.run(frame, rule=rule, start_cash=start_cash,
                         cost_model=engine.CostModel(), cash_floor_pct=cash_floor_pct)
     report = admission.assess(result, sessions_by_year=admission.STRESS_SESSIONS)
@@ -2280,10 +2302,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--universe is required unless a --verify-* or --self-test flag is given")
 
     symbols = tuple(s.strip().upper() for s in args.universe.split(",") if s.strip())
+    frame, alignment, caveats = load_universe(symbols)
     payload = {"generated_at": datetime.now(timezone.utc).isoformat(),
-               "universe": list(symbols), "families": []}
+               "universe": list(symbols), "alignment": alignment, "caveats": caveats,
+               "families": []}
     for rule in build_rules(symbols, args.family):
-        payload["families"].append(run_family(symbols, rule, start_cash=args.start_cash,
+        payload["families"].append(run_family(frame, rule, start_cash=args.start_cash,
                                               cash_floor_pct=args.cash_floor_pct))
     if args.income_proxy:
         payload["income_proxy"] = run_income_proxy(start_cash=args.start_cash,
@@ -2301,6 +2325,12 @@ def main(argv: list[str] | None = None) -> int:
               f"turnover {family['metrics']['annual_turnover']:.2f}")
         for failure in family["failures"]:
             print(f"            - {failure}")
+    print(f"\n  common history: {alignment['common_first']} .. {alignment['common_last']} "
+          f"({alignment['common_bars']} bars); start bound by {alignment['binds_start']}, "
+          f"end bound by {alignment['binds_end']}, {alignment['bars_lost_vs_longest']} bars "
+          "lost against the longest symbol")
+    for caveat in caveats:
+        print(f"  caveat: {caveat}")
     print(f"\nwrote {out}")
     return 0
 
@@ -2428,7 +2458,7 @@ python scripts/package_release.py --self-test
 ruff check --select E9,F63,F7,F82 scripts evals mcps
 ```
 
-Expected: self-test OK; 85 backtest tests OK; `check.py` 0 errors; `sync_runtimes --check` 0 changed; the full suite green; `package_release --self-test` all pass; ruff clean.
+Expected: self-test OK; 86 backtest tests OK; `check.py` 0 errors; `sync_runtimes --check` 0 changed; the full suite green; `package_release --self-test` all pass; ruff clean.
 
 - [ ] **Step 7: Verify against the real endpoint (manual, not CI)**
 
