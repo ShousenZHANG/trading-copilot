@@ -7,7 +7,7 @@ For investment conversations or user-reported transactions, follow
 deterministic policy, short Chinese answer, committed journal receipt.
 
 For repository work, read CLAUDE.md and relevant tests. Generated `.agents/skills/`
-and `.codex/agents/` come from `.claude/` via `scripts/sync_runtimes.py`; edit their
-source and run the generator. Shared business logic lives in `scripts/copilot/`.
+comes from `.claude/skills/` via `scripts/sync_runtimes.py`; edit the source and run
+the generator. Shared business logic lives in `scripts/copilot/`. There are no agents.
 
 Personal state and keys stay local. Tests use isolated temporary databases.

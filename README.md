@@ -1,6 +1,6 @@
 # Trading Copilot
 
-Free daily investment research in Claude Code and Codex, with short Chinese answers and a shared local operation journal. Covers US stocks/ETFs, Nasdaq-100/Composite, QQQ/QQQM, and Chinese RMB investment bars/coins.
+Free daily investment research in Claude Code and Codex, with short Chinese answers and a shared local operation journal. Covers registered US ETFs (a closed whitelist in scripts/copilot/instruments.py), the Nasdaq-100 and Composite indexes as benchmarks, and Shanghai Gold Exchange Au99.99 gold in RMB.
 
 Ask naturally: “QQQ 适合长期持有吗？” “现在适合积累金条吗？” “我已经买了两股 QQQ……” The assistant collects a fresh evidence snapshot, checks its quality, assesses a proposal and returns a brief sourced answer. An explicit completed purchase/sale is recorded; an intention or incomplete execution stays separate. No broker order is sent.
 
@@ -33,7 +33,7 @@ python scripts/copilot_cli.py context
 
 | Research | Free sources / boundary |
 |---|---|
-| US stocks/ETFs | Yahoo history + Nasdaq official latest close; eligible Alpaca SIP optional. Corporate actions constrain comparisons |
+| Registered US ETFs | Yahoo history + Nasdaq official latest close; eligible Alpaca SIP optional. Unknown tickers are rejected, not provisionally accepted. Corporate actions constrain comparisons |
 | Nasdaq indexes | Yahoo plus official Nasdaq historical corroboration |
 | China investment bullion | Official SGE Au99.99 daily and SHAU benchmark; retail quote remains separate |
 | Company facts | SEC submissions/companyfacts with acceptance-time matching |
@@ -46,13 +46,13 @@ The current free-source network and account entitlements determine coverage. Sin
 
 Snapshots retain source lineage, timestamps and bars. Assessed decisions and actual operations have different records. Decimal accounting, idempotent retries, pending duplicate checks, corrections and reversals preserve history. Portfolio completeness and unknown fees stay visible; USD/CNY totals are not mixed without valid conversion.
 
-Default /advise and /gold produce conversational answers. /analyze explicitly starts deep multi-agent research with versioned evidence and optional report assembly. Historical scripts and markdown reflections are compatibility tools, not the new transaction journal.
+Conversation and /gold produce concise answers from one validated snapshot. Order quantities and limit prices come from the policy engine evaluating rules you adopt in config/user.toml (see ADR-0004); nothing here promises a return.
 
 Private state lives in gitignored data/state, data/runs and data/decisions. Back up a live journal with `python scripts/copilot_cli.py backup <destination>`. Credentials and private state are excluded from release archives.
 
 ## Development
 
-Canonical prompts are in .claude. Run `python scripts/sync_runtimes.py` to generate .agents/skills and .codex agents/config. Drift checks, contract tests and runtime probes cover different guarantees:
+Canonical prompts are in .claude. Run `python scripts/sync_runtimes.py` to generate .agents/skills, skills/ and .codex/config.toml. Drift checks, contract tests and runtime probes cover different guarantees:
 ```sh
 python scripts/check.py
 python -m unittest discover -s scripts -p "_test_*.py"

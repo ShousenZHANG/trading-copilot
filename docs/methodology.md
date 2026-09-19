@@ -1,3 +1,7 @@
+> **Historical (superseded 2026-09-19).** <!-- historical --> This document describes the
+> multi-agent pipeline removed in 0.5.0. For the current architecture see
+> [ADR-0004](adr/0004-engine-computes-model-explains.md).
+
 # Methodology
 
 > Everything Trading Copilot does and why. The "what we believe" doc — built on TradingAgents (the most-starred open-source multi-agent trading framework), big-tech standards (Goldman / BlackRock / Bloomberg patterns), and academic results (FinMem, StockBench, FinanceBench).
