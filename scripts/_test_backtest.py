@@ -21,6 +21,7 @@ from copilot.backtest import engine
 from copilot.backtest import frame as frame_mod
 from copilot.backtest import history
 from copilot.backtest import metrics
+from copilot.backtest import rules
 from copilot.backtest import universe
 
 
@@ -588,6 +589,91 @@ class EngineLoop(unittest.TestCase):
         # 10000 cash, AAA@100, 100% target, no costs: buys exactly 100 shares
         # on bar 0 and never trades again on a flat book -- 100 * 100 = 10000.
         self.assertAlmostEqual(result.traded_notional, 10000.0)
+
+
+class RuleFamilies(unittest.TestCase):
+    def rising(self, n=400):
+        dates = [date(2020, 1, 1) + timedelta(days=i) for i in range(n)]
+        closes = [[100.0 + i, 100.0 + i * 0.5, 100.0] for i in range(n)]
+        return frame_mod.build(dates=dates, symbols=["FAST", "SLOW", "FLAT"], closes=closes)
+
+    def test_every_family_declares_at_most_three_parameters(self):
+        # Q29 rule 4: the only hard brake against overfitting.
+        for rule in (rules.FixedWeightBands({"FAST": 0.5, "SLOW": 0.5}),
+                     rules.InverseVolatility(("FAST", "SLOW")),
+                     rules.MomentumTopN(("FAST", "SLOW", "FLAT"))):
+            self.assertLessEqual(len(rule.parameters), 3, rule.name)
+
+    def test_bands_hold_targets_constant(self):
+        rule = rules.FixedWeightBands({"FAST": 0.6, "SLOW": 0.4})
+        self.assertEqual(rule.weights(self.rising(), 100), {"FAST": 0.6, "SLOW": 0.4})
+
+    def test_relative_band_fires_at_twenty_five_percent_drift(self):
+        rule = rules.FixedWeightBands({"FAST": 0.5, "SLOW": 0.5}, relative_band=0.25,
+                                      absolute_band=1.0, calendar_days=10**6)
+        frame = self.rising()
+        self.assertFalse(rule.should_rebalance(frame, 50, {"FAST": 0.60, "SLOW": 0.40}, 0))
+        self.assertTrue(rule.should_rebalance(frame, 50, {"FAST": 0.63, "SLOW": 0.37}, 0))
+
+    def test_absolute_band_fires_at_five_points_on_a_small_target(self):
+        # The half of Bogleheads 5/25 that bt's RunIfOutOfBounds does not implement:
+        # a 5pp move on a 5% target is a 100% relative move, but a 5pp move on a
+        # 50% target is only 10% relative and the relative band alone misses it.
+        rule = rules.FixedWeightBands({"FAST": 0.5, "SLOW": 0.5}, relative_band=1.0,
+                                      absolute_band=0.05, calendar_days=10**6)
+        frame = self.rising()
+        self.assertFalse(rule.should_rebalance(frame, 50, {"FAST": 0.54, "SLOW": 0.46}, 0))
+        self.assertTrue(rule.should_rebalance(frame, 50, {"FAST": 0.56, "SLOW": 0.44}, 0))
+
+    def test_bands_bootstrap_on_the_first_bar(self):
+        # bt 1.2.3's RunIfOutOfBounds returns False at bar 0 because children do
+        # not exist yet, and the whole backtest sits in cash. Ours must not.
+        rule = rules.FixedWeightBands({"FAST": 0.5, "SLOW": 0.5})
+        self.assertTrue(rule.should_rebalance(self.rising(), 0, {}, None))
+
+    def test_calendar_leg_fires_after_the_interval(self):
+        rule = rules.FixedWeightBands({"FAST": 0.5, "SLOW": 0.5}, relative_band=1.0,
+                                      absolute_band=1.0, calendar_days=365)
+        frame = self.rising()
+        on_target = {"FAST": 0.5, "SLOW": 0.5}
+        self.assertFalse(rule.should_rebalance(frame, 100, on_target, 0))
+        self.assertTrue(rule.should_rebalance(frame, 370, on_target, 0))
+
+    def test_rules_are_frozen_so_state_cannot_leak_between_runs(self):
+        import dataclasses
+        for rule in (rules.FixedWeightBands({"FAST": 1.0}),
+                     rules.InverseVolatility(("FAST",)),
+                     rules.MomentumTopN(("FAST",))):
+            with self.assertRaises(dataclasses.FrozenInstanceError):
+                rule.name = "mutated"
+
+    def test_inverse_volatility_gives_the_calmer_asset_more_weight(self):
+        w = rules.InverseVolatility(("FAST", "FLAT"), lookback_days=60).weights(self.rising(), 300)
+        self.assertGreater(w["FLAT"], w["FAST"])
+        self.assertAlmostEqual(sum(w.values()), 1.0)
+
+    def test_inverse_volatility_before_the_lookback_is_equal_weighted(self):
+        w = rules.InverseVolatility(("FAST", "SLOW"), lookback_days=60).weights(self.rising(), 5)
+        self.assertAlmostEqual(w["FAST"], 0.5)
+
+    def test_momentum_picks_the_strongest_and_equal_weights_them(self):
+        w = rules.MomentumTopN(("FAST", "SLOW", "FLAT"), top_n=2,
+                               lookback_days=252, skip_days=21).weights(self.rising(), 350)
+        self.assertEqual(set(w), {"FAST", "SLOW"})
+        self.assertAlmostEqual(w["FAST"], 0.5)
+
+    def test_momentum_skips_the_most_recent_month(self):
+        # Faber 2007 / Antonacci 12-1: the skip is what makes it momentum rather
+        # than short-term reversal. Assert it is read, not just stored.
+        rule = rules.MomentumTopN(("FAST", "SLOW"), lookback_days=252, skip_days=21)
+        self.assertEqual(rule.formation_window(300), (300 - 252, 300 - 21))
+
+    def test_momentum_has_no_cash_exit(self):
+        # Q38: rotation only, no trend-following exit to cash. The structural
+        # cash reserve lives in the engine, not here.
+        w = rules.MomentumTopN(("FAST", "SLOW", "FLAT"), top_n=1).weights(self.rising(), 350)
+        self.assertAlmostEqual(sum(w.values()), 1.0)
+        self.assertNotIn("CASH", w)
 
 
 if __name__ == "__main__":
