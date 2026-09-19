@@ -6,6 +6,7 @@ matrix job that installs zero third-party packages.
 """
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from datetime import date
@@ -14,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from copilot.backtest import frame as frame_mod
+from copilot.backtest import history
 from copilot.backtest import universe
 
 
@@ -124,6 +126,105 @@ class PriceFrameContract(unittest.TestCase):
         f = frame_mod.build(dates=[date(2000, 1, 3), date(2015, 1, 5)],
                             symbols=["SPY"], closes=[[1.0], [2.0]])
         self.assertAlmostEqual(f.span_years(), 15.01, places=1)
+
+
+def chart_payload(granularity="1d", *, timestamps=None, closes=None, adjcloses=None):
+    timestamps = timestamps if timestamps is not None else [1577941200, 1578027600]
+    closes = closes if closes is not None else [100.0, 101.0]
+    adjcloses = adjcloses if adjcloses is not None else [99.0, 100.0]
+    return json.dumps({"chart": {"error": None, "result": [{
+        "meta": {"symbol": "SPY", "dataGranularity": granularity,
+                 "exchangeTimezoneName": "America/New_York"},
+        "timestamp": timestamps,
+        "indicators": {"quote": [{"close": closes}], "adjclose": [{"adjclose": adjcloses}]},
+    }]}})
+
+
+class HistoryParsing(unittest.TestCase):
+    def test_parses_both_series_separately(self):
+        series = history.parse_chart("SPY", chart_payload())
+        self.assertEqual(series.symbol, "SPY")
+        self.assertEqual(len(series.dates), 2)
+        self.assertEqual(series.split_adjusted, (100.0, 101.0))
+        self.assertEqual(series.split_and_dividend_adjusted, (99.0, 100.0))
+
+    def test_rejects_monthly_granularity(self):
+        # range=max&interval=1d returns HTTP 200 with dataGranularity='1mo'.
+        # Without this check a 15-year gate can be passed by ~180 monthly bars.
+        with self.assertRaisesRegex(history.HistoryError, "dataGranularity"):
+            history.parse_chart("SPY", chart_payload(granularity="1mo"))
+
+    def test_drops_bars_where_either_series_is_null(self):
+        payload = chart_payload(timestamps=[1577941200, 1578027600, 1578114000],
+                                closes=[100.0, None, 102.0],
+                                adjcloses=[99.0, 100.0, 101.0])
+        series = history.parse_chart("SPY", payload)
+        self.assertEqual(len(series.dates), 2)
+        self.assertEqual(series.split_adjusted, (100.0, 102.0))
+        self.assertEqual(series.dropped_bars, 1)
+
+    def test_rejects_an_empty_result(self):
+        with self.assertRaises(history.HistoryError):
+            history.parse_chart("SPY", json.dumps({"chart": {"error": None, "result": []}}))
+
+    def test_surfaces_the_upstream_error_text(self):
+        body = json.dumps({"chart": {"error": {"code": "Not Found",
+                                               "description": "No data found, symbol may be delisted"},
+                                     "result": None}})
+        with self.assertRaisesRegex(history.NotCovered, "delisted"):
+            history.parse_chart("SPLG", body)
+
+    def test_dates_come_back_in_new_york_not_utc(self):
+        # 1578016200 is 2020-01-03 02:00 UTC, which is 2020-01-02 21:00 in New
+        # York. Real Yahoo daily stamps sit at the exchange open, where the two
+        # calendars agree; this is the defensive case, and taking the UTC date
+        # would file the bar under the wrong session.
+        series = history.parse_chart("SPY", chart_payload(timestamps=[1578016200], closes=[1.0],
+                                                          adjcloses=[1.0]))
+        self.assertEqual(series.dates[0], date(2020, 1, 2))
+
+
+class HistoryUrl(unittest.TestCase):
+    def test_url_uses_period1_period2_never_range(self):
+        url = history.chart_url("SPY", until_epoch=1789797166)
+        self.assertIn("period1=0", url)
+        self.assertIn("period2=1789797166", url)
+        self.assertIn("interval=1d", url)
+        self.assertNotIn("range=", url)
+
+    def test_user_agent_matches_the_one_that_is_not_rate_limited(self):
+        self.assertEqual(history.USER_AGENT,
+                         "Mozilla/5.0 TradingCopilot/1.0 (personal research)")
+
+    def test_loader_never_touches_the_shared_provider_cache(self):
+        source = Path(history.__file__).read_text(encoding="utf-8")
+        for forbidden in ("HttpClient", "cache_dir", "_cache("):
+            self.assertNotIn(forbidden, source,
+                             f"{forbidden} must not appear anywhere in history.py — "
+                             "a 22-symbol sweep through providers.py evicts snapshot forensics "
+                             "and its 'yahoo' cooldown blocks the live decision path")
+
+
+class HistoryToFrame(unittest.TestCase):
+    def test_intersects_partially_overlapping_series_onto_common_dates(self):
+        spy = history.Series(
+            symbol="SPY",
+            dates=(date(2020, 1, 2), date(2020, 1, 3), date(2020, 1, 6)),
+            split_adjusted=(100.0, 101.0, 102.0),
+            split_and_dividend_adjusted=(99.0, 100.0, 101.0),
+            dropped_bars=0,
+        )
+        qqq = history.Series(
+            symbol="QQQ",
+            dates=(date(2020, 1, 3), date(2020, 1, 6), date(2020, 1, 7)),
+            split_adjusted=(200.0, 201.0, 202.0),
+            split_and_dividend_adjusted=(198.0, 199.0, 200.0),
+            dropped_bars=0,
+        )
+        f = history.to_frame([spy, qqq])
+        self.assertEqual(f.dates, (date(2020, 1, 3), date(2020, 1, 6)))
+        self.assertEqual(f.column("SPY"), (100.0, 101.0))
+        self.assertEqual(f.column("QQQ"), (198.0, 199.0))
 
 
 if __name__ == "__main__":
