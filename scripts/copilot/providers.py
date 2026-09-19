@@ -84,6 +84,18 @@ def finite_number(value, *, positive: bool = False) -> float:
     return result
 
 
+# Minimum seconds between requests, per provider. The default is deliberately
+# conservative for a source whose published limit nobody has checked.
+#
+# LIMITATION: this is a minimum-gap model, not a rolling window. A provider
+# capped at N requests per minute cannot be expressed here - a 1 req/s gap
+# still permits a burst of sixty inside the first minute. Adding such a
+# provider requires a windowed limiter, not a new row. IBKR's Flex Web Service
+# (1 req/s AND 10 req/min) is the known case waiting on this.
+_THROTTLE_SECONDS = {"sge": 0.4, "sec": 0.25, "fred": 0.6, "alpaca": 0.4}
+_THROTTLE_DEFAULT = 0.5
+
+
 class HttpClient:
     """Bounded GET + retries; no credentials or stale-success substitution.
 
@@ -135,7 +147,7 @@ class HttpClient:
 
     def _throttle(self, provider: str):
         self.check_budget()
-        interval = {"sge": 0.4, "sec": 0.25, "fred": 0.6, "alpaca": 0.4}.get(provider, 0.5)
+        interval = _THROTTLE_SECONDS.get(provider, _THROTTLE_DEFAULT)
         if self.cache_dir:
             with closing(sqlite3.connect(self.cache_dir / "provider-quota.sqlite3", timeout=5)) as con, con:
                 con.execute("CREATE TABLE IF NOT EXISTS quota(provider TEXT PRIMARY KEY, next_at REAL NOT NULL)")
