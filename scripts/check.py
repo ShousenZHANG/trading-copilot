@@ -3,8 +3,8 @@
 
 Inspired by Anthropic's financial-services plugin checks, but scoped to this
 repo's file-based Claude/Codex plugin layout. The goal is to catch prompt drift,
-broken manifests, unsafe model-tier changes, and stale docs before a trading run
-depends on them.
+broken manifests, docs that still advertise removed features, and private state
+leaking into git, before a trading run depends on them.
 """
 
 from __future__ import annotations
@@ -62,6 +62,34 @@ _WORKFLOW_PINNED_INSTALLS = (
     ("npm i -g @anthropic-ai/claude-code", "@anthropic-ai/claude-code@"),
     ("pip install ruff", "ruff=="),
 )
+
+# Commands and agents deleted in 0.5.0. Docs that still offer them send a user
+# to a slash command that no longer exists.
+REMOVED_FEATURES = (
+    "/analyze",
+    "/advise",
+    "/debate",
+    "/earnings",
+    "/screen",
+    "portfolio-manager",
+    "research-manager",
+    "bull-researcher",
+)
+
+REQUIRED_DOCS = ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md")
+
+# Markdown that quotes or links rather than advertises.
+_FENCED_CODE_RE = re.compile(r"```.*?```", re.S)
+_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+_LINK_TARGET_RE = re.compile(r"\]\([^)]*\)")
+
+# Wording that documents a removal instead of offering the feature.
+_REMOVAL_NOTE_RE = re.compile(
+    r"removed|superseded|historical|no longer|已删除|不再|已移除",
+    re.I)
+
+# Sentence boundaries, ASCII and CJK.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。；！？])\s+|\n")
 
 
 def rel(path: Path) -> str:
@@ -140,7 +168,7 @@ def check_plugin_manifest(path: Path) -> None:
                 f"{type(manifest[field]).__name__}")
 
     # `agents` must enumerate the real files: a directory string is rejected by
-    # the validator, and a stale list ships an agent the pipeline cannot dispatch.
+    # the validator, and the declared list has to match what is on disk.
     declared = manifest.get("agents")
     if not isinstance(declared, list):
         err(f"{rel(path)}: 'agents' must be a list of file paths")
@@ -166,7 +194,8 @@ def check_commands() -> None:
     if missing:
         err(f".claude/commands: missing commands {sorted(missing)}")
     if extra:
-        warn(f".claude/commands: unexpected command files {sorted(extra)}")
+        err(f".claude/commands: unexpected command files {sorted(extra)}; the "
+            f"plugin ships only {sorted(EXPECTED_COMMANDS)}")
     for command in command_dir.glob("*.md"):
         meta = parse_frontmatter(command)
         for key in ("description", "argument-hint"):
@@ -248,14 +277,42 @@ def check_skill_mirror() -> None:
             err(f"missing shared runtime component: {relative}")
 
 
-def check_docs_and_workflows() -> None:
-    """Docs must not advertise commands or agents the plugin no longer ships."""
-    stale = ("/analyze", "/advise", "/debate", "/earnings", "/screen",
-             "portfolio-manager", "research-manager", "bull-researcher")
-    for relative in ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md"):
-        text = read(ROOT / relative)
-        for marker in stale:
-            if marker in text:
+def _advertises(sentence: str, marker: str) -> bool:
+    """True when this sentence offers `marker` as something the plugin still has.
+
+    A sentence that records the removal has to be able to name what it removed,
+    so `0.5.0 removed the /analyze command` is allowed. Scoping is per sentence,
+    not per line: one clause noting a removal must not silence an advertisement
+    sitting next to it.
+    """
+    if _REMOVAL_NOTE_RE.search(sentence):
+        return False
+    # A slash command is real only when nothing path-like precedes it, so
+    # `scripts/analyze_bars.py` and `docs/screenshots/` do not count. The
+    # trailing guard keeps `portfolio-manager-v2` from matching its prefix.
+    lead = r"(?<![/.\w-])" if marker.startswith("/") else r"(?<![\w-])"
+    return bool(re.search(lead + re.escape(marker) + r"(?![\w-])", sentence))
+
+
+def check_docs() -> None:
+    """Docs must not advertise commands or agents the plugin no longer ships.
+
+    Only prose counts. A fenced sample, an inline code span and a markdown link
+    target each name the old paths legitimately, so they are stripped first.
+    """
+    for relative in REQUIRED_DOCS:
+        path = ROOT / relative
+        if not path.is_file():
+            # Erroring rather than raising keeps main() running: the
+            # private-state gate below must not be skipped by a renamed doc.
+            err(f"missing required document: {relative}")
+            continue
+        prose = _FENCED_CODE_RE.sub(" ", read(path))
+        prose = _INLINE_CODE_RE.sub(" ", prose)
+        prose = _LINK_TARGET_RE.sub("]()", prose)
+        sentences = _SENTENCE_SPLIT_RE.split(prose)
+        for marker in REMOVED_FEATURES:
+            if any(_advertises(sentence, marker) for sentence in sentences):
                 err(f"{relative}: still references removed feature '{marker}'")
 
 
@@ -358,7 +415,7 @@ def main() -> int:
     check_commands()
     check_agents()
     check_skill_mirror()
-    check_docs_and_workflows()
+    check_docs()
     check_workflows()
     check_private_state_not_tracked()
 
