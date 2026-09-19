@@ -15,8 +15,8 @@ Q29's three parameter slots.
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass
-from typing import Sequence
+from dataclasses import dataclass, replace
+from typing import ClassVar, Sequence
 
 from .frame import PriceFrame
 
@@ -67,6 +67,10 @@ class FixedWeightBands:
     calendar_days: int = 365
     name: str = "fixed_weight_bands"
 
+    #: No caveat: a constant-weight, band-rebalanced sleeve is exactly what it
+    #: says it is, unlike the other two families below (Q22=C).
+    caveats: ClassVar[tuple[str, ...]] = ()
+
     @property
     def parameters(self) -> dict[str, float]:
         return {"relative_band": self.relative_band, "absolute_band": self.absolute_band,
@@ -75,6 +79,19 @@ class FixedWeightBands:
     @property
     def warmup_bars(self) -> int:
         return 0
+
+    def with_parameters(self, params: dict[str, float]) -> "FixedWeightBands":
+        """A new instance with these parameter fields replaced.
+
+        Q29 rule 4's divergence check (sensitivity_grid in backtest_cli.py)
+        hands back float-valued neighbour dicts even for an int-typed field
+        (calendar_days); coerce before dataclasses.replace() so the field
+        keeps its declared type. There is no __post_init__ here to reject a
+        nonsensical neighbour -- every value this family accepts is a plain
+        band width or day count with no cross-field constraint.
+        """
+        coerced = {k: (int(v) if k == "calendar_days" else v) for k, v in params.items()}
+        return replace(self, **coerced)
 
     def weights(self, frame: PriceFrame, i: int) -> dict[str, float]:
         return dict(self.targets)
@@ -120,6 +137,15 @@ class InverseVolatility:
     rebalance_days: int = 21
     name: str = "inverse_volatility"
 
+    #: Q22=C's required caveat for this family, carried here so run_family can
+    #: copy it into the report and the CLI can print it -- a docstring reaches
+    #: a reader of the source, not a user reading `... ADMITTED, CAGR +11%`.
+    caveats: ClassVar[tuple[str, ...]] = (
+        "Over an equity-only universe, inverse-volatility weighting is NOT risk "
+        "parity: every holding is equity beta, so portfolio market exposure stays "
+        "near 100% and the weighting only re-ranks within that exposure.",
+    )
+
     def __post_init__(self) -> None:
         # statistics.stdev needs at least two returns, so the window needs at
         # least three prices. A shorter lookback would raise from deep inside
@@ -140,6 +166,17 @@ class InverseVolatility:
     @property
     def warmup_bars(self) -> int:
         return self.lookback_days
+
+    def with_parameters(self, params: dict[str, float]) -> "InverseVolatility":
+        """A new instance with these parameter fields replaced.
+
+        Both parameter fields are int-typed; sensitivity_grid's neighbour
+        dicts are always float-valued, so every value is coerced. __post_init__
+        still runs inside dataclasses.replace() and refuses a nonsensical
+        neighbour (lookback_days < 2, rebalance_days < 1) at construction
+        rather than accepting it silently.
+        """
+        return replace(self, **{k: int(v) for k, v in params.items()})
 
     def weights(self, frame: PriceFrame, i: int) -> dict[str, float]:
         start = i - self.lookback_days
@@ -186,6 +223,14 @@ class MomentumTopN:
     skip_days: int = 21
     name: str = "momentum_top_n"
 
+    #: Q22=C's required caveat for this family, carried here so run_family can
+    #: copy it into the report and the CLI can print it -- a docstring reaches
+    #: a reader of the source, not a user reading `... ADMITTED, CAGR +11%`.
+    caveats: ClassVar[tuple[str, ...]] = (
+        "This family has no cash exit: in a 2008- or 2022-shaped decline it "
+        "decides which equities you lose in, not whether you are in equities.",
+    )
+
     def __post_init__(self) -> None:
         # Without this, skip_days >= lookback_days makes formation_window's end
         # index land at or before its start -- and a negative end wraps through
@@ -211,6 +256,17 @@ class MomentumTopN:
     @property
     def warmup_bars(self) -> int:
         return self.lookback_days
+
+    def with_parameters(self, params: dict[str, float]) -> "MomentumTopN":
+        """A new instance with these parameter fields replaced.
+
+        All three parameter fields are int-typed; sensitivity_grid's neighbour
+        dicts are always float-valued, so every value is coerced.
+        __post_init__ still runs inside dataclasses.replace() and refuses a
+        nonsensical neighbour (skip_days >= lookback_days, non-positive
+        top_n) at construction rather than accepting it silently.
+        """
+        return replace(self, **{k: int(v) for k, v in params.items()})
 
     def formation_window(self, i: int) -> tuple[int, int]:
         return (i - self.lookback_days, i - self.skip_days)

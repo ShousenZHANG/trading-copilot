@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -26,7 +26,7 @@ from runtime import force_utf8_stdio  # noqa: E402
 
 force_utf8_stdio()
 
-from copilot.backtest import admission, bxn, engine, history, rules, universe  # noqa: E402
+from copilot.backtest import admission, bxn, engine, history, metrics, rules, universe  # noqa: E402
 from copilot.backtest import frame as frame_mod  # noqa: E402
 
 DEFAULT_OUT_DIR = ROOT / "data" / "audit"
@@ -134,25 +134,78 @@ def load_universe(symbols: tuple[str, ...]) -> tuple:
     make 36 Yahoo requests, and the only rate-limit evidence we have is a single
     run of 30 consecutive requests. Re-fetching the same bars three times also
     risks the three backtests disagreeing because Yahoo revised a bar mid-run.
+
+    A fetch failure partway through a sweep must not surface as a raw
+    traceback naming internal module paths, and it must not leave the run
+    silently writing nothing: it is turned into a one-line SystemExit naming
+    the symbol and the upstream reason, the same style as the inadmissible-
+    symbol exit just below.
     """
     series, caveats = [], []
     for symbol in symbols:
         classification = universe.classify(symbol)
         if not classification.admissible:
-            raise SystemExit(f"{symbol} is tier '{classification.tier}': {classification.reason}")
+            message = f"{symbol} is tier '{classification.tier}': {classification.reason}"
+            if classification.tier == "income_proxy_only":
+                message += "; pass --income-proxy to evaluate it through the BXN index proxy instead"
+            raise SystemExit(message)
         if classification.provenance_unverified:
             caveats.append(f"{symbol}: {classification.reason}")
-        series.append(_fetch(symbol))
+        try:
+            series.append(_fetch(symbol))
+        except history.NotCovered as exc:
+            raise SystemExit(f"{symbol} is not covered by the upstream endpoint: {exc}") from exc
+        except history.HistoryError as exc:
+            raise SystemExit(f"{symbol} could not be fetched: {exc}") from exc
     return history.to_frame(series), history.alignment(series), caveats
+
+
+#: sensitivity_grid's own docstring is explicit that it implements only half
+#: of Q29 rule 4's divergence check -- "report a grid" -- and nothing runs a
+#: backtest on the neighbours it produces. This note is the other half of
+#: that sentence, copied into every report so the same limit travels with the
+#: numbers: no automatic pass/fail threshold is applied, because none has
+#: been established. Q29 rule 4 says "report parameter sensitivity"; inventing
+#: a cutoff would be making up a governance rule the user never approved.
+SENSITIVITY_NOTE = ("Reported for the user's judgement. No automatic pass/fail threshold is "
+                    "applied to these deltas, because none has been established.")
+
+
+def _evaluate_neighbour(frame, base_rule, neighbour_params: dict[str, float], *,
+                        start_cash: float, cash_floor_pct: float) -> dict:
+    """One sensitivity-grid neighbour: its own rule, its own backtest, its own outcome.
+
+    A neighbour rejected by with_parameters' __post_init__ guards (or one
+    whose backtest cannot run at all) is recorded as an error, not raised --
+    a threshold-free divergence report must show that a neighbour is invalid
+    at least as clearly as it shows one that is merely different, and
+    crashing the whole family's report over one bad neighbour would show
+    neither.
+    """
+    try:
+        neighbour_rule = base_rule.with_parameters(neighbour_params)
+        result = engine.run(frame, rule=neighbour_rule, start_cash=start_cash,
+                            cost_model=engine.CostModel(), cash_floor_pct=cash_floor_pct)
+        return {"parameters": neighbour_params, "cagr": round(metrics.cagr(result.curve), 6),
+                "max_drawdown": round(metrics.max_drawdown(result.curve).depth, 6)}
+    except ValueError as exc:
+        return {"parameters": neighbour_params, "error": str(exc)}
 
 
 def run_family(frame, rule, *, start_cash: float, cash_floor_pct: float) -> dict:
     result = engine.run(frame, rule=rule, start_cash=start_cash,
                         cost_model=engine.CostModel(), cash_floor_pct=cash_floor_pct)
     report = admission.assess(result, sessions_by_year=admission.STRESS_SESSIONS)
-    return {"rule": rule.name, "parameters": result.parameters, "admitted": report.admitted,
-            "failures": report.failures, "metrics": report.metrics,
-            "sensitivity_grid": sensitivity_grid(result.parameters)}
+    base_cagr = metrics.cagr(result.curve)
+    neighbours = [_evaluate_neighbour(frame, rule, neighbour, start_cash=start_cash,
+                                      cash_floor_pct=cash_floor_pct)
+                 for neighbour in sensitivity_grid(result.parameters)]
+    deltas = [abs(n["cagr"] - base_cagr) for n in neighbours if "cagr" in n]
+    return {"rule": rule.name, "parameters": result.parameters, "caveats": list(rule.caveats),
+            "admitted": report.admitted, "failures": report.failures, "metrics": report.metrics,
+            "sensitivity": {"neighbours": neighbours,
+                           "max_abs_cagr_delta": round(max(deltas), 6) if deltas else None,
+                           "note": SENSITIVITY_NOTE}}
 
 
 def run_income_proxy(*, start_cash: float, cash_floor_pct: float) -> dict:
@@ -169,12 +222,78 @@ def run_income_proxy(*, start_cash: float, cash_floor_pct: float) -> dict:
             "metrics": report.metrics}
 
 
+def _synthetic_series(symbol: str, *, start: date = date(2000, 1, 3),
+                      end: date = date(2023, 1, 1)) -> history.Series:
+    """A deterministic, multi-year daily series. No network, no clock, no random.
+
+    Used only by self_test(), to stand in for _fetch so main() can be run for
+    real -- argument parsing, load_universe, every rule family, JSON
+    serialization -- without a live Yahoo request.
+    """
+    dates, d = [], start
+    while d < end:
+        if d.weekday() < 5:
+            dates.append(d)
+        d += timedelta(days=1)
+    closes = tuple(100.0 + i * 0.01 for i in range(len(dates)))
+    return history.Series(symbol=symbol, dates=tuple(dates), split_adjusted=closes,
+                          split_and_dividend_adjusted=closes, dropped_bars=0)
+
+
 def self_test() -> int:
     grid = sensitivity_grid({"top_n": 5.0})
     assert grid == [{"top_n": 4.0}, {"top_n": 6.0}], grid
     assert build_rules(("SPY", "QQQ"), "bands")[0].name == "fixed_weight_bands"
+
+    # Genuine end-to-end run, not just the two pure-function checks above: a
+    # mutation that replaced main()'s body (after argument parsing) with
+    # `raise RuntimeError(...)` left both asserts above passing and this
+    # function printing "OK" -- self_test() never actually called main(),
+    # load_universe, run_family, argument parsing or JSON serialization.
+    # _fetch is substituted with a synthetic, deterministic Series for two
+    # real (qualified) symbols so this stays offline and repeatable; "fake"
+    # is the data, not the symbol names, which still have to pass
+    # universe.classify().
+    import tempfile
+    from unittest import mock
+    with tempfile.TemporaryDirectory() as tmp:
+        with mock.patch.object(sys.modules[__name__], "_fetch", side_effect=_synthetic_series):
+            code = main(["--universe", "SPY,QQQ", "--family", "bands", "--out-dir", tmp])
+        assert code == 0, f"main() returned {code}, expected 0"
+        reports = list(Path(tmp).glob("backtest-*.json"))
+        assert len(reports) == 1, f"expected exactly one report file, found {reports}"
+        payload = json.loads(reports[0].read_text(encoding="utf-8"))
+        for key in ("generated_at", "universe", "alignment", "caveats", "families"):
+            assert key in payload, f"report is missing top-level key {key!r}: {sorted(payload)}"
+        assert payload["families"], "report has no families"
+        assert payload["families"][0]["rule"] == "fixed_weight_bands"
+
     print("backtest_cli self-test OK")
     return 0
+
+
+def _parse_universe(raw: str, *, parser: argparse.ArgumentParser, allow_empty: bool = False) -> tuple[str, ...]:
+    """Split, upper-case, and validate a comma-separated --universe value.
+
+    Rejects duplicates and (unless allow_empty) an empty result via
+    parser.error, before any symbol is fetched. Left unvalidated:
+    "SPY,SPY,QQQ" fetched SPY twice -- already violating the fetch-once
+    property -- before frame.build's own "duplicate symbols: SPY" surfaced as
+    an uncaught traceback, and "--universe ' , , '" passed the non-empty-
+    string guard on the raw flag, yielded an empty symbol tuple, and crashed
+    with an uncaught "no series to align" three calls later. allow_empty is
+    for --verify-universe, where an empty --universe means "no override, use
+    the default" rather than an error.
+    """
+    symbols = tuple(s.strip().upper() for s in raw.split(",") if s.strip())
+    if not symbols:
+        if allow_empty:
+            return symbols
+        parser.error("--universe must name at least one symbol")
+    duplicates = sorted({s for s in symbols if symbols.count(s) > 1})
+    if duplicates:
+        parser.error(f"--universe lists duplicate symbol(s): {', '.join(duplicates)}")
+    return symbols
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -196,12 +315,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.verify_calendars:
         return 1 if verify_calendars() else 0
     if args.verify_universe:
-        override = tuple(s.strip().upper() for s in args.universe.split(",") if s.strip())
+        override = _parse_universe(args.universe, parser=parser, allow_empty=True)
         return 1 if verify_universe(override or None) else 0
     if not args.universe:
         parser.error("--universe is required unless a --verify-* or --self-test flag is given")
 
-    symbols = tuple(s.strip().upper() for s in args.universe.split(",") if s.strip())
+    symbols = _parse_universe(args.universe, parser=parser)
     frame, alignment, caveats = load_universe(symbols)
     payload = {"generated_at": datetime.now(timezone.utc).isoformat(),
                "universe": list(symbols), "alignment": alignment, "caveats": caveats,
@@ -225,6 +344,8 @@ def main(argv: list[str] | None = None) -> int:
               f"turnover {family['metrics']['annual_turnover']:.2f}")
         for failure in family["failures"]:
             print(f"            - {failure}")
+        for caveat in family["caveats"]:
+            print(f"            caveat: {caveat}")
     print(f"\n  common history: {alignment['common_first']} .. {alignment['common_last']} "
           f"({alignment['common_bars']} bars); start bound by {alignment['binds_start']}, "
           f"end bound by {alignment['binds_end']}, {alignment['bars_lost_vs_longest']} bars "

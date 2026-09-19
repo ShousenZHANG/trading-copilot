@@ -960,6 +960,48 @@ class RuleFamilies(unittest.TestCase):
         self.assertEqual(rules.InverseVolatility(("FAST",), lookback_days=40).warmup_bars, 40)
         self.assertEqual(rules.MomentumTopN(("FAST",), lookback_days=200).warmup_bars, 200)
 
+    # --- Q29 rule 4's divergence check: with_parameters + caveats ----------
+
+    def test_only_bands_carries_no_caveat(self):
+        # Q22=C requires the other two families' caveats to be public; bands
+        # genuinely has none.
+        self.assertEqual(rules.FixedWeightBands({"FAST": 1.0}).caveats, ())
+        self.assertIn("risk parity", " ".join(rules.InverseVolatility(("FAST",)).caveats))
+        self.assertIn("no cash exit", " ".join(rules.MomentumTopN(("FAST",)).caveats))
+
+    def test_with_parameters_coerces_int_fields_back_from_float(self):
+        # sensitivity_grid's neighbour dicts are always float-valued (every
+        # rule's own .parameters property returns floats), including for a
+        # field the dataclass declares as int.
+        bands = rules.FixedWeightBands({"FAST": 1.0}).with_parameters({"calendar_days": 400.0})
+        self.assertEqual(bands.calendar_days, 400)
+        self.assertIsInstance(bands.calendar_days, int)
+
+        invvol = rules.InverseVolatility(("FAST",)).with_parameters({"lookback_days": 80.0})
+        self.assertEqual(invvol.lookback_days, 80)
+        self.assertIsInstance(invvol.lookback_days, int)
+
+        momentum = rules.MomentumTopN(("FAST",)).with_parameters({"top_n": 6.0})
+        self.assertEqual(momentum.top_n, 6)
+        self.assertIsInstance(momentum.top_n, int)
+
+    def test_with_parameters_leaves_other_fields_untouched(self):
+        base = rules.InverseVolatility(("FAST", "SLOW"), lookback_days=63, rebalance_days=21)
+        neighbour = base.with_parameters({"lookback_days": 88.0})
+        self.assertEqual(neighbour.rebalance_days, 21)
+        self.assertEqual(neighbour.universe, ("FAST", "SLOW"))
+
+    def test_with_parameters_still_runs_post_init_guards(self):
+        # A neighbour must be refused the same way direct construction is,
+        # not silently accepted because it arrived through replace() instead
+        # of __init__.
+        with self.assertRaisesRegex(ValueError, "at least 2"):
+            rules.InverseVolatility(("FAST",), lookback_days=10).with_parameters({"lookback_days": 1.0})
+        with self.assertRaisesRegex(ValueError, "smaller than"):
+            rules.MomentumTopN(("FAST", "SLOW")).with_parameters({"skip_days": 300.0})
+        with self.assertRaisesRegex(ValueError, "top_n"):
+            rules.MomentumTopN(("FAST", "SLOW")).with_parameters({"top_n": 0.0})
+
 
 class AdmissionGate(unittest.TestCase):
     def passing_result(self):
@@ -1238,15 +1280,37 @@ class CliContract(unittest.TestCase):
         module = importlib.import_module("backtest_cli")
         self.assertTrue(hasattr(module, "main"))
 
-    def test_universe_is_fetched_once_not_once_per_family(self):
+    def _qualifying_series(self, symbol, start=date(2005, 1, 3), end=date(2023, 1, 1)):
+        from copilot.backtest import history
+        dates, d = [], start
+        while d < end:
+            if d.weekday() < 5:
+                dates.append(d)
+            d += timedelta(days=1)
+        closes = tuple(100.0 + i * 0.01 for i in range(len(dates)))
+        return history.Series(symbol=symbol, dates=tuple(dates), split_adjusted=closes,
+                              split_and_dividend_adjusted=closes, dropped_bars=0)
+
+    def test_universe_is_fetched_exactly_once_per_symbol_not_per_family(self):
         # Three families over 12 symbols would be 36 Yahoo requests if each
         # family loaded its own data, against a rate-limit evidence base of one
         # 30-request run. It also lets the three backtests disagree if Yahoo
-        # revised a bar mid-run.
+        # revised a bar mid-run. A source-level count of "history.fetch(" only
+        # proves one call SITE exists in the text -- moving load_universe(symbols)
+        # inside the per-family loop (reintroducing exactly this bug) left that
+        # count at 1 while making 8 real fetch calls for a 2-symbol, 3-family
+        # run. Count actual calls instead.
+        import contextlib
+        import io
+        import tempfile
         import backtest_cli
-        source = Path(backtest_cli.__file__).read_text(encoding="utf-8")
-        self.assertEqual(source.count("history.fetch("), 1)
-        self.assertIn("def load_universe(", source)
+        with mock.patch.object(backtest_cli, "_fetch",
+                               side_effect=lambda s: self._qualifying_series(s)) as fetched, \
+             tempfile.TemporaryDirectory() as tmp, \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = backtest_cli.main(["--universe", "SPY,QQQ", "--family", "all", "--out-dir", tmp])
+        self.assertEqual(code, 0)
+        self.assertEqual(fetched.call_count, 2)
 
     def test_sensitivity_walks_each_parameter_both_ways(self):
         import backtest_cli
@@ -1260,17 +1324,6 @@ class CliContract(unittest.TestCase):
     def test_output_directory_is_gitignored_audit(self):
         import backtest_cli
         self.assertTrue(str(backtest_cli.DEFAULT_OUT_DIR).replace("\\", "/").endswith("data/audit"))
-
-    def _qualifying_series(self, symbol, start=date(2005, 1, 3), end=date(2023, 1, 1)):
-        from copilot.backtest import history
-        dates, d = [], start
-        while d < end:
-            if d.weekday() < 5:
-                dates.append(d)
-            d += timedelta(days=1)
-        closes = tuple(100.0 + i * 0.01 for i in range(len(dates)))
-        return history.Series(symbol=symbol, dates=tuple(dates), split_adjusted=closes,
-                              split_and_dividend_adjusted=closes, dropped_bars=0)
 
     def test_verify_universe_uses_price_frame_helpers_not_hand_rolled_arithmetic(self):
         # frame.PriceFrame.span_years()/sessions_in_year() were implemented,
@@ -1309,6 +1362,122 @@ class CliContract(unittest.TestCase):
         self.assertEqual(sorted(c.args[0] for c in fetched.call_args_list), ["QQQ", "SPY"])
         self.assertEqual(problems, 0)
 
+    def test_load_universe_turns_a_fetch_failure_into_a_clean_systemexit(self):
+        # verify_universe already handled this gracefully; the real
+        # report-writing path let the exception propagate out of main()
+        # uncaught -- a transient Yahoo 404 gave a raw traceback naming
+        # internal module paths, and nothing was written to data/audit/.
+        import backtest_cli
+        from copilot.backtest import history
+
+        def flaky(symbol):
+            if symbol == "QQQ":
+                raise history.NotCovered("QQQ: HTTP 404 from the chart endpoint")
+            return self._qualifying_series(symbol)
+
+        with mock.patch.object(backtest_cli, "_fetch", side_effect=flaky):
+            with self.assertRaises(SystemExit) as ctx:
+                backtest_cli.load_universe(("SPY", "QQQ"))
+        self.assertIn("QQQ", str(ctx.exception))
+        self.assertIsNotNone(ctx.exception.__cause__)
+
+    def test_income_proxy_tier_names_the_flag_that_exists_for_it(self):
+        # A user who lists QQQI in --universe got a bare SystemExit for tier
+        # 'income_proxy_only' with no pointer to the --income-proxy flag that
+        # exists precisely for it.
+        import backtest_cli
+        with self.assertRaises(SystemExit) as ctx:
+            backtest_cli.load_universe(("QQQI",))
+        self.assertIn("--income-proxy", str(ctx.exception))
+
+    def test_universe_rejects_duplicate_symbols_before_any_fetch(self):
+        import contextlib
+        import io
+        import backtest_cli
+        with mock.patch.object(backtest_cli, "_fetch") as fetched, \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                backtest_cli.main(["--universe", "SPY,SPY,QQQ"])
+        fetched.assert_not_called()
+
+    def test_universe_rejects_a_degenerate_all_commas_value_before_any_fetch(self):
+        import contextlib
+        import io
+        import backtest_cli
+        with mock.patch.object(backtest_cli, "_fetch") as fetched, \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                backtest_cli.main(["--universe", " , , "])
+        fetched.assert_not_called()
+
+    def test_sensitivity_is_actually_evaluated_not_just_reported(self):
+        # sensitivity_grid() only ever produced neighbour parameter dicts;
+        # nothing ran a backtest on them or compared metrics. Q29 rule 4
+        # requires reporting parameter sensitivity, and a grid nobody
+        # evaluates is not a report.
+        import contextlib
+        import io
+        import tempfile
+        import backtest_cli
+        with mock.patch.object(backtest_cli, "_fetch",
+                               side_effect=lambda s: self._qualifying_series(s)), \
+             tempfile.TemporaryDirectory() as tmp, \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = backtest_cli.main(["--universe", "SPY,QQQ", "--family", "invvol", "--out-dir", tmp])
+            report = json.loads(next(Path(tmp).glob("backtest-*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(code, 0)
+        family = report["families"][0]
+        self.assertEqual(family["rule"], "inverse_volatility")
+        neighbours = family["sensitivity"]["neighbours"]
+        self.assertEqual(len(neighbours), 4)  # 2 parameters x 2 directions
+        with_metrics = [n for n in neighbours if "cagr" in n]
+        self.assertTrue(with_metrics, "no neighbour produced real metrics")
+        for n in with_metrics:
+            self.assertIsInstance(n["cagr"], float)
+            self.assertIsInstance(n["max_drawdown"], float)
+        self.assertIsInstance(family["sensitivity"]["max_abs_cagr_delta"], float)
+        # No invented threshold: the note says so, and nothing in the report
+        # flips admitted/failures based on the divergence.
+        self.assertIn("no automatic", family["sensitivity"]["note"].lower())
+
+    def test_sensitivity_records_a_rejected_neighbour_instead_of_crashing(self):
+        # A neighbour whose parameters fail with_parameters' __post_init__
+        # guard (or whose backtest cannot run) must be recorded, not raised --
+        # one bad neighbour must not crash the whole family's report.
+        import backtest_cli
+        from copilot.backtest import rules
+        frame = None  # unused when with_parameters itself raises
+        result = backtest_cli._evaluate_neighbour(
+            frame, rules.MomentumTopN(("FAST", "SLOW")),
+            {"skip_days": 300.0}, start_cash=10000.0, cash_floor_pct=0.1)
+        self.assertIn("error", result)
+        self.assertNotIn("cagr", result)
+
+    def test_report_carries_each_familys_own_caveats(self):
+        import contextlib
+        import io
+        import tempfile
+        import backtest_cli
+        from copilot.backtest import rules
+        with mock.patch.object(backtest_cli, "_fetch",
+                               side_effect=lambda s: self._qualifying_series(s)), \
+             tempfile.TemporaryDirectory() as tmp:
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                code = backtest_cli.main(["--universe", "SPY,QQQ", "--family", "all", "--out-dir", tmp])
+            report = json.loads(next(Path(tmp).glob("backtest-*.json")).read_text(encoding="utf-8"))
+        self.assertEqual(code, 0)
+        by_rule = {f["rule"]: f for f in report["families"]}
+        self.assertEqual(by_rule["fixed_weight_bands"]["caveats"], [])
+        self.assertEqual(by_rule["inverse_volatility"]["caveats"], list(rules.InverseVolatility.caveats))
+        self.assertEqual(by_rule["momentum_top_n"]["caveats"], list(rules.MomentumTopN.caveats))
+        # Reaches the console, not just the JSON: a stranger reading
+        # `momentum_top_n ADMITTED, CAGR +11%` in the terminal has no other
+        # way to learn the strategy has no cash exit.
+        console = captured.getvalue()
+        self.assertIn("no cash exit", console)
+        self.assertIn("risk parity", console)
+
     def test_cross_check_script_is_never_imported_by_shipped_code(self):
         # Matched as an import statement, not as a substring: rules.py's own
         # docstring names "scripts/_cross_check_bt.py" as the oracle that
@@ -1320,6 +1489,17 @@ class CliContract(unittest.TestCase):
             ["git", "grep", "-lE", r"^\s*(import|from)\s+_cross_check_bt\b",
              "--", "scripts", "mcps", "evals"],
             capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[1]))
+        # git grep exits 1 for "no matches" (the expected/passing case here)
+        # and 0 when it finds one (the failure this test exists to catch).
+        # Any other code -- no .git present, e.g. a `git archive` export;
+        # git not on PATH; wrong cwd -- must not be silently read as "no
+        # matches": before this check, a literal "import _cross_check_bt"
+        # added to backtest_cli.py still passed this test when run outside a
+        # git working tree, because an empty stdout from a failed command
+        # looks identical to an empty stdout from a successful one that
+        # truly found nothing.
+        self.assertIn(hits.returncode, (0, 1),
+                     f"git grep exited {hits.returncode}, expected 0 or 1: {hits.stderr}")
         found = [line for line in hits.stdout.splitlines()
                  if not line.endswith(("_cross_check_bt.py", "_test_backtest.py"))]
         self.assertEqual(found, [])
