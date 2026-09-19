@@ -193,7 +193,15 @@ def _forbidden_archive_name(name: str) -> bool:
         return True
     if "trading_memory.md" in low:
         return True
-    return any(part in low for part in ("/data/decisions/", "/data/runs/", "/data/state/", "/data/audit/")) or low.endswith((".sqlite", ".sqlite-wal", ".sqlite-shm", ".db", "/docs/strategy.md", "/docs/strategy-checklist.md", "/config/user.toml"))
+    if any(part in low for part in ("/data/decisions/", "/data/runs/", "/data/state/", "/data/audit/")) or low.endswith((".sqlite", ".sqlite-wal", ".sqlite-shm", ".db", "/docs/strategy.md", "/docs/strategy-checklist.md", "/config/user.toml")):
+        return True
+    # Third-party market data must never ship. Cboe's terms permit one copy for
+    # personal non-commercial use and forbid distribution and derivative works;
+    # a CSV dropped under scripts/, evals/ or docs/ would otherwise be picked up
+    # by _iter_files' rglob and shipped silently. See ADR-0006 clause 6.
+    if low.endswith("_history.csv") or "/vendor-data/" in low:
+        return True
+    return False
 
 
 def _audit_zip(out: Path) -> list[str]:

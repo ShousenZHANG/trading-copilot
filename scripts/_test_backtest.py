@@ -17,6 +17,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from copilot.backtest import admission
 from copilot.backtest import engine
 from copilot.backtest import frame as frame_mod
 from copilot.backtest import history
@@ -849,6 +850,78 @@ class RuleFamilies(unittest.TestCase):
         self.assertEqual(rules.FixedWeightBands({"FAST": 1.0}).warmup_bars, 0)
         self.assertEqual(rules.InverseVolatility(("FAST",), lookback_days=40).warmup_bars, 40)
         self.assertEqual(rules.MomentumTopN(("FAST",), lookback_days=200).warmup_bars, 200)
+
+
+class AdmissionGate(unittest.TestCase):
+    def passing_result(self):
+        r = engine.Result(rule_name="demo", parameters={"a": 1.0, "b": 2.0})
+        start, value = date(2005, 1, 3), 100.0
+        for i in range(21 * 252):
+            when = start + timedelta(days=int(i * 365.25 / 252))
+            value *= 1.0003 if when.year not in (2008, 2020, 2022) else 0.9995
+            r.curve.append((when, value))
+        r.traded_notional, r.total_costs, r.rebalance_count = 5000.0, 50.0, 21
+        return r
+
+    def test_a_long_result_covering_all_three_windows_passes(self):
+        report = admission.assess(self.passing_result(), sessions_by_year=admission.STRESS_SESSIONS)
+        self.assertTrue(report.admitted, report.failures)
+
+    def test_a_short_backtest_fails_rule_one(self):
+        r = engine.Result(rule_name="short", parameters={})
+        r.curve = [(date(2020, 1, 2), 100.0), (date(2024, 1, 2), 150.0)]
+        report = admission.assess(r, sessions_by_year={})
+        self.assertFalse(report.admitted)
+        self.assertTrue(any("15" in f for f in report.failures))
+
+    def test_a_missing_stress_window_fails(self):
+        r = self.passing_result()
+        r.curve = [(w, v) for w, v in r.curve if w.year != 2008]
+        report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS)
+        self.assertFalse(report.admitted)
+        self.assertTrue(any("2008" in f for f in report.failures))
+
+    def test_four_parameters_fail_rule_four(self):
+        r = self.passing_result()
+        r.parameters = {"a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0}
+        report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS)
+        self.assertFalse(report.admitted)
+        self.assertTrue(any("parameter" in f for f in report.failures))
+
+    def test_zero_cost_results_fail_rule_three(self):
+        r = self.passing_result()
+        r.total_costs = 0.0
+        report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS)
+        self.assertFalse(report.admitted)
+        self.assertTrue(any("cost" in f for f in report.failures))
+
+    def test_report_carries_every_rule_two_metric(self):
+        report = admission.assess(self.passing_result(), sessions_by_year=admission.STRESS_SESSIONS)
+        for key in ("cagr", "max_drawdown", "drawdown_duration_days", "annual_turnover", "sharpe"):
+            self.assertIn(key, report.metrics)
+
+    def test_out_of_sample_segment_is_reported_separately(self):
+        report = admission.assess(self.passing_result(), sessions_by_year=admission.STRESS_SESSIONS)
+        self.assertIn("out_of_sample", report.metrics)
+        self.assertIn("cagr", report.metrics["out_of_sample"])
+
+    def test_stress_session_counts_are_the_verified_xnys_numbers(self):
+        self.assertEqual(admission.STRESS_SESSIONS, {2008: 253, 2020: 253, 2022: 251})
+
+    def test_a_waiver_records_its_reason_and_does_not_hide_the_failure(self):
+        r = self.passing_result()
+        r.curve = [(w, v) for w, v in r.curve if w.year != 2008]
+        report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS,
+                                  waivers={"stress_2008": "ADR-0006 clause 5: BXN starts 2009-09-18"})
+        self.assertTrue(report.admitted)
+        self.assertTrue(report.waived)
+        self.assertIn("ADR-0006", " ".join(report.waiver_reasons))
+        self.assertTrue(any("2008" in f for f in report.failures))
+
+    def test_an_unknown_waiver_key_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unknown waiver"):
+            admission.assess(self.passing_result(), sessions_by_year=admission.STRESS_SESSIONS,
+                             waivers={"whatever": "because"})
 
 
 if __name__ == "__main__":
