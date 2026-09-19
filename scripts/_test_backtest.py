@@ -924,6 +924,123 @@ class AdmissionGate(unittest.TestCase):
             admission.assess(self.passing_result(), sessions_by_year=admission.STRESS_SESSIONS,
                              waivers={"whatever": "because"})
 
+    # --- mutation-review follow-up: waivers keyed to rules, not text --------
+
+    def test_waiver_cannot_silence_a_rule_four_failure_by_text_coincidence(self):
+        # Mutation-testing proof: the old _matches() paired a waiver to a
+        # failure by checking whether the failure message started with the
+        # numeral in the waiver's key. A rule-4 message that happens to start
+        # with "2008" (because the result has 2008 parameters) must still
+        # fail admission under a stress_2008 waiver -- the waiver is for an
+        # unrelated rule and must never reach rule 4.
+        r = self.passing_result()
+        r.parameters = {f"p{i}": float(i) for i in range(2008)}
+        report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS,
+                                  waivers={"stress_2008": "unrelated waiver, must not reach rule 4"})
+        self.assertFalse(report.admitted)
+        self.assertTrue(any(f.startswith("2008 parameters") for f in report.failures))
+
+    def test_stress_2008_waiver_does_not_silence_rule_three(self):
+        r = self.passing_result()
+        r.total_costs = 0.0
+        report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS,
+                                  waivers={"stress_2008": "unrelated waiver, must not reach rule 3"})
+        self.assertFalse(report.admitted)
+        self.assertTrue(any("cost" in f for f in report.failures))
+
+    def test_stress_2008_waiver_does_not_silence_rule_four(self):
+        r = self.passing_result()
+        r.parameters = {"a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0}
+        report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS,
+                                  waivers={"stress_2008": "unrelated waiver, must not reach rule 4"})
+        self.assertFalse(report.admitted)
+        self.assertTrue(any("parameter" in f for f in report.failures))
+
+    def test_stress_2008_waiver_does_not_silence_rule_five(self):
+        r = engine.Result(rule_name="iso5", parameters={})
+        r.curve = [(date(2003, 1, 1), 100.0), (date(2019, 1, 5), 200.0), (date(2020, 6, 1), 210.0)]
+        r.total_costs, r.rebalance_count = 10.0, 1
+        report = admission.assess(r, sessions_by_year={},
+                                  waivers={"stress_2008": "unrelated waiver, must not reach rule 5"})
+        self.assertFalse(report.admitted)
+        self.assertTrue(any("out-of-sample" in f for f in report.failures))
+
+    def test_rule_four_boundary_exactly_three_passes_four_fails(self):
+        # Mutating `>` to `>=` in the rule-4 check currently survives without
+        # a boundary test.
+        r3 = self.passing_result()
+        r3.parameters = {"a": 1.0, "b": 2.0, "c": 3.0}
+        self.assertTrue(admission.assess(r3, sessions_by_year=admission.STRESS_SESSIONS).admitted)
+
+        r4 = self.passing_result()
+        r4.parameters = {"a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0}
+        self.assertFalse(admission.assess(r4, sessions_by_year=admission.STRESS_SESSIONS).admitted)
+
+    def test_rule_one_span_boundary(self):
+        # 15 * 365.25 = 5478.75 days, not a whole number, so "exactly 15.0
+        # years" cannot occur with real dates (span is always a whole number
+        # of days divided by 365.25). This brackets the threshold as tightly
+        # as integer-day arithmetic allows: one day short of it fails, one
+        # day at-or-past it passes.
+        short = engine.Result(rule_name="short-span", parameters={})
+        short.curve = [(date(2005, 1, 1), 100.0), (date(2005, 1, 1) + timedelta(days=5478), 150.0)]
+        short.total_costs, short.rebalance_count = 10.0, 1
+        report = admission.assess(short, sessions_by_year={})
+        self.assertTrue(any("rule 1 requires at least" in f for f in report.failures))
+
+        long = engine.Result(rule_name="long-span", parameters={})
+        long.curve = [(date(2005, 1, 1), 100.0), (date(2005, 1, 1) + timedelta(days=5479), 150.0)]
+        long.total_costs, long.rebalance_count = 10.0, 1
+        report2 = admission.assess(long, sessions_by_year={})
+        self.assertFalse(any("rule 1 requires at least" in f for f in report2.failures))
+
+    def test_rule_five_rejects_a_two_bar_sliver_and_accepts_a_three_year_segment(self):
+        base = [(date(2003, 1, 1), 100.0)]
+
+        sliver = engine.Result(rule_name="sliver", parameters={})
+        sliver.curve = base + [(date(2020, 1, 6), 150.0), (date(2020, 1, 13), 151.0)]
+        sliver.total_costs, sliver.rebalance_count = 10.0, 1
+        report = admission.assess(sliver, sessions_by_year={})
+        self.assertFalse(report.admitted)
+        self.assertTrue(any("out-of-sample" in f for f in report.failures))
+
+        long_segment = engine.Result(rule_name="long", parameters={})
+        long_segment.curve = base + [(date(2019, 1, 6), 150.0), (date(2022, 1, 6), 180.0)]
+        long_segment.total_costs, long_segment.rebalance_count = 10.0, 1
+        report2 = admission.assess(long_segment, sessions_by_year={})
+        self.assertTrue(report2.admitted, report2.failures)
+
+    def test_a_blank_waiver_reason_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "reason"):
+            admission.assess(self.passing_result(), sessions_by_year=admission.STRESS_SESSIONS,
+                             waivers={"stress_2008": ""})
+        with self.assertRaisesRegex(ValueError, "reason"):
+            admission.assess(self.passing_result(), sessions_by_year=admission.STRESS_SESSIONS,
+                             waivers={"stress_2008": "   "})
+
+    def test_stress_coverage_requires_ninety_nine_percent(self):
+        self.assertEqual(admission.MIN_STRESS_COVERAGE, 0.99)
+
+    def test_missing_a_single_month_of_a_stress_year_fails_even_with_high_coverage(self):
+        # A coverage ratio can stay above the floor while a whole month is
+        # silently absent. Give 2008 a bar on every calendar day except
+        # September -- 336 bars, far more than the 253 expected (so the ratio
+        # check alone would pass) -- but zero bars in month 9.
+        r = self.passing_result()
+        r.curve = [(w, v) for w, v in r.curve if w.year != 2008]
+        daily_2008 = [date(2008, 1, 1) + timedelta(days=i) for i in range(366)]
+        padded = [(d, 100.0) for d in daily_2008 if d.month != 9]
+        r.curve = sorted(r.curve + padded, key=lambda pair: pair[0])
+
+        observed = len([w for w, _ in r.curve if w.year == 2008])
+        self.assertGreaterEqual(observed / admission.STRESS_SESSIONS[2008], admission.MIN_STRESS_COVERAGE,
+                                "fixture bug: the ratio check should pass here so only the month "
+                                "check is what fails")
+
+        report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS)
+        self.assertFalse(report.admitted)
+        self.assertTrue(any("2008" in f and "month" in f for f in report.failures))
+
     def test_bxn_q29_waiver_waives_2008_in_admission_while_keeping_it_visible(self):
         # A waiver does not delete a failure -- it records a reason beside it and
         # flips `admitted`. Prove both halves for bxn.Q29_WAIVER specifically, not
