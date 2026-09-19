@@ -10,6 +10,7 @@ import copy
 import io
 import json
 import math
+import os
 import sys
 import tempfile
 import unittest
@@ -22,7 +23,7 @@ from unittest.mock import patch
 from copilot.data_calendar import CalendarUnavailable, MarketCalendar, iso, parse_time
 from copilot.instruments import get_instrument, normalize_instrument
 from copilot.market_data import collect_snapshot, compute_indicators, snapshot_digest, verify_snapshot
-from copilot.providers import HttpClient, NasdaqEquityProvider, NasdaqIndexProvider, ProviderError, SGEProvider, YahooProvider, parse_sge_daily, parse_sge_shau
+from copilot.providers import HttpClient, NasdaqEquityProvider, NasdaqIndexProvider, ProviderError, SGEProvider, YahooProvider, parse_sge_daily, parse_sge_shau, safe_url
 
 NOW = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
 
@@ -492,6 +493,46 @@ class RealCalendarContracts(unittest.TestCase):
         self.assertFalse(calendar.is_session(instrument, "2026-02-28"))
         with self.assertRaises(CalendarUnavailable):
             calendar.is_session(instrument, "2027-01-04")
+
+
+class SafeUrlContracts(unittest.TestCase):
+    def test_substring_named_secrets_are_dropped(self):
+        cleaned = safe_url("https://example.test/v1?api_key=abc&token=xyz&symbol=QQQ")
+        self.assertNotIn("abc", cleaned)
+        self.assertNotIn("xyz", cleaned)
+        self.assertIn("symbol=QQQ", cleaned)
+
+    def test_short_secret_parameter_names_are_dropped(self):
+        """IBKR Flex passes its token as ?t= — one character, no substring match."""
+        cleaned = safe_url("https://example.test/FlexWebService/SendRequest?t=SECRETTOKEN&q=12345&v=3")
+        self.assertNotIn("SECRETTOKEN", cleaned)
+        self.assertIn("q=12345", cleaned)
+        self.assertIn("v=3", cleaned)
+
+    def test_live_credential_value_is_scrubbed_under_any_parameter_name(self):
+        with patch.dict(os.environ, {"FINNHUB_API_KEY": "live-fixture-value"}, clear=True):
+            cleaned = safe_url("https://example.test/q?unexpected=live-fixture-value&symbol=QQQ")
+        self.assertNotIn("live-fixture-value", cleaned)
+        self.assertIn("symbol=QQQ", cleaned)
+
+    def test_credential_embedded_in_the_path_is_scrubbed(self):
+        with patch.dict(os.environ, {"FINNHUB_API_KEY": "live-fixture-value"}, clear=True):
+            cleaned = safe_url("https://example.test/v1/live-fixture-value/quote")
+        self.assertNotIn("live-fixture-value", cleaned)
+
+    def test_fragment_does_not_survive(self):
+        self.assertNotIn("#", safe_url("https://example.test/p?a=1#secret-fragment"))
+
+    def test_non_secret_urls_round_trip(self):
+        with patch.dict(os.environ, {}, clear=True):
+            url = "https://finance.yahoo.com/quote/QQQ/history/"
+            self.assertEqual(safe_url(url), url)
+
+    def test_no_live_credentials_means_no_scrubbing_work(self):
+        with patch.dict(os.environ, {}, clear=True):
+            cleaned = safe_url("https://example.test/q?symbol=QQQ&range=1y")
+        self.assertIn("symbol=QQQ", cleaned)
+        self.assertIn("range=1y", cleaned)
 
 
 if __name__ == "__main__":
