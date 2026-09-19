@@ -9,12 +9,17 @@ Install Python 3.11+, uv and Claude Code and/or Codex. Open the repository root.
 
 ## Free credentials
 
-| Setting | Obtain/configure | Role |
+Credentials live in .env and nowhere else; config/user.toml holds decisions, never secrets. The loader reads exactly the names below, so a variable absent from this table is a variable the copilot never sees.
+
+| Setting | Obtain/configure | What it unlocks today |
 |---|---|---|
-| FINNHUB_API_KEY | [Finnhub](https://finnhub.io/) free account | Company-news coverage |
-| APCA_API_KEY_ID / APCA_API_SECRET_KEY | [Alpaca](https://alpaca.markets/) free account | Probe historical SIP entitlement; IEX is not consolidated SIP |
-| FRED_API_KEY | [FRED key](https://fred.stlouisfed.org/docs/api/api_key.html) | Macro observations and release/vintage checks |
-| SEC_USER_AGENT | Your real name/application and contact email | Identified requests to SEC public APIs |
+| FINNHUB_API_KEY | [Finnhub](https://finnhub.io/register) free account | Company-news evidence. The economic calendar is **not** available on the free tier (HTTP 403); see [ADR-0005](adr/0005-verified-data-constraints.md) |
+| FRED_API_KEY | [FRED key](https://fredaccount.stlouisfed.org/apikeys) | Macro series, currently the four in the whitelist: DFII10, DGS10, DTWEXBGS, CPIAUCSL |
+| SEC_USER_AGENT | Your real name/application and contact email | SEC filing evidence; the SEC requires a contact string, not an API key |
+| APCA_API_KEY_ID / APCA_API_SECRET_KEY | [Alpaca](https://alpaca.markets/) free account | Optional third price source; historical SIP entitlement is probed and IEX is not consolidated SIP |
+| ALPACA_API_KEY / ALPACA_SECRET_KEY | The same Alpaca account | Optional aliases, read only when the APCA_ names are unset |
+
+Absent Alpaca keys, the Yahoo + Nasdaq cross-check is the only price path, which is the supported default.
 
 Yahoo, Nasdaq public pages and SGE public pages do not require these keys. They can fail or change; their current responses are always validated. Never paste keys into a conversation or source file. Configure .env locally. Optional legacy paid adapters in .mcp.json.template are not part of the free core.
 
@@ -23,7 +28,7 @@ uv run --no-project --quiet --script scripts/copilot_cli.py capabilities
 uv run --no-project --quiet --script scripts/copilot_probe.py
 ```
 
-Capabilities checks presence only. The probe checks actual MCP calls against isolated temporary state and reports quality statuses; it does not certify unavailable credentials or all live feeds. Add `--live` for public-source fetches.
+A missing key is a visible gap, not a silent failure: `python scripts/copilot_cli.py capabilities` reports which of the names above are present. Capabilities checks presence only, and credential presence is not an entitlement or live-data test. The probe checks actual MCP calls against isolated temporary state and reports quality statuses; it does not certify unavailable credentials or all live feeds. Add `--live` for public-source fetches.
 
 ## Local persistence
 
