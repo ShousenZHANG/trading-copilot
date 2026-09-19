@@ -544,7 +544,8 @@ def build(*, dates: Sequence[date], symbols: Sequence[str],
             raise ValueError(f"dates must be strictly increasing: {dates[i - 1]} then {dates[i]}")
     for i, row in enumerate(rows):
         if len(row) != len(upper):
-            raise ValueError(f"row {i} ({dates[i]}) has {len(row)} values, expected {len(upper)}")
+            raise ValueError(
+                f"row {i} ({dates[i]}) has {len(row)} values, expected {len(upper)} values")
         for j, value in enumerate(row):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{upper[j]} on {dates[i]}: close must be finite and positive, got {value}")
@@ -557,7 +558,7 @@ def build(*, dates: Sequence[date], symbols: Sequence[str],
 python scripts/_test_backtest.py -v
 ```
 
-Expected: 18 tests, OK.
+Expected: OK — 11 new tests in this task, 21 in the file.
 
 - [ ] **Step 5: Commit**
 
@@ -628,7 +629,7 @@ class HistoryParsing(unittest.TestCase):
             history.parse_chart("SPLG", body)
 
     def test_dates_come_back_in_new_york_not_utc(self):
-        # 1578016200 is 2020-01-03 02:00 UTC, which is 2020-01-02 21:00 in New
+        # 1578016200 is 2020-01-03 01:50 UTC, which is 2020-01-02 20:50 in New
         # York. Real Yahoo daily stamps sit at the exchange open, where the two
         # calendars agree; this is the defensive case, and taking the UTC date
         # would file the bar under the wrong session.
@@ -840,7 +841,7 @@ def to_frame(series: Sequence[Series], *, dividend_adjusted: bool = True) -> Pri
 python scripts/_test_backtest.py -v
 ```
 
-Expected: OK — 9 new tests in this task, 27 in the file.
+Expected: OK — 10 new tests in this task (9 from the plan plus the `to_frame` intersection test), 31 in the file.
 
 - [ ] **Step 5: Commit**
 
@@ -1042,7 +1043,7 @@ def window(curve: Curve, year: int) -> list[tuple[date, float]]:
 python scripts/_test_backtest.py -v
 ```
 
-Expected: OK — 10 new tests in this task, 37 in the file.
+Expected: OK — 10 new tests in this task, 41 in the file.
 
 - [ ] **Step 5: Commit**
 
@@ -1324,7 +1325,7 @@ def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostMod
 python scripts/_test_backtest.py -v
 ```
 
-Expected: OK — 11 new tests in this task, 48 in the file.
+Expected: OK — 11 new tests in this task, 52 in the file.
 
 - [ ] **Step 5: Commit**
 
@@ -1606,7 +1607,7 @@ class MomentumTopN:
 python scripts/_test_backtest.py -v
 ```
 
-Expected: OK — 12 new tests in this task, 60 in the file.
+Expected: OK — 12 new tests in this task, 64 in the file.
 
 - [ ] **Step 5: Commit**
 
@@ -1875,7 +1876,7 @@ In `scripts/package_release.py`, extend `_forbidden_archive_name` before its fin
 python scripts/_test_backtest.py -v && python scripts/_test_release_privacy.py -v
 ```
 
-Expected: OK — 10 new tests in this task, 70 in the file; the privacy suite green with two new tests.
+Expected: OK — 10 new tests in this task, 74 in the file; the privacy suite green with two new tests.
 
 - [ ] **Step 6: Commit**
 
@@ -2053,7 +2054,7 @@ def fetch(timeout: float = 30.0) -> PriceFrame:
 python scripts/_test_backtest.py -v
 ```
 
-Expected: OK — 7 new tests in this task, 77 in the file.
+Expected: OK — 7 new tests in this task, 81 in the file.
 
 - [ ] **Step 5: Commit**
 
@@ -2427,7 +2428,7 @@ python scripts/package_release.py --self-test
 ruff check --select E9,F63,F7,F82 scripts evals mcps
 ```
 
-Expected: self-test OK; 81 backtest tests OK; `check.py` 0 errors; `sync_runtimes --check` 0 changed; the full suite green; `package_release --self-test` all pass; ruff clean.
+Expected: self-test OK; 85 backtest tests OK; `check.py` 0 errors; `sync_runtimes --check` 0 changed; the full suite green; `package_release --self-test` all pass; ruff clean.
 
 - [ ] **Step 7: Verify against the real endpoint (manual, not CI)**
 
