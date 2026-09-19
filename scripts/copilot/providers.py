@@ -46,20 +46,30 @@ def safe_url(url: str) -> str:
 
     Two layers, because the first alone has failed: name matching cannot cover a
     parameter name nobody has seen yet, and this URL is written into evidence
-    records and persisted by HttpClient._cache(). The second layer also covers a
-    credential that appears in the path rather than the query.
+    records and persisted by HttpClient._cache().
+
+    The scrub runs on DECODED components, before urlencode re-encodes them.
+    Scrubbing the finished string instead would miss any secret containing a
+    character urlencode escapes - `/` and `+` in a base64 secret, a space in
+    SEC_USER_AGENT - leaving the value on disk in recoverable percent-encoded
+    form.
     """
     parts = urlsplit(url)
-    query = [(key, value) for key, value in parse_qsl(parts.query)
-             if key.lower() not in _SECRET_PARAM_NAMES
-             and not any(secret in key.lower() for secret in _SECRET_PARAM_SUBSTRINGS)]
-    cleaned = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
     # Imported here rather than at module scope: providers.py must stay
     # importable on its own, and service.py is the higher layer.
     from .service import secret_values
-    for value in secret_values():
-        cleaned = cleaned.replace(value, "[redacted]")
-    return cleaned
+    secrets = secret_values()
+
+    def scrub(text: str) -> str:
+        for value in secrets:
+            text = text.replace(value, "[redacted]")
+        return text
+
+    query = [(scrub(key), scrub(value)) for key, value in parse_qsl(parts.query)
+             if key.lower() not in _SECRET_PARAM_NAMES
+             and not any(secret in key.lower() for secret in _SECRET_PARAM_SUBSTRINGS)]
+    return urlunsplit((parts.scheme, scrub(parts.netloc), scrub(parts.path),
+                       urlencode(query), ""))
 
 
 def finite_number(value, *, positive: bool = False) -> float:

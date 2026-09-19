@@ -18,6 +18,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from email.message import Message
 from types import ModuleType
 from urllib.error import HTTPError
+from urllib.parse import quote
 from unittest.mock import patch
 
 from copilot.data_calendar import CalendarUnavailable, MarketCalendar, iso, parse_time
@@ -533,6 +534,36 @@ class SafeUrlContracts(unittest.TestCase):
             cleaned = safe_url("https://example.test/q?symbol=QQQ&range=1y")
         self.assertIn("symbol=QQQ", cleaned)
         self.assertIn("range=1y", cleaned)
+
+    def test_secret_with_url_encoded_characters_is_scrubbed(self):
+        """A base64-shaped secret contains / and +, which urlencode escapes.
+        Scrubbing the finished string would miss it and leave it recoverable."""
+        secret = "aB3/xY+9secret"
+        with patch.dict(os.environ, {"APCA_API_SECRET_KEY": secret}, clear=True):
+            cleaned = safe_url(f"https://example.test/q?unexpected={quote(secret, safe='')}&symbol=QQQ")
+        self.assertNotIn("aB3", cleaned)
+        self.assertNotIn("%2F", cleaned)
+        self.assertNotIn("%2B", cleaned)
+        self.assertIn("symbol=QQQ", cleaned)
+
+    def test_secret_containing_spaces_is_scrubbed(self):
+        """SEC_USER_AGENT is a contact string with spaces."""
+        secret = "Example Research contact@example.test"
+        with patch.dict(os.environ, {"SEC_USER_AGENT": secret}, clear=True):
+            cleaned = safe_url(f"https://example.test/q?ua={quote(secret, safe='')}")
+        self.assertNotIn("Example", cleaned)
+        self.assertNotIn("contact", cleaned)
+
+    def test_secret_in_netloc_credentials_is_scrubbed(self):
+        with patch.dict(os.environ, {"FINNHUB_API_KEY": "netloc-secret"}, clear=True):
+            cleaned = safe_url("https://user:netloc-secret@example.test/path")
+        self.assertNotIn("netloc-secret", cleaned)
+
+    def test_secret_in_a_parameter_name_is_scrubbed(self):
+        with patch.dict(os.environ, {"FINNHUB_API_KEY": "namesecret"}, clear=True):
+            cleaned = safe_url("https://example.test/q?namesecret=1&symbol=QQQ")
+        self.assertNotIn("namesecret", cleaned)
+        self.assertIn("symbol=QQQ", cleaned)
 
 
 if __name__ == "__main__":
