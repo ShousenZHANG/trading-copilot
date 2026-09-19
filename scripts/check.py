@@ -83,13 +83,10 @@ _FENCED_CODE_RE = re.compile(r"```.*?```", re.S)
 _INLINE_CODE_RE = re.compile(r"`[^`]*`")
 _LINK_TARGET_RE = re.compile(r"\]\([^)]*\)")
 
-# Wording that documents a removal instead of offering the feature.
-_REMOVAL_NOTE_RE = re.compile(
-    r"removed|superseded|historical|no longer|已删除|不再|已移除",
-    re.I)
-
-# Sentence boundaries, ASCII and CJK.
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。；！？])\s+|\n")
+# The explicit opt-out for a doc that records a removal instead of offering it.
+# One line, or a region running to the next heading.
+HISTORICAL_MARKER = "<!-- historical -->"
+HISTORICAL_SECTION_MARKER = "<!-- historical-section -->"
 
 
 def rel(path: Path) -> str:
@@ -277,29 +274,58 @@ def check_skill_mirror() -> None:
             err(f"missing shared runtime component: {relative}")
 
 
-def _advertises(sentence: str, marker: str) -> bool:
-    """True when this sentence offers `marker` as something the plugin still has.
+def strip_markdown_noise(text: str) -> str:
+    """Drop the spans that name a path without offering it to the reader.
 
-    A sentence that records the removal has to be able to name what it removed,
-    so `0.5.0 removed the /analyze command` is allowed. Scoping is per sentence,
-    not per line: one clause noting a removal must not silence an advertisement
-    sitting next to it.
+    A fenced sample, an inline code span and a markdown link target all quote
+    the old paths legitimately, so none of them counts as an advertisement.
     """
-    if _REMOVAL_NOTE_RE.search(sentence):
-        return False
+    text = _FENCED_CODE_RE.sub(" ", text)
+    text = _INLINE_CODE_RE.sub(" ", text)
+    return _LINK_TARGET_RE.sub("]()", text)
+
+
+def _advertises(line: str, marker: str) -> bool:
+    """True when `line` offers `marker` as something the plugin still ships."""
     # A slash command is real only when nothing path-like precedes it, so
     # `scripts/analyze_bars.py` and `docs/screenshots/` do not count. The
     # trailing guard keeps `portfolio-manager-v2` from matching its prefix.
     lead = r"(?<![/.\w-])" if marker.startswith("/") else r"(?<![\w-])"
-    return bool(re.search(lead + re.escape(marker) + r"(?![\w-])", sentence))
+    return bool(re.search(lead + re.escape(marker) + r"(?![\w-])", line))
+
+
+def advertised_features(text: str) -> list[str]:
+    """Removed features this markdown still offers, in REMOVED_FEATURES order.
+
+    Scope is the line, and a document that records a removal opts out of the
+    check explicitly: `<!-- historical -->` exempts its own line, and
+    `<!-- historical-section -->` exempts everything through the next heading,
+    which is what lets a changelog heading cover the list beneath it.
+
+    The marker replaces an earlier attempt to infer the same thing from words
+    like "historical" or "removed". That guess segmented neither English nor
+    Chinese reliably: a CJK full stop carries no trailing space, so Chinese
+    docs collapsed to line scope and an ordinary phrase such as 不再上涨
+    silenced the real advertisement beside it.
+    """
+    found: list[str] = []
+    in_exempt_section = False
+    for line in strip_markdown_noise(text).splitlines():
+        if line.lstrip().startswith("#"):
+            in_exempt_section = False
+        if HISTORICAL_SECTION_MARKER in line:
+            in_exempt_section = True
+            continue
+        if in_exempt_section or HISTORICAL_MARKER in line:
+            continue
+        for marker in REMOVED_FEATURES:
+            if marker not in found and _advertises(line, marker):
+                found.append(marker)
+    return [marker for marker in REMOVED_FEATURES if marker in found]
 
 
 def check_docs() -> None:
-    """Docs must not advertise commands or agents the plugin no longer ships.
-
-    Only prose counts. A fenced sample, an inline code span and a markdown link
-    target each name the old paths legitimately, so they are stripped first.
-    """
+    """Docs must not advertise commands or agents the plugin no longer ships."""
     for relative in REQUIRED_DOCS:
         path = ROOT / relative
         if not path.is_file():
@@ -307,13 +333,10 @@ def check_docs() -> None:
             # private-state gate below must not be skipped by a renamed doc.
             err(f"missing required document: {relative}")
             continue
-        prose = _FENCED_CODE_RE.sub(" ", read(path))
-        prose = _INLINE_CODE_RE.sub(" ", prose)
-        prose = _LINK_TARGET_RE.sub("]()", prose)
-        sentences = _SENTENCE_SPLIT_RE.split(prose)
-        for marker in REMOVED_FEATURES:
-            if any(_advertises(sentence, marker) for sentence in sentences):
-                err(f"{relative}: still references removed feature '{marker}'")
+        for marker in advertised_features(read(path)):
+            err(f"{relative}: still advertises removed feature '{marker}' (if "
+                f"this line documents the removal, mark it with "
+                f"{HISTORICAL_MARKER})")
 
 
 
