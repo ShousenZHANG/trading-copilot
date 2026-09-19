@@ -17,6 +17,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from copilot.backtest import engine
 from copilot.backtest import frame as frame_mod
 from copilot.backtest import history
 from copilot.backtest import metrics
@@ -411,6 +412,84 @@ class Metrics(unittest.TestCase):
     def test_window_slices_a_calendar_year(self):
         curve = [(date(2007, 12, 31), 100.0), (date(2008, 6, 1), 60.0), (date(2009, 1, 2), 90.0)]
         self.assertEqual(len(metrics.window(curve, 2008)), 1)
+
+
+class CostModel(unittest.TestCase):
+    def test_commission_has_a_floor(self):
+        model = engine.CostModel()
+        self.assertAlmostEqual(model.commission(shares=10, notional=1000.0), 1.00)
+
+    def test_commission_is_per_share_above_the_floor(self):
+        model = engine.CostModel()
+        self.assertAlmostEqual(model.commission(shares=1000, notional=100000.0), 3.50)
+
+    def test_commission_is_capped_at_one_percent_of_notional(self):
+        model = engine.CostModel()
+        self.assertAlmostEqual(model.commission(shares=10, notional=50.0), 0.50)
+
+    def test_spread_is_half_the_quoted_width(self):
+        model = engine.CostModel(spread_bps=4.0)
+        self.assertAlmostEqual(model.spread(notional=10000.0), 2.00)
+
+
+class EngineLoop(unittest.TestCase):
+    def flat_frame(self, n=30):
+        return frame_mod.build(dates=[date(2020, 1, 1) + timedelta(days=i) for i in range(n)],
+                               symbols=["AAA", "BBB"], closes=[[100.0, 50.0]] * n)
+
+    def test_a_flat_market_with_no_costs_preserves_capital(self):
+        result = engine.run(self.flat_frame(), rule=engine.StaticWeights({"AAA": 0.5, "BBB": 0.5}),
+                            start_cash=10000.0, cost_model=engine.CostModel.free(),
+                            cash_floor_pct=0.0)
+        self.assertAlmostEqual(result.curve[-1][1], 10000.0, places=6)
+
+    def test_cash_floor_is_never_invaded(self):
+        result = engine.run(self.flat_frame(), rule=engine.StaticWeights({"AAA": 1.0}),
+                            start_cash=10000.0, cost_model=engine.CostModel.free(),
+                            cash_floor_pct=0.20)
+        self.assertGreaterEqual(min(result.cash_history), 10000.0 * 0.20 - 1e-6)
+
+    def test_integer_shares_are_the_default(self):
+        frame = frame_mod.build(dates=[date(2020, 1, 1), date(2020, 1, 2)],
+                                symbols=["AAA"], closes=[[333.0], [333.0]])
+        result = engine.run(frame, rule=engine.StaticWeights({"AAA": 1.0}), start_cash=1000.0,
+                            cost_model=engine.CostModel.free(), cash_floor_pct=0.0)
+        self.assertEqual(result.positions_history[0]["AAA"], 3)
+
+    def test_costs_reduce_the_final_value(self):
+        frame = self.flat_frame()
+        free = engine.run(frame, rule=engine.StaticWeights({"AAA": 1.0}), start_cash=10000.0,
+                          cost_model=engine.CostModel.free(), cash_floor_pct=0.0)
+        charged = engine.run(frame, rule=engine.StaticWeights({"AAA": 1.0}), start_cash=10000.0,
+                             cost_model=engine.CostModel(), cash_floor_pct=0.0)
+        self.assertLess(charged.curve[-1][1], free.curve[-1][1])
+
+    def test_no_lookahead_uses_only_bars_up_to_today(self):
+        seen = []
+
+        class Spy(engine.Rule):
+            parameters = {}
+            name = "spy"
+
+            def weights(self, frame, i):
+                seen.append(i)
+                return {"AAA": 1.0}
+
+        engine.run(self.flat_frame(10), rule=Spy(), start_cash=1000.0,
+                   cost_model=engine.CostModel.free(), cash_floor_pct=0.0)
+        self.assertTrue(all(i < 10 for i in seen))
+        self.assertEqual(max(seen), 9)
+
+    def test_weights_that_do_not_sum_to_one_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "sum"):
+            engine.run(self.flat_frame(), rule=engine.StaticWeights({"AAA": 0.9}),
+                       start_cash=1000.0, cost_model=engine.CostModel.free(), cash_floor_pct=0.0)
+
+    def test_result_reports_traded_notional_for_turnover(self):
+        result = engine.run(self.flat_frame(), rule=engine.StaticWeights({"AAA": 1.0}),
+                            start_cash=10000.0, cost_model=engine.CostModel.free(),
+                            cash_floor_pct=0.0)
+        self.assertGreater(result.traded_notional, 0.0)
 
 
 if __name__ == "__main__":
