@@ -19,6 +19,39 @@ class PriceFrame:
     symbols: tuple[str, ...]
     closes: tuple[tuple[float, ...], ...]
 
+    def __post_init__(self) -> None:
+        """Validate on construction, not only through build().
+
+        A bare frozen dataclass with no validation here meant every check
+        build() used to perform was skippable by constructing PriceFrame
+        directly -- and this repository is going open source, where a
+        stranger has no reason to know build() is the only safe entry point.
+        The module docstring's "worse than an exception" applies equally to
+        a frame nobody validated. build() remains the normalizing entry
+        point (upper-cased symbols, float-coerced and tuple-ized inputs);
+        this only validates, so it runs unconditionally and cannot be
+        bypassed.
+        """
+        if not self.dates or not self.symbols:
+            raise ValueError("a price frame needs at least one date and one symbol")
+        duplicates = sorted({s for s in self.symbols if self.symbols.count(s) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate symbols: {', '.join(duplicates)}")
+        if len(self.closes) != len(self.dates):
+            raise ValueError(f"{len(self.dates)} dates but {len(self.closes)} rows")
+        for i in range(1, len(self.dates)):
+            if self.dates[i] <= self.dates[i - 1]:
+                raise ValueError(
+                    f"dates must be strictly increasing: {self.dates[i - 1]} then {self.dates[i]}")
+        for i, row in enumerate(self.closes):
+            if len(row) != len(self.symbols):
+                raise ValueError(
+                    f"row {i} ({self.dates[i]}) has {len(row)} values, expected {len(self.symbols)} values")
+            for j, value in enumerate(row):
+                if not math.isfinite(value) or value <= 0:
+                    raise ValueError(
+                        f"{self.symbols[j]} on {self.dates[i]}: close must be finite and positive, got {value}")
+
     def index_of(self, symbol: str) -> int:
         try:
             return self.symbols.index(symbol.upper())
@@ -31,14 +64,6 @@ class PriceFrame:
 
     def row(self, i: int) -> dict[str, float]:
         return dict(zip(self.symbols, self.closes[i]))
-
-    def slice(self, start: date, end: date) -> "PriceFrame":
-        """Inclusive on both ends."""
-        keep = [i for i, d in enumerate(self.dates) if start <= d <= end]
-        if not keep:
-            raise ValueError(f"no bars between {start} and {end}")
-        return build(dates=[self.dates[i] for i in keep], symbols=list(self.symbols),
-                     closes=[list(self.closes[i]) for i in keep])
 
     def sessions_in_year(self, year: int) -> int:
         """Count of bars dated in `year`. Descriptive only.
@@ -68,23 +93,14 @@ class PriceFrame:
 
 def build(*, dates: Sequence[date], symbols: Sequence[str],
           closes: Iterable[Sequence[float]]) -> PriceFrame:
-    rows = [tuple(float(v) for v in row) for row in closes]
-    if not dates or not symbols:
-        raise ValueError("a price frame needs at least one date and one symbol")
+    """Normalize inputs and construct. All validation lives in `__post_init__`.
+
+    This function's job is purely the normalization a caller should not have
+    to do by hand -- upper-casing symbols, coercing every close to `float`,
+    tuple-izing dates/symbols/closes. It cannot skip validation on a bad
+    input: `PriceFrame.__post_init__` runs unconditionally as soon as this
+    constructs the instance below.
+    """
+    rows = tuple(tuple(float(v) for v in row) for row in closes)
     upper = tuple(s.upper() for s in symbols)
-    duplicates = sorted({s for s in upper if upper.count(s) > 1})
-    if duplicates:
-        raise ValueError(f"duplicate symbols: {', '.join(duplicates)}")
-    if len(rows) != len(dates):
-        raise ValueError(f"{len(dates)} dates but {len(rows)} rows")
-    for i in range(1, len(dates)):
-        if dates[i] <= dates[i - 1]:
-            raise ValueError(f"dates must be strictly increasing: {dates[i - 1]} then {dates[i]}")
-    for i, row in enumerate(rows):
-        if len(row) != len(upper):
-            raise ValueError(
-                f"row {i} ({dates[i]}) has {len(row)} values, expected {len(upper)} values")
-        for j, value in enumerate(row):
-            if not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{upper[j]} on {dates[i]}: close must be finite and positive, got {value}")
-    return PriceFrame(dates=tuple(dates), symbols=upper, closes=tuple(rows))
+    return PriceFrame(dates=tuple(dates), symbols=upper, closes=rows)

@@ -22,7 +22,7 @@ the `Weigh*` algo, because `StrategyBase.run` clears `self.temp` every bar.
 **The offline CI matrix installs zero third-party packages.** It imports every
 `_test_*.py` and every `--self-test` module. A module-scope `import bt` breaks
 three Python versions. A function-scope import collides with
-`ruff --select F82` and contradicts `mcps/copilot_mcp.py:6-12`, which documents
+`ruff --select F82` and contradicts `mcps/copilot_mcp.py:9-13`, which documents
 that NumPy must be imported eagerly on Windows or an MCP call hangs in the
 native loader.
 
@@ -96,3 +96,14 @@ creating a derivative work, and using to verify other data.
 - SMH's pre-2011 provenance is unverified (no issuer page fetched). It stays in
   the qualified tier with a caveat flag; confirming or splitting that series is
   open work.
+- A lookback family consumes its warm-up from the start of the frame
+  (`engine.run` skips the first `rule.warmup_bars` bars outright, producing no
+  curve point for them), so evaluating a 252-bar-lookback strategy over a
+  window that must cover 2008 requires bars from 2007-01 or earlier. Of the 22
+  qualified symbols, VEA (first bar 2007-07-26) is the only one that cannot
+  supply them: a momentum universe that includes VEA fails Q29 rule 1 for a
+  reason that has nothing to do with the strategy, and the rejection is
+  otherwise unexplained. `universe.FIRST_BAR` and `warmup_headroom_bars`
+  record the per-symbol headroom so this is attributable rather than
+  discovered only after an admission rejection; `admission.assess` also names
+  the curve's actual start date in every stress-year failure message.

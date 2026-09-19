@@ -175,7 +175,15 @@ def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostMod
             # one per bar. Tracked locally because the delta loop is the only
             # place that knows whether a share actually moved.
             executed_trade = False
-            for symbol in set(positions) | set(desired):
+            # sorted(...), not a bare set union: iteration order of a set of
+            # strings varies with PYTHONHASHSEED, and float addition is not
+            # associative, so cash/total_costs/traded_notional silently
+            # depended on the interpreter's hash seed. Demonstrated: the same
+            # frame and rule produced different bit patterns for all three
+            # under different hash seeds. This module's own docstring opens
+            # with "Deterministic: no clock, no network, no random" -- sorting
+            # here is load-bearing, not cosmetic.
+            for symbol in sorted(set(positions) | set(desired)):
                 delta = desired.get(symbol, 0.0) - positions.get(symbol, 0.0)
                 if abs(delta) < 1e-9:
                     continue

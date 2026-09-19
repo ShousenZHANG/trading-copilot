@@ -98,12 +98,18 @@ def assess(result: Result, *, sessions_by_year: dict[int, int],
     years = result.years
     if years < MIN_YEARS:
         fail("span", f"backtest spans {years:.2f} years, rule 1 requires at least {MIN_YEARS}")
+    # Named so a stress-year shortfall is attributable: a curve that starts
+    # mid-stress-year (a lookback family's warm-up consumed from the start of
+    # the frame -- see universe.warmup_headroom_bars and ADR-0006) fails this
+    # rule for a reason that has nothing to do with the strategy itself, and
+    # "123 of 253 sessions" alone does not say why.
+    curve_start = result.curve[0][0].isoformat() if result.curve else "no bars"
     for stress_year, expected in sorted(sessions_by_year.items()):
         observed = len(metrics.window(result.curve, stress_year))
         if expected and observed / expected < MIN_STRESS_COVERAGE:
             fail(f"stress_{stress_year}",
                  f"{stress_year} has {observed} of {expected} sessions, rule 1 requires "
-                 f"{MIN_STRESS_COVERAGE:.0%}")
+                 f"{MIN_STRESS_COVERAGE:.0%} (curve starts {curve_start})")
         # A ratio can stay above the coverage floor while an entire month is
         # silently absent (a provider outage, a bad join). This answers "did
         # the strategy actually see September 2008" directly, which a ratio
@@ -113,7 +119,8 @@ def assess(result: Result, *, sessions_by_year: dict[int, int],
         if missing_months:
             fail(f"stress_{stress_year}",
                  f"{stress_year} has no bars in month(s) {', '.join(str(m) for m in missing_months)}; "
-                 "rule 1 requires the strategy to have actually seen every month of a stress year")
+                 "rule 1 requires the strategy to have actually seen every month of a stress year "
+                 f"(curve starts {curve_start})")
 
     # Rule 3: costs must actually have been charged. Not in WAIVABLE.
     if result.total_costs <= 0 and result.rebalance_count > 0:

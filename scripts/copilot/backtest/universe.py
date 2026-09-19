@@ -9,8 +9,12 @@ These are recorded observations, not estimates. Re-verify with
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
+from typing import Iterable
 
 from ..instruments import DEFENSIVE_ETFS, ETF_REGISTRY
+from .frame import DAYS_PER_YEAR
+from .metrics import TRADING_DAYS_PER_YEAR
 
 #: >=15 years of daily bars, with 253/253/251 bars in 2008/2020/2022.
 QUALIFIED = frozenset({
@@ -18,6 +22,43 @@ QUALIFIED = frozenset({
     "XLK", "XLV", "XLF", "XLE", "XLY", "XLP", "XLI", "XLB", "XLU",
     "SMH", "SOXX",
 })
+
+#: Verified first daily bar for every QUALIFIED symbol (source: "Verified
+#: facts this plan is built on",
+#: docs/superpowers/plans/2026-09-19-03-backtest-and-rule-library.md). Exists
+#: so a lookback family's warm-up cost can be checked against a symbol's real
+#: history instead of discovered only after an admission rejection with no
+#: attributable cause -- see warmup_headroom_bars below.
+FIRST_BAR: dict[str, date] = {
+    "SPY": date(1993, 1, 29),
+    "DIA": date(1998, 1, 20),
+    "XLK": date(1998, 12, 22),
+    "XLV": date(1998, 12, 22),
+    "XLF": date(1998, 12, 22),
+    "XLE": date(1998, 12, 22),
+    "XLY": date(1998, 12, 22),
+    "XLP": date(1998, 12, 22),
+    "XLI": date(1998, 12, 22),
+    "XLB": date(1998, 12, 22),
+    "XLU": date(1998, 12, 22),
+    "QQQ": date(1999, 3, 10),
+    "IVV": date(2000, 5, 19),
+    "IWM": date(2000, 5, 26),
+    "SMH": date(2000, 6, 5),
+    "IOO": date(2000, 12, 8),
+    "VTI": date(2001, 6, 15),
+    "SOXX": date(2001, 7, 13),
+    "VUG": date(2004, 1, 30),
+    "VTV": date(2004, 1, 30),
+    "VWO": date(2005, 3, 10),
+    "VEA": date(2007, 7, 26),
+}
+
+#: Rule 1 requires the curve to cover 2008. A lookback family consumes its
+#: warm-up from the start of the frame (engine.run skips i < warmup_bars
+#: outright), so this is the cutoff a symbol's pre-history is measured
+#: against by default.
+DEFAULT_WARMUP_CUTOFF = date(2008, 1, 1)
 
 #: Zero bars in 2008. Not a near-miss that a waiver can fix: the fund did not
 #: exist. SCHD crosses the 15-year line on 2026-10-20 and still has zero 2008.
@@ -87,3 +128,32 @@ def classify(symbol: str) -> Classification:
 def default_candidates() -> tuple[str, ...]:
     """The pool a rule proposal may draw from (Q40=A: the engine proposes 8-12)."""
     return tuple(sorted(QUALIFIED))
+
+
+def warmup_headroom_bars(symbols: Iterable[str], before: date = DEFAULT_WARMUP_CUTOFF) -> dict[str, int]:
+    """Approximate trading bars each symbol has between its first bar and `before`.
+
+    An ESTIMATE for a warning, never a gate: 252 bars/year is the standard
+    rule of thumb, not a scheduled session count, and this does not touch
+    exchange-calendars or any admission threshold. A lookback family consumes
+    its warm-up from the start of the frame (engine.run skips the first
+    `rule.warmup_bars` bars outright), so a symbol whose headroom before
+    `before` is shorter than a rule's warmup_bars cannot supply that rule with
+    real data over the period `before` is meant to represent -- and rejecting
+    that rule's admission for such a universe is correct, not a bug, but the
+    cause is invisible unless something reports the headroom. See ADR-0006's
+    Consequences section.
+
+    Raises for a symbol with no recorded FIRST_BAR entry rather than guessing;
+    every QUALIFIED symbol has one (see
+    test_first_bar_covers_every_qualified_symbol_exactly).
+    """
+    headroom: dict[str, int] = {}
+    for symbol in symbols:
+        key = symbol.upper()
+        first = FIRST_BAR.get(key)
+        if first is None:
+            raise ValueError(f"{key} has no recorded first-bar date in FIRST_BAR")
+        bars = round(max(0, (before - first).days) / DAYS_PER_YEAR * TRADING_DAYS_PER_YEAR)
+        headroom[key] = bars
+    return headroom

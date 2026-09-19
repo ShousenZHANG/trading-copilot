@@ -77,6 +77,31 @@ class UniverseTiers(unittest.TestCase):
         self.assertIn(universe._PROVENANCE_CAVEAT, smh.reason)
         self.assertTrue(smh.provenance_unverified)
 
+    def test_first_bar_covers_every_qualified_symbol_exactly(self):
+        # warmup_headroom_bars raises for a symbol with no FIRST_BAR entry
+        # rather than guessing; this is what makes that safe to rely on for
+        # every symbol classify() can hand back as admissible.
+        self.assertEqual(set(universe.FIRST_BAR), universe.QUALIFIED)
+
+    def test_warmup_headroom_flags_vea_as_the_one_short_qualified_symbol(self):
+        # VEA's first bar (2007-07-26) is the promise in universe.py's own
+        # docstring ("daily bars from at least 2007-07-26"), which is exactly
+        # what makes it too short for a 252-bar lookback to reach back before
+        # 2008-01-01: 22 qualified symbols, and VEA is the only one under 252.
+        headroom = universe.warmup_headroom_bars(universe.QUALIFIED)
+        short = {s for s, bars in headroom.items() if bars < 252}
+        self.assertEqual(short, {"VEA"})
+
+    def test_warmup_headroom_bars_is_never_negative(self):
+        # A symbol whose first bar is on/after `before` has no pre-history to
+        # speak of, not a negative amount of it.
+        headroom = universe.warmup_headroom_bars(["VEA"], before=date(2000, 1, 1))
+        self.assertEqual(headroom["VEA"], 0)
+
+    def test_warmup_headroom_bars_raises_for_an_unrecorded_symbol(self):
+        with self.assertRaisesRegex(ValueError, "SCHD"):
+            universe.warmup_headroom_bars(["SCHD"])
+
 
 class PriceFrameContract(unittest.TestCase):
     def frame(self):
@@ -121,19 +146,19 @@ class PriceFrameContract(unittest.TestCase):
         with self.assertRaises(ValueError):
             frame_mod.build(dates=[], symbols=["SPY"], closes=[])
 
-    def test_slice_is_inclusive_on_both_ends(self):
-        sliced = self.frame().slice(date(2020, 1, 3), date(2020, 1, 6))
-        self.assertEqual(sliced.dates, (date(2020, 1, 3), date(2020, 1, 6)))
-        self.assertEqual(sliced.column("SPY"), (101.0, 99.0))
-
-    def test_slice_can_retain_exactly_one_row(self):
-        sliced = self.frame().slice(date(2020, 1, 3), date(2020, 1, 3))
-        self.assertEqual(sliced.dates, (date(2020, 1, 3),))
-        self.assertEqual(sliced.span_years(), 0.0)
-
-    def test_slice_rejects_start_after_end(self):
-        with self.assertRaisesRegex(ValueError, "no bars between"):
-            self.frame().slice(date(2020, 1, 6), date(2020, 1, 2))
+    def test_direct_construction_cannot_bypass_validation(self):
+        # PriceFrame used to be a bare frozen dataclass: every check build()
+        # performed was skippable by constructing PriceFrame(...) directly.
+        # __post_init__ now validates unconditionally, so the same bad input
+        # must raise the same way through either entry point.
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            frame_mod.PriceFrame(dates=(date(2020, 1, 2),), symbols=("SPY", "SPY"),
+                                 closes=((1.0, 2.0),))
+        with self.assertRaisesRegex(ValueError, "strictly increasing"):
+            frame_mod.PriceFrame(dates=(date(2020, 1, 3), date(2020, 1, 2)), symbols=("SPY",),
+                                 closes=((1.0,), (2.0,)))
+        with self.assertRaises(ValueError):
+            frame_mod.PriceFrame(dates=(date(2020, 1, 2),), symbols=("SPY",), closes=((0.0,),))
 
     def test_sessions_in_year_counts_bars(self):
         self.assertEqual(self.frame().sessions_in_year(2020), 3)
@@ -628,6 +653,61 @@ class EngineLoop(unittest.TestCase):
         self.assertEqual(len(result.curve), 300 - 252)
         self.assertEqual(result.curve[0][0], frame.dates[252])
 
+    def test_trade_loop_is_deterministic_across_hash_seeds(self):
+        # `for symbol in set(positions) | set(desired)` used to iterate a set
+        # of strings, whose order varies with PYTHONHASHSEED, and float
+        # addition is not associative -- so cash/total_costs/traded_notional
+        # depended on the interpreter's hash seed. Demonstrated: the same
+        # frame and rule run under five different seeds produced three
+        # distinct bit patterns for the final value alone. This module's own
+        # docstring opens with "Deterministic: no clock, no network, no
+        # random", so this is run out-of-process (a hash seed is fixed for
+        # the life of one interpreter) under several real seeds rather than
+        # merely re-asserting the sort is present in the source.
+        import os
+        import subprocess
+        import textwrap
+        script = textwrap.dedent(f"""
+            import sys
+            sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})
+            import random
+            from datetime import date, timedelta
+            from copilot.backtest import engine, frame as frame_mod, rules
+
+            rng = random.Random(20260919)
+            symbols = ["A", "B", "C", "D", "E", "F", "G", "H"]
+            all_days = [date(2015, 1, 1) + timedelta(days=i) for i in range(1900)]
+            dates = [d for d in all_days if d.weekday() < 5][:1200]
+            prices = {{s: 100.0 + i * 3.0 for i, s in enumerate(symbols)}}
+            closes = []
+            for _ in dates:
+                row = []
+                for s in symbols:
+                    prices[s] *= 1.0 + rng.uniform(-0.02, 0.02)
+                    row.append(prices[s])
+                closes.append(row)
+            f = frame_mod.build(dates=dates, symbols=symbols, closes=closes)
+            rule = rules.InverseVolatility(tuple(symbols), lookback_days=21, rebalance_days=5)
+            result = engine.run(f, rule=rule, start_cash=1_000_000.0,
+                                cost_model=engine.CostModel(), cash_floor_pct=0.1)
+            print(repr(result.curve[-1][1]))
+            print(repr(result.total_costs))
+            print(repr(result.traded_notional))
+            print(result.rebalance_count)
+        """)
+        outputs = {}
+        for seed in ("0", "1", "2", "3", "42"):
+            proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                                  env={**os.environ, "PYTHONHASHSEED": seed})
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertGreater(int(proc.stdout.strip().splitlines()[-1]), 50,
+                              "fixture bug: too few rebalances to exercise the multi-symbol delta "
+                              "loop this test targets")
+            outputs[seed] = proc.stdout
+        self.assertEqual(len(set(outputs.values())), 1,
+                         "final value / total costs / traded notional differ across "
+                         "PYTHONHASHSEED values: " + repr(outputs))
+
 
 class RuleFamilies(unittest.TestCase):
     def rising(self, n=400):
@@ -765,6 +845,25 @@ class RuleFamilies(unittest.TestCase):
         w = rules.InverseVolatility(("FAST", "SLOW"), lookback_days=60).weights(self.rising(), 60)
         self.assertNotAlmostEqual(w["FAST"], 0.5)
 
+    def test_inverse_volatility_raises_on_a_non_positive_price_instead_of_dropping_it(self):
+        # rules._returns used to silently skip a non-positive price instead of
+        # raising, unlike MomentumTopN.weights' equivalent guard. A dropped
+        # return silently shortens the series statistics.stdev sees, producing
+        # a plausible-looking but wrong volatility estimate with no signal
+        # anything was wrong. object.__new__ bypasses PriceFrame's own
+        # construction-time validation on purpose, to reach this
+        # defense-in-depth check the same way the momentum test above does.
+        n = 100
+        dates = [date(2020, 1, 1) + timedelta(days=i) for i in range(n)]
+        closes = [[100.0 + i, 0.0 if i == 50 else 100.0] for i in range(n)]
+        frame = object.__new__(frame_mod.PriceFrame)
+        object.__setattr__(frame, "dates", tuple(dates))
+        object.__setattr__(frame, "symbols", ("FAST", "SLOW"))
+        object.__setattr__(frame, "closes", tuple(tuple(row) for row in closes))
+        rule = rules.InverseVolatility(("FAST", "SLOW"), lookback_days=60)
+        with self.assertRaisesRegex(ValueError, "non-positive"):
+            rule.weights(frame, 80)
+
     def ranking_fixture(self, n=400):
         # HIGH starts far above the other two but grows slowly; LOW starts
         # lowest but grows fastest in percentage terms; MID sits between both
@@ -813,18 +912,27 @@ class RuleFamilies(unittest.TestCase):
             rule.weights(self.rising(), 251)
 
     def test_momentum_raises_on_a_non_positive_formation_price_instead_of_dropping_it(self):
-        # frame_mod.build() cannot produce this (it validates every close), but
-        # PriceFrame itself is a bare frozen dataclass with no __post_init__, so
-        # direct construction bypasses that validation. Silently dropping the
-        # symbol from scoring turned a 3-name universe into a 2-name portfolio
-        # with the same {symbol: float} shape as a real 3-name one -- nothing
-        # downstream could tell the difference. It must raise instead, naming
-        # the symbol and the formation-start date.
+        # frame_mod.build() cannot produce this (it validates every close),
+        # and neither can constructing PriceFrame directly any more --
+        # __post_init__ now validates unconditionally (see PriceFrameContract
+        # / the frame.py __post_init__ docstring). object.__new__ bypasses
+        # __init__/__post_init__ on purpose here, to exercise MomentumTopN's
+        # own defense-in-depth check: it is unreachable through any public
+        # constructor today, but it is the second line of defense against a
+        # non-positive price and is kept for a stranger who copies this
+        # file's pattern, or a future PriceFrame that gains another
+        # construction path. Silently dropping the symbol from scoring turned
+        # a 3-name universe into a 2-name portfolio with the same
+        # {symbol: float} shape as a real 3-name one -- nothing downstream
+        # could tell the difference. It must raise instead, naming the symbol
+        # and the formation-start date.
         n = 400
         dates = [date(2020, 1, 1) + timedelta(days=i) for i in range(n)]
         closes = [[100.0 + i, 100.0 + i * 0.5, 0.0 if i == 98 else 100.0] for i in range(n)]
-        frame = frame_mod.PriceFrame(dates=tuple(dates), symbols=("FAST", "SLOW", "FLAT"),
-                                     closes=tuple(tuple(row) for row in closes))
+        frame = object.__new__(frame_mod.PriceFrame)
+        object.__setattr__(frame, "dates", tuple(dates))
+        object.__setattr__(frame, "symbols", ("FAST", "SLOW", "FLAT"))
+        object.__setattr__(frame, "closes", tuple(tuple(row) for row in closes))
         rule = rules.MomentumTopN(("FAST", "SLOW", "FLAT"), top_n=3, lookback_days=252, skip_days=21)
         with self.assertRaisesRegex(ValueError, "FLAT"):
             rule.weights(frame, 350)
@@ -881,6 +989,18 @@ class AdmissionGate(unittest.TestCase):
         report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS)
         self.assertFalse(report.admitted)
         self.assertTrue(any("2008" in f for f in report.failures))
+
+    def test_stress_year_shortfall_names_the_curve_start_date(self):
+        # A coverage shortfall alone ("123 of 253 sessions") does not say
+        # whether the strategy is broken or the frame's warm-up simply
+        # consumed the start of the stress year (universe.warmup_headroom_bars
+        # / ADR-0006). Attribute it: name where the curve actually starts.
+        r = engine.Result(rule_name="late-start", parameters={})
+        r.curve = [(date(2008, 7, 14) + timedelta(days=i), 100.0) for i in range(123)]
+        r.total_costs, r.rebalance_count = 10.0, 1
+        report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS)
+        self.assertFalse(report.admitted)
+        self.assertTrue(any("curve starts 2008-07-14" in f for f in report.failures), report.failures)
 
     def test_four_parameters_fail_rule_four(self):
         r = self.passing_result()
@@ -1140,6 +1260,54 @@ class CliContract(unittest.TestCase):
     def test_output_directory_is_gitignored_audit(self):
         import backtest_cli
         self.assertTrue(str(backtest_cli.DEFAULT_OUT_DIR).replace("\\", "/").endswith("data/audit"))
+
+    def _qualifying_series(self, symbol, start=date(2005, 1, 3), end=date(2023, 1, 1)):
+        from copilot.backtest import history
+        dates, d = [], start
+        while d < end:
+            if d.weekday() < 5:
+                dates.append(d)
+            d += timedelta(days=1)
+        closes = tuple(100.0 + i * 0.01 for i in range(len(dates)))
+        return history.Series(symbol=symbol, dates=tuple(dates), split_adjusted=closes,
+                              split_and_dividend_adjusted=closes, dropped_bars=0)
+
+    def test_verify_universe_uses_price_frame_helpers_not_hand_rolled_arithmetic(self):
+        # frame.PriceFrame.span_years()/sessions_in_year() were implemented,
+        # documented and unit-tested with no production caller; verify_universe
+        # hand-rolled the identical (last - first).days / 365.25 formula
+        # instead of using them.
+        import backtest_cli
+        source = Path(backtest_cli.__file__).read_text(encoding="utf-8")
+        self.assertIn(".span_years()", source)
+        self.assertIn(".sessions_in_year(", source)
+        self.assertNotIn("sum(1 for d in series.dates", source)
+
+    def test_verify_universe_defaults_to_default_candidates(self):
+        # universe.default_candidates() was likewise only called from its own
+        # test. verify_universe's default symbol set now comes from it instead
+        # of a second, independently maintained hardcoded set.
+        import contextlib
+        import io
+        import backtest_cli
+        from copilot.backtest import universe
+        with mock.patch.object(backtest_cli, "_fetch",
+                               side_effect=lambda s: self._qualifying_series(s)) as fetched, \
+             contextlib.redirect_stdout(io.StringIO()):
+            backtest_cli.verify_universe()
+        self.assertEqual(sorted(c.args[0] for c in fetched.call_args_list),
+                         list(universe.default_candidates()))
+
+    def test_verify_universe_checks_only_the_symbols_it_is_given(self):
+        import contextlib
+        import io
+        import backtest_cli
+        with mock.patch.object(backtest_cli, "_fetch",
+                               side_effect=lambda s: self._qualifying_series(s)) as fetched, \
+             contextlib.redirect_stdout(io.StringIO()):
+            problems = backtest_cli.verify_universe(["SPY", "QQQ"])
+        self.assertEqual(sorted(c.args[0] for c in fetched.call_args_list), ["QQQ", "SPY"])
+        self.assertEqual(problems, 0)
 
     def test_cross_check_script_is_never_imported_by_shipped_code(self):
         # Matched as an import statement, not as a substring: rules.py's own
