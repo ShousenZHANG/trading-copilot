@@ -379,6 +379,20 @@ class Metrics(unittest.TestCase):
         dd = metrics.max_drawdown(self.curve([100, 120, 60]))
         self.assertIsNone(dd.recovery_date)
         self.assertAlmostEqual(dd.depth, 0.5)
+        # Peak 01-03, curve ends 01-04 still underwater: duration is 1 day,
+        # peak to the end of the curve, not peak to the (nonexistent) trough.
+        self.assertEqual(dd.duration_days, 1)
+
+    def test_a_later_equally_deep_unrecovered_drawdown_beats_an_earlier_recovered_one(self):
+        # [100, 50, 100, 50]: the first 50%-drawdown (day0->day1) "recovers" at
+        # day2, but the second, equally deep and never recovered by the end of
+        # the curve, is the one a governance gate needs to see. A gate that
+        # reads recovery_date is not None to mean "worst drawdown is behind
+        # us" must not be fooled by the tie going to the earlier occurrence.
+        dd = metrics.max_drawdown(self.curve([100, 50, 100, 50]))
+        self.assertAlmostEqual(dd.depth, 0.5)
+        self.assertIsNone(dd.recovery_date)
+        self.assertEqual(dd.trough_date, date(2020, 1, 5))
 
     def test_flat_curve_has_zero_drawdown(self):
         dd = metrics.max_drawdown(self.curve([100, 100, 100]))
@@ -391,8 +405,50 @@ class Metrics(unittest.TestCase):
     def test_sharpe_is_zero_for_a_flat_curve(self):
         self.assertEqual(metrics.sharpe(self.curve([100, 100, 100, 100])), 0.0)
 
+    def test_sharpe_matches_a_hand_computed_ratio(self):
+        # Independently derived (not by calling cagr()/annual_volatility()):
+        # years = 363/365.25 = 0.9965777; cagr = (107/100)**(1/years)-1 =
+        # 0.0702486; daily returns [.05, -1/15, 8/56, -5/112] have
+        # stdev*sqrt(252) = 1.5249195; sharpe = cagr/vol = 0.0460671.
+        dates = [date(2020, 1, 2) + timedelta(days=91 * i) for i in range(5)]
+        curve = list(zip(dates, [100.0, 105.0, 98.0, 112.0, 107.0]))
+        self.assertAlmostEqual(metrics.sharpe(curve), 0.046067, places=6)
+
     def test_sharpe_declares_its_risk_free_rate(self):
         self.assertEqual(metrics.RISK_FREE_RATE, 0.0)
+
+    def test_non_positive_or_non_finite_value_is_rejected_everywhere(self):
+        # start 100.0, end -5.0 -- verified to make cagr() a complex number
+        # and let sharpe() swallow it behind the vol==0 guard before this fix.
+        curve = [(date(2020, 1, 2), 100.0), (date(2020, 1, 3), -5.0)]
+        for fn in (metrics.cagr, metrics.annual_volatility, metrics.sharpe, metrics.daily_returns):
+            with self.assertRaises(ValueError):
+                fn(curve)
+        with self.assertRaises(ValueError):
+            metrics.max_drawdown(curve)
+        nan_curve = [(date(2020, 1, 2), 100.0), (date(2020, 1, 3), float("nan"))]
+        with self.assertRaises(ValueError):
+            metrics.cagr(nan_curve)
+
+    def test_duplicate_or_unordered_dates_are_rejected(self):
+        duplicate = [(date(2020, 1, 3), 100.0), (date(2020, 1, 3), 101.0)]
+        unordered = [(date(2020, 1, 3), 100.0), (date(2020, 1, 2), 101.0)]
+        for curve in (duplicate, unordered):
+            with self.assertRaises(ValueError):
+                metrics.cagr(curve)
+            with self.assertRaises(ValueError):
+                metrics.max_drawdown(curve)
+
+    def test_a_single_bar_curve_stays_degenerate_not_malformed(self):
+        # _validated() must not reject what the existing 0.0/zero-depth
+        # defaults already handle -- a curve too short to carry a metric.
+        one_bar = [(date(2020, 1, 2), 100.0)]
+        self.assertEqual(metrics.cagr(one_bar), 0.0)
+        self.assertEqual(metrics.annual_volatility(one_bar), 0.0)
+        self.assertEqual(metrics.sharpe(one_bar), 0.0)
+        self.assertEqual(metrics.daily_returns(one_bar), [])
+        self.assertEqual(metrics.max_drawdown(one_bar).depth, 0.0)
+        self.assertEqual(metrics.max_drawdown([]).depth, 0.0)
 
     def test_annual_volatility_annualises_by_sqrt_252(self):
         import math
@@ -411,7 +467,7 @@ class Metrics(unittest.TestCase):
 
     def test_window_slices_a_calendar_year(self):
         curve = [(date(2007, 12, 31), 100.0), (date(2008, 6, 1), 60.0), (date(2009, 1, 2), 90.0)]
-        self.assertEqual(len(metrics.window(curve, 2008)), 1)
+        self.assertEqual(metrics.window(curve, 2008), [(date(2008, 6, 1), 60.0)])
 
 
 class CostModel(unittest.TestCase):
@@ -430,6 +486,19 @@ class CostModel(unittest.TestCase):
     def test_spread_is_half_the_quoted_width(self):
         model = engine.CostModel(spread_bps=4.0)
         self.assertAlmostEqual(model.spread(notional=10000.0), 2.00)
+
+    def test_zero_cap_means_cap_at_zero_not_uncapped(self):
+        # max_pct_of_notional=0.0 must be a real cap, not falsy-for-"no cap":
+        # otherwise a deliberately zero-capped model silently charges full
+        # commission (1.00 here) instead of the intended 0.0.
+        model = engine.CostModel(per_share_usd=0.0035, minimum_usd=1.00,
+                                 max_pct_of_notional=0.0, spread_bps=0.0)
+        self.assertEqual(model.commission(shares=10, notional=50.0), 0.0)
+
+    def test_free_is_genuinely_uncapped_not_capped_at_zero(self):
+        model = engine.CostModel.free()
+        self.assertIsNone(model.max_pct_of_notional)
+        self.assertEqual(model.commission(shares=1_000_000, notional=1_000_000.0), 0.0)
 
 
 class EngineLoop(unittest.TestCase):
@@ -479,17 +548,46 @@ class EngineLoop(unittest.TestCase):
                    cost_model=engine.CostModel.free(), cash_floor_pct=0.0)
         self.assertTrue(all(i < 10 for i in seen))
         self.assertEqual(max(seen), 9)
+        # max(seen) == 9 alone would pass for a rule only ever asked about
+        # bars {0, 9}. Every index must actually have been visited.
+        self.assertEqual(sorted(set(seen)), list(range(10)))
 
     def test_weights_that_do_not_sum_to_one_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "sum"):
             engine.run(self.flat_frame(), rule=engine.StaticWeights({"AAA": 0.9}),
                        start_cash=1000.0, cost_model=engine.CostModel.free(), cash_floor_pct=0.0)
 
+    def test_nan_weight_is_rejected_naming_the_symbol(self):
+        # With integer_shares=False (a supported path) a NaN weight otherwise
+        # sails through both the sum check and the negative check -- IEEE-754
+        # makes every comparison against NaN false -- and produces a curve of
+        # all-NaN values with zero exceptions raised.
+        frame = self.flat_frame(2)
+        with self.assertRaisesRegex(ValueError, "AAA"):
+            engine._validate({"AAA": float("nan")}, frame)
+        with self.assertRaises(ValueError):
+            engine.run(frame, rule=engine.StaticWeights({"AAA": float("nan")}),
+                       start_cash=1000.0, cost_model=engine.CostModel.free(),
+                       cash_floor_pct=0.0, integer_shares=False)
+
+    def test_run_raises_when_a_bar_value_turns_non_positive(self):
+        # A cost model with an uncapped, huge minimum fee and a single-dollar
+        # start turns portfolio value negative on bar 0. That must raise
+        # rather than silently hand a negative "equity curve" to a caller.
+        frame = frame_mod.build(dates=[date(2020, 1, 1)], symbols=["AAA"], closes=[[1.0]])
+        ruinous = engine.CostModel(per_share_usd=0.0, minimum_usd=1000.0,
+                                   max_pct_of_notional=None, spread_bps=0.0)
+        with self.assertRaisesRegex(ValueError, "portfolio value"):
+            engine.run(frame, rule=engine.StaticWeights({"AAA": 1.0}), start_cash=1.0,
+                       cost_model=ruinous, cash_floor_pct=0.0)
+
     def test_result_reports_traded_notional_for_turnover(self):
         result = engine.run(self.flat_frame(), rule=engine.StaticWeights({"AAA": 1.0}),
                             start_cash=10000.0, cost_model=engine.CostModel.free(),
                             cash_floor_pct=0.0)
-        self.assertGreater(result.traded_notional, 0.0)
+        # 10000 cash, AAA@100, 100% target, no costs: buys exactly 100 shares
+        # on bar 0 and never trades again on a flat book -- 100 * 100 = 10000.
+        self.assertAlmostEqual(result.traded_notional, 10000.0)
 
 
 if __name__ == "__main__":

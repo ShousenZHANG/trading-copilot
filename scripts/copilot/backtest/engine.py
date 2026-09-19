@@ -7,6 +7,7 @@ comment, because look-ahead is the failure that makes a backtest look good.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Protocol, Sequence
@@ -61,21 +62,28 @@ class CostModel:
     USD 0.0035 per share, USD 1.00 minimum per order, capped at 1% of trade
     value. The spread term is a modelling assumption, not a fee: 2bp round-trip
     on liquid US ETFs, charged as half on each side.
+
+    `max_pct_of_notional` is `float | None`: `None` means uncapped, and any
+    float -- including `0.0` -- is applied as a real cap. Treating `0.0` as
+    falsy ("no cap" instead of "cap at zero") let a deliberately zero-capped
+    model silently charge full commission instead of nothing.
     """
     per_share_usd: float = 0.0035
     minimum_usd: float = 1.00
-    max_pct_of_notional: float = 0.01
+    max_pct_of_notional: float | None = 0.01
     spread_bps: float = 2.0
 
     @classmethod
     def free(cls) -> "CostModel":
-        return cls(per_share_usd=0.0, minimum_usd=0.0, max_pct_of_notional=0.0, spread_bps=0.0)
+        return cls(per_share_usd=0.0, minimum_usd=0.0, max_pct_of_notional=None, spread_bps=0.0)
 
     def commission(self, *, shares: float, notional: float) -> float:
         if shares <= 0 or notional <= 0:
             return 0.0
         fee = max(self.minimum_usd, self.per_share_usd * shares)
-        return min(fee, self.max_pct_of_notional * notional) if self.max_pct_of_notional else fee
+        if self.max_pct_of_notional is None:
+            return fee
+        return min(fee, self.max_pct_of_notional * notional)
 
     def spread(self, *, notional: float) -> float:
         return notional * (self.spread_bps / 10000.0) / 2.0
@@ -111,6 +119,8 @@ def _validate(targets: dict[str, float], frame: PriceFrame) -> None:
     if abs(total - 1.0) > WEIGHT_TOLERANCE:
         raise ValueError(f"target weights must sum to 1.0, got {total:.9f}")
     for symbol, weight in targets.items():
+        if not math.isfinite(weight):
+            raise ValueError(f"{symbol}: weight must be finite, got {weight}")
         if weight < 0:
             raise ValueError(f"{symbol}: negative weight {weight}; this sleeve is long-only")
         frame.index_of(symbol)
@@ -157,6 +167,13 @@ def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostMod
             positions = {s: q for s, q in desired.items() if q > 0}
             result.rebalance_count += 1
             value = cash + sum(qty * prices[sym] for sym, qty in positions.items())
+        # This is the invariant metrics._validated depends on downstream, so
+        # it is enforced where the value is produced, not only where it is
+        # consumed. Cash alone may dip a few dollars below the floor (the
+        # documented wart above); total value must not, and never NaN/inf.
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(
+                f"bar {i} ({when}): portfolio value must be finite and positive, got {value}")
         result.curve.append((when, value))
         result.cash_history.append(cash)
         result.positions_history.append(dict(positions))
