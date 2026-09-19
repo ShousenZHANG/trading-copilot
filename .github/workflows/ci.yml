@@ -193,6 +193,7 @@ jobs:
                     if "positions.md" in n or "trading_memory" in n
                     or n.endswith(".env") or "/data/runs/" in n
                     or "/data/decisions/" in n or "/data/state/" in n
+                    or "config/user.toml" in n
                     or n.endswith((".sqlite", ".sqlite-wal", ".sqlite-shm")) or "portfolio_state.json" in n]
           if leaked:
               sys.exit("personal state leaked into zip: " + ", ".join(leaked))

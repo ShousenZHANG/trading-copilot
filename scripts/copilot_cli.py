@@ -45,6 +45,8 @@ def main() -> int:
     record.add_argument("--idempotency-key", required=True)
     backup = sub.add_parser("backup")
     backup.add_argument("destination")
+    show = sub.add_parser("config", help="print validated config/user.toml as JSON")
+    show.add_argument("--path", default=None)
     args = parser.parse_args()
     try:
         if args.command == "snapshot":
@@ -59,6 +61,9 @@ def main() -> int:
             result = service.review(args.snapshot_id, read_object(args.input), db_path=args.db)
         elif args.command == "record":
             result = service.record(read_object(args.input), args.idempotency_key, db_path=args.db)
+        elif args.command == "config":
+            from copilot.config import as_dict, load_config
+            result = as_dict(load_config(args.path))
         else:
             from copilot.journal import backup
             result = backup(args.destination, db_path=service.database_path(args.db))

@@ -414,6 +414,7 @@ def check_private_state_not_tracked() -> None:
                 "data/decisions",
                 "data/positions.md",
                 "docs/strategy.md",
+                "config/user.toml",
                 ".env",
             ],
             cwd=ROOT,

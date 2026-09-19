@@ -22,6 +22,9 @@ data/decisions/
 docs/strategy.md
 docs/strategy-checklist.md
 
+# Personal adopted parameters (universe, capital, constraints). The example ships; this does not.
+config/user.toml
+
 # Release build artifacts
 dist/
 *.zip

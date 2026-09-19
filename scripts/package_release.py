@@ -84,6 +84,7 @@ INCLUDE_PATHS = [
     ".mcp.json",
     ".mcp.json.template",
     ".env.example",
+    "config/user.example.toml",
     ".gitignore",
     # .github/ is deliberately NOT shipped: CI config is repo infrastructure, not
     # plugin content, and a user unzipping this should not inherit our schedules.
@@ -116,6 +117,7 @@ EXCLUDE_PATTERNS = [
     "data/decisions/*", "data/runs/*", "data/audit/*",
     "data/state/*", "*.sqlite", "*.sqlite-wal", "*.sqlite-shm", "*.db",
     "docs/strategy.md", "docs/strategy-checklist.md",
+    "config/user.toml",
     "evals/results/*", "evals/cache/*",
 ]
 
@@ -193,7 +195,7 @@ def _forbidden_archive_name(name: str) -> bool:
         return True
     if "trading_memory.md" in low:
         return True
-    return any(part in low for part in ("/data/decisions/", "/data/runs/", "/data/state/", "/data/audit/")) or low.endswith((".sqlite", ".sqlite-wal", ".sqlite-shm", ".db", "/docs/strategy.md", "/docs/strategy-checklist.md"))
+    return any(part in low for part in ("/data/decisions/", "/data/runs/", "/data/state/", "/data/audit/")) or low.endswith((".sqlite", ".sqlite-wal", ".sqlite-shm", ".db", "/docs/strategy.md", "/docs/strategy-checklist.md", "/config/user.toml"))
 
 
 def _audit_zip(out: Path) -> list[str]:
@@ -333,12 +335,16 @@ def _self_test() -> int:
         ("dotenv excluded", _excluded(".env")),
         ("journal and WAL excluded", _excluded("data/state/copilot.sqlite") and _excluded("any/copilot.sqlite-wal")),
         ("private strategy excluded", _excluded("docs/strategy.md")),
+        ("private config excluded", _excluded("config/user.toml")),
+        ("example config kept", not _excluded("config/user.example.toml")),
+        ("archive leak: private config member",
+            _forbidden_archive_name("trading-copilot/config/user.toml")),
         ("local settings excluded", _excluded(".claude/settings.local.json")),
         ("nested __pycache__ excluded", _excluded("scripts/__pycache__/runtime.cpython-312.pyc")),
         ("allowed path kept: README.md", not _excluded("README.md")),
         ("allowed nested path kept: a skill file",
-            not _excluded(".claude/skills/trading-copilot/SKILL.md")),
-        ("allowed nested path kept: a script", not _excluded("scripts/montecarlo.py")),
+            not _excluded(".claude/skills/investment-chat/SKILL.md")),
+        ("allowed nested path kept: a script", not _excluded("scripts/copilot_cli.py")),
         ("allowed path kept: .env.example", not _excluded(".env.example")),
         ("allowed path kept: watchlist", not _excluded("data/watchlist.md")),
         ("windows separators normalised", _excluded("data\\runs\\NVDA-2026-04-27\\01-market.md")),
