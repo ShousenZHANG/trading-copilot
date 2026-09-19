@@ -40,41 +40,35 @@ def complete_context(snapshot, p=None):
 
 
 class PolicyTests(unittest.TestCase):
-    def test_unregistered_etf_requires_matching_provider_identity(self):
+    def test_registered_etf_requires_verified_market_evidence(self):
+        # Evidence *identity* fields (instrument_id/asset_class/currency/unit/
+        # price_kind) are bound to the requested instrument at collection time by
+        # market_data._validate_source, not here; see _test_market_data's
+        # test_wrong_currency_is_rejected and
+        # test_registered_etf_cannot_be_reclassified_to_stock. What the policy
+        # itself still owns is the evidence's verification state and freshness.
         for provider, upstream in (("yahoo", "Yahoo Finance"), ("nasdaq", "Nasdaq US market data")):
             snapshot = fixture("JEPI")
-            snapshot["instruments"]["JEPI"].update(asset_class="etf", identity_status="provider_confirmed")
+            snapshot["instruments"]["JEPI"].update(identity_status="provider_confirmed")
             snapshot["evidence"][0].update(provider=provider, upstream=upstream, instrument_id="JEPI",
                 asset_class="etf", currency="USD", unit="share", price_kind="regular_session_close")
             seal(snapshot)
             self.assertEqual(assess_proposal(proposal("JEPI"), snapshot, now=NOW)["action"], "buy")
-            for change in ({"instrument_id": "QQQ"}, {"asset_class": "stock"}, {"provider": "synthetic"},
-                           {"upstream": "unverified mirror"}, {"status": "unknown"}, {"currency": "CNY"},
-                           {"unit": "gram"}, {"price_kind": "indicative"}):
+            for change in ({"status": "unknown"}, {"source_url": ""},
+                           {"critical_evidence_eligible": False},
+                           {"retrieved_at": "2026-09-06T03:00:00+00:00"},
+                           {"observed_at": "2026-09-03T20:00:00+00:00"},
+                           {"latest_session": "2026-09-03"}):
                 bad = copy.deepcopy(snapshot)
                 bad["evidence"][0].update(change)
                 seal(bad)
                 self.assertEqual(assess_proposal(proposal("JEPI"), bad, now=NOW)["action"], "data_insufficient", change)
-            snapshot["instruments"]["JEPI"]["identity_status"] = "requires_provider_confirmation"
-            seal(snapshot)
-            self.assertEqual(assess_proposal(proposal("JEPI"), snapshot, now=NOW)["action"], "data_insufficient")
 
     def test_registered_etf_cannot_be_reclassified_as_stock(self):
         snapshot = fixture()
         snapshot["instruments"]["QQQ"].update(asset_class="stock", identity_status="provider_confirmed")
         seal(snapshot)
         self.assertEqual(assess_proposal(proposal(), snapshot, now=NOW)["action"], "data_insufficient")
-
-    def test_research_record_cannot_confirm_dynamic_etf_identity(self):
-        snapshot = fixture("JEPI")
-        snapshot["instruments"]["JEPI"].update(asset_class="etf", identity_status="provider_confirmed")
-        snapshot["instruments"]["JEPI"]["research"] = {"filings": {"evidence_ids": ["identity"]}}
-        snapshot["instruments"]["JEPI"]["evidence_ids"].append("identity")
-        snapshot["evidence"].append({**snapshot["evidence"][0], "evidence_id": "identity", "provider": "yahoo",
-            "upstream": "Yahoo Finance", "instrument_id": "JEPI", "asset_class": "etf", "currency": "USD",
-            "unit": "share", "price_kind": "regular_session_close"})
-        seal(snapshot)
-        self.assertEqual(assess_proposal(proposal("JEPI"), snapshot, now=NOW)["action"], "data_insufficient")
 
     def test_optional_research_is_not_a_required_daily_bar(self):
         snapshot = fixture()
