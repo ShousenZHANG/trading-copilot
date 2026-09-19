@@ -28,6 +28,15 @@ class Rule(Protocol):
     name: str
     parameters: dict[str, float]
 
+    #: Bars `i < warmup_bars` are never shown to this rule at all -- the engine
+    #: skips them outright, with no curve point, no cash entry, no positions
+    #: entry, and no `should_rebalance`/`weights` call. A rule whose `weights`
+    #: needs a trailing window (a lookback) declares that window's length here
+    #: rather than filling the gap with a fallback basket that looks like a
+    #: real answer but is not one. Default 0: a rule with no lookback needs no
+    #: warm-up.
+    warmup_bars: int = 0
+
     def weights(self, frame: PriceFrame, i: int) -> dict[str, float]:
         """Target weights for bar `i`, summing to 1.0. Look backwards only."""
 
@@ -41,6 +50,7 @@ class StaticWeights:
     """Test fixture rule: constant targets, rebalanced every bar."""
     targets: dict[str, float]
     name: str = "static"
+    warmup_bars: int = 0
 
     @property
     def parameters(self) -> dict[str, float]:
@@ -136,6 +146,10 @@ def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostMod
     positions: dict[str, float] = {}
     last_rebalance_index: int | None = None
     for i, when in enumerate(frame.dates):
+        if i < rule.warmup_bars:
+            # No curve point, no cash entry, no positions entry: a bar the
+            # rule was never shown must not appear as if it had been traded.
+            continue
         prices = frame.row(i)
         value = cash + sum(qty * prices[sym] for sym, qty in positions.items())
         current = {sym: (qty * prices[sym]) / value for sym, qty in positions.items()} if value else {}
@@ -155,17 +169,25 @@ def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostMod
             for symbol, weight in targets.items():
                 raw = (investable * weight) / prices[symbol]
                 desired[symbol] = float(int(raw)) if integer_shares else raw
+            # rebalance_count reports trades, not attempts: should_rebalance
+            # firing every bar while every target rounds to zero shares (a
+            # tiny book against expensive holdings) is zero rebalances, not
+            # one per bar. Tracked locally because the delta loop is the only
+            # place that knows whether a share actually moved.
+            executed_trade = False
             for symbol in set(positions) | set(desired):
                 delta = desired.get(symbol, 0.0) - positions.get(symbol, 0.0)
                 if abs(delta) < 1e-9:
                     continue
+                executed_trade = True
                 notional = abs(delta) * prices[symbol]
                 cost = cost_model.total(shares=abs(delta), notional=notional)
                 cash -= delta * prices[symbol] + cost
                 result.traded_notional += notional
                 result.total_costs += cost
             positions = {s: q for s, q in desired.items() if q > 0}
-            result.rebalance_count += 1
+            if executed_trade:
+                result.rebalance_count += 1
             value = cash + sum(qty * prices[sym] for sym, qty in positions.items())
         # This is the invariant metrics._validated depends on downstream, so
         # it is enforced where the value is produced, not only where it is

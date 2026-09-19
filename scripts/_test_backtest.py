@@ -590,6 +590,42 @@ class EngineLoop(unittest.TestCase):
         # on bar 0 and never trades again on a flat book -- 100 * 100 = 10000.
         self.assertAlmostEqual(result.traded_notional, 10000.0)
 
+    def test_rebalance_count_only_counts_bars_that_actually_traded(self):
+        # 500 bars, $100 cash against a $1000/share price: every target rounds
+        # down to zero shares, so should_rebalance fires every bar but nothing
+        # ever trades. Before the fix this reported rebalance_count=500 -- the
+        # count said "traded constantly" when the true answer is zero.
+        frame = frame_mod.build(dates=[date(2020, 1, 1) + timedelta(days=i) for i in range(500)],
+                                symbols=["AAA"], closes=[[1000.0]] * 500)
+        result = engine.run(frame, rule=engine.StaticWeights({"AAA": 1.0}), start_cash=100.0,
+                            cost_model=engine.CostModel.free(), cash_floor_pct=0.0)
+        self.assertEqual(result.rebalance_count, 0)
+        self.assertEqual(result.total_costs, 0.0)
+
+    def test_warmup_bars_are_skipped_entirely_by_the_engine(self):
+        # Bars i < warmup_bars must produce no curve point, no cash entry, and
+        # no positions entry -- not just an un-rebalanced entry -- because a
+        # rule with a lookback (InverseVolatility, MomentumTopN) cannot compute
+        # a real answer there and must never be asked to.
+        frame = self.flat_frame(100)
+        rule = rules.InverseVolatility(("AAA", "BBB"), lookback_days=60, rebalance_days=21)
+        result = engine.run(frame, rule=rule, start_cash=10000.0, cost_model=engine.CostModel.free(),
+                            cash_floor_pct=0.0)
+        self.assertEqual(len(result.curve), 100 - 60)
+        self.assertEqual(len(result.cash_history), 100 - 60)
+        self.assertEqual(len(result.positions_history), 100 - 60)
+        self.assertEqual(result.curve[0][0], frame.dates[60])
+
+    def test_momentum_warmup_matches_its_lookback_in_a_full_engine_run(self):
+        frame = frame_mod.build(dates=[date(2020, 1, 1) + timedelta(days=i) for i in range(300)],
+                                symbols=["AAA", "BBB", "CCC"],
+                                closes=[[100.0 + i, 100.0 + i * 0.5, 100.0] for i in range(300)])
+        rule = rules.MomentumTopN(("AAA", "BBB", "CCC"), top_n=2, lookback_days=252, skip_days=21)
+        result = engine.run(frame, rule=rule, start_cash=10000.0, cost_model=engine.CostModel.free(),
+                            cash_floor_pct=0.0)
+        self.assertEqual(len(result.curve), 300 - 252)
+        self.assertEqual(result.curve[0][0], frame.dates[252])
+
 
 class RuleFamilies(unittest.TestCase):
     def rising(self, n=400):
@@ -625,11 +661,31 @@ class RuleFamilies(unittest.TestCase):
         self.assertFalse(rule.should_rebalance(frame, 50, {"FAST": 0.54, "SLOW": 0.46}, 0))
         self.assertTrue(rule.should_rebalance(frame, 50, {"FAST": 0.56, "SLOW": 0.44}, 0))
 
-    def test_bands_bootstrap_on_the_first_bar(self):
-        # bt 1.2.3's RunIfOutOfBounds returns False at bar 0 because children do
-        # not exist yet, and the whole backtest sits in cash. Ours must not.
+    def test_bands_bootstrap_when_there_is_no_prior_rebalance(self):
+        # Isolates the `last_rebalance_index is None` disjunct: current already
+        # matches targets exactly, so the drift loop alone would say "nothing to
+        # do" -- but bar 0 never having rebalanced must still force one. This is
+        # the bug that leaves bt 1.2.3 in 100% cash for an entire backtest.
         rule = rules.FixedWeightBands({"FAST": 0.5, "SLOW": 0.5})
-        self.assertTrue(rule.should_rebalance(self.rising(), 0, {}, None))
+        self.assertTrue(rule.should_rebalance(self.rising(), 0, {"FAST": 0.5, "SLOW": 0.5}, None))
+
+    def test_bands_bootstrap_when_current_holdings_are_empty(self):
+        # Isolates the `not current` disjunct: last_rebalance_index is set, but
+        # the book holds nothing (every target rounded to zero shares). Bands
+        # wide enough that "drift from empty" would not fire on its own must
+        # still force a rebalance -- an empty book is never "on target".
+        rule = rules.FixedWeightBands({"FAST": 0.5, "SLOW": 0.5}, relative_band=2.0,
+                                      absolute_band=0.6, calendar_days=10**6)
+        self.assertTrue(rule.should_rebalance(self.rising(), 50, {}, 0))
+
+    def test_bands_rogue_holding_absent_from_targets_triggers_rebalance(self):
+        # A holding with no entry in `targets` at all (spun off into the book,
+        # a manual trade, a bug upstream) has an implicit target of 0.0 and must
+        # be able to trigger a rebalance like any drifted symbol -- iterating
+        # self.targets alone made it invisible to the band check.
+        rule = rules.FixedWeightBands({"FAST": 1.0}, relative_band=1.0, absolute_band=0.05,
+                                      calendar_days=10**6)
+        self.assertTrue(rule.should_rebalance(self.rising(), 50, {"FAST": 1.0, "ROGUE": 10.0}, 0))
 
     def test_calendar_leg_fires_after_the_interval(self):
         rule = rules.FixedWeightBands({"FAST": 0.5, "SLOW": 0.5}, relative_band=1.0,
@@ -652,15 +708,59 @@ class RuleFamilies(unittest.TestCase):
         self.assertGreater(w["FLAT"], w["FAST"])
         self.assertAlmostEqual(sum(w.values()), 1.0)
 
-    def test_inverse_volatility_before_the_lookback_is_equal_weighted(self):
-        w = rules.InverseVolatility(("FAST", "SLOW"), lookback_days=60).weights(self.rising(), 5)
-        self.assertAlmostEqual(w["FAST"], 0.5)
+    def test_inverse_volatility_matches_a_hand_computed_weight(self):
+        # Pins the exact formula, not just an ordering: swapping inverse-stdev
+        # for inverse-variance would still pass test_..._more_weight above but
+        # fails this. FAST's 60-return stdev at i=300 is 0.00012853613134237014
+        # (hand-computed from the fixture's closed form 1/(99+t)); FLAT's is
+        # exactly 0.0 and floors to MIN_DAILY_VOLATILITY, so
+        # inverse[FLAT]=1e6, inverse[FAST]=1/0.00012853613134237014, and the
+        # normalized weights are these two constants to 9 decimal places.
+        w = rules.InverseVolatility(("FAST", "FLAT"), lookback_days=60).weights(self.rising(), 300)
+        self.assertAlmostEqual(w["FAST"], 0.007719853832572416, places=9)
+        self.assertAlmostEqual(w["FLAT"], 0.9922801461674277, places=9)
+
+    def test_inverse_volatility_raises_before_the_lookback_window_is_full(self):
+        # Was: falls back to equal weighting below the lookback, an alphabetical-
+        # style plausible wrong answer. warmup_bars=lookback_days means the
+        # engine must never call weights() here; a direct call still must not
+        # return a silently equal-weighted basket -- it must refuse.
+        rule = rules.InverseVolatility(("FAST", "SLOW"), lookback_days=60)
+        with self.assertRaisesRegex(ValueError, "warmup_bars"):
+            rule.weights(self.rising(), 59)
+
+    def test_inverse_volatility_computes_a_real_answer_at_exactly_the_warmup_bar(self):
+        # Off-by-one fix: start = i - lookback_days = 0 at i == lookback_days is
+        # a complete 61-price / 60-return window, not a partial one. The old
+        # `start < 1` threshold fell back to equal weighting here even though
+        # the data was complete.
+        w = rules.InverseVolatility(("FAST", "SLOW"), lookback_days=60).weights(self.rising(), 60)
+        self.assertNotAlmostEqual(w["FAST"], 0.5)
+
+    def ranking_fixture(self, n=400):
+        # HIGH starts far above the other two but grows slowly; LOW starts
+        # lowest but grows fastest in percentage terms; MID sits between both
+        # ways. At bar 350 (formation window 98..329, computed below), ranking
+        # by raw end price gives HIGH > MID > LOW, but ranking by percentage
+        # return over the formation window gives LOW > MID > HIGH -- the two
+        # orderings disagree, which is the point: a bug that ranks by end price
+        # instead of by return would pick the wrong top-N and this fixture
+        # catches it, unlike a fixture where every symbol starts at the same
+        # price (there the two orderings coincide by construction).
+        dates = [date(2020, 1, 1) + timedelta(days=i) for i in range(n)]
+        closes = [[1000.0 + i * 0.05, 200.0 + i * 0.5, 50.0 + i * 0.3] for i in range(n)]
+        return frame_mod.build(dates=dates, symbols=["HIGH", "MID", "LOW"], closes=closes)
 
     def test_momentum_picks_the_strongest_and_equal_weights_them(self):
-        w = rules.MomentumTopN(("FAST", "SLOW", "FLAT"), top_n=2,
-                               lookback_days=252, skip_days=21).weights(self.rising(), 350)
-        self.assertEqual(set(w), {"FAST", "SLOW"})
-        self.assertAlmostEqual(w["FAST"], 0.5)
+        # Formation window (98, 329): HIGH 1004.9->1016.45 = +1.15%,
+        # MID 249->364.5 = +46.39%, LOW 79.4->148.7 = +87.28%. Return-ranked
+        # top 2 are LOW and MID; end-price-ranked top 2 would wrongly be
+        # HIGH and MID.
+        w = rules.MomentumTopN(("HIGH", "MID", "LOW"), top_n=2,
+                               lookback_days=252, skip_days=21).weights(self.ranking_fixture(), 350)
+        self.assertEqual(set(w), {"LOW", "MID"})
+        self.assertAlmostEqual(w["LOW"], 0.5)
+        self.assertAlmostEqual(w["MID"], 0.5)
 
     def test_momentum_skips_the_most_recent_month(self):
         # Faber 2007 / Antonacci 12-1: the skip is what makes it momentum rather
@@ -674,6 +774,55 @@ class RuleFamilies(unittest.TestCase):
         w = rules.MomentumTopN(("FAST", "SLOW", "FLAT"), top_n=1).weights(self.rising(), 350)
         self.assertAlmostEqual(sum(w.values()), 1.0)
         self.assertNotIn("CASH", w)
+
+    def test_momentum_raises_before_the_formation_window_is_full(self):
+        # Was: sorted(universe)[:top_n], an alphabetical portfolio indistinguishable
+        # from a real one by schema alone. warmup_bars=lookback_days means the
+        # engine must never call weights() here; a direct call still must refuse
+        # rather than hand back a plausible-looking basket.
+        rule = rules.MomentumTopN(("FAST", "SLOW"), lookback_days=252, skip_days=21)
+        with self.assertRaisesRegex(ValueError, "warmup_bars"):
+            rule.weights(self.rising(), 251)
+
+    def test_momentum_raises_on_a_non_positive_formation_price_instead_of_dropping_it(self):
+        # frame_mod.build() cannot produce this (it validates every close), but
+        # PriceFrame itself is a bare frozen dataclass with no __post_init__, so
+        # direct construction bypasses that validation. Silently dropping the
+        # symbol from scoring turned a 3-name universe into a 2-name portfolio
+        # with the same {symbol: float} shape as a real 3-name one -- nothing
+        # downstream could tell the difference. It must raise instead, naming
+        # the symbol and the formation-start date.
+        n = 400
+        dates = [date(2020, 1, 1) + timedelta(days=i) for i in range(n)]
+        closes = [[100.0 + i, 100.0 + i * 0.5, 0.0 if i == 98 else 100.0] for i in range(n)]
+        frame = frame_mod.PriceFrame(dates=tuple(dates), symbols=("FAST", "SLOW", "FLAT"),
+                                     closes=tuple(tuple(row) for row in closes))
+        rule = rules.MomentumTopN(("FAST", "SLOW", "FLAT"), top_n=3, lookback_days=252, skip_days=21)
+        with self.assertRaisesRegex(ValueError, "FLAT"):
+            rule.weights(frame, 350)
+
+    def test_inverse_volatility_should_rebalance_bootstraps_and_respects_interval(self):
+        # Zero coverage before this: replacing the body with `return False` or
+        # `return True` left every existing test passing.
+        rule = rules.InverseVolatility(("FAST", "SLOW"), rebalance_days=21)
+        frame = self.rising()
+        self.assertTrue(rule.should_rebalance(frame, 100, {}, None))
+        self.assertFalse(rule.should_rebalance(frame, 100, {}, 90))
+        self.assertTrue(rule.should_rebalance(frame, 111, {}, 90))
+
+    def test_momentum_should_rebalance_bootstraps_and_respects_interval(self):
+        # Zero coverage before this: replacing the body with `return False` or
+        # `return True` left every existing test passing.
+        rule = rules.MomentumTopN(("FAST", "SLOW"), skip_days=21)
+        frame = self.rising()
+        self.assertTrue(rule.should_rebalance(frame, 300, {}, None))
+        self.assertFalse(rule.should_rebalance(frame, 300, {}, 290))
+        self.assertTrue(rule.should_rebalance(frame, 311, {}, 290))
+
+    def test_warmup_bars_matches_the_lookback_each_family_needs(self):
+        self.assertEqual(rules.FixedWeightBands({"FAST": 1.0}).warmup_bars, 0)
+        self.assertEqual(rules.InverseVolatility(("FAST",), lookback_days=40).warmup_bars, 40)
+        self.assertEqual(rules.MomentumTopN(("FAST",), lookback_days=200).warmup_bars, 200)
 
 
 if __name__ == "__main__":
