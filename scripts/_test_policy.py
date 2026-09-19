@@ -41,12 +41,12 @@ def complete_context(snapshot, p=None):
 
 class PolicyTests(unittest.TestCase):
     def test_registered_etf_requires_verified_market_evidence(self):
-        # Evidence *identity* fields (instrument_id/asset_class/currency/unit/
-        # price_kind) are bound to the requested instrument at collection time by
-        # market_data._validate_source, not here; see _test_market_data's
-        # test_wrong_currency_is_rejected and
-        # test_registered_etf_cannot_be_reclassified_to_stock. What the policy
-        # itself still owns is the evidence's verification state and freshness.
+        # Two independent gates. Verification state and freshness have always
+        # been the policy's own; the identity fields are bound here as well as
+        # at collection time (market_data._validate_source), so a snapshot that
+        # was not produced by the collector cannot cite evidence describing a
+        # different instrument. Provider/upstream are deliberately not checked:
+        # price sources are added over time and must not need a policy edit.
         for provider, upstream in (("yahoo", "Yahoo Finance"), ("nasdaq", "Nasdaq US market data")):
             snapshot = fixture("JEPI")
             snapshot["instruments"]["JEPI"].update(identity_status="provider_confirmed")
@@ -58,7 +58,10 @@ class PolicyTests(unittest.TestCase):
                            {"critical_evidence_eligible": False},
                            {"retrieved_at": "2026-09-06T03:00:00+00:00"},
                            {"observed_at": "2026-09-03T20:00:00+00:00"},
-                           {"latest_session": "2026-09-03"}):
+                           {"latest_session": "2026-09-03"},
+                           {"instrument_id": "QQQ"}, {"asset_class": "stock"},
+                           {"currency": "CNY"}, {"unit": "gram"},
+                           {"price_kind": "indicative"}):
                 bad = copy.deepcopy(snapshot)
                 bad["evidence"][0].update(change)
                 seal(bad)
