@@ -104,6 +104,18 @@ class InverseVolatility:
     rebalance_days: int = 21
     name: str = "inverse_volatility"
 
+    def __post_init__(self) -> None:
+        # statistics.stdev needs at least two returns, so the window needs at
+        # least three prices. A shorter lookback would raise from deep inside
+        # weights() on the first real bar rather than at construction.
+        if self.lookback_days < 2:
+            raise ValueError(f"lookback_days must be at least 2 to measure a standard "
+                             f"deviation, got {self.lookback_days}")
+        if self.rebalance_days < 1:
+            raise ValueError(f"rebalance_days must be at least 1, got {self.rebalance_days}")
+        if not self.universe:
+            raise ValueError("universe must hold at least one symbol")
+
     @property
     def parameters(self) -> dict[str, float]:
         return {"lookback_days": float(self.lookback_days),
@@ -157,6 +169,23 @@ class MomentumTopN:
     lookback_days: int = 252
     skip_days: int = 21
     name: str = "momentum_top_n"
+
+    def __post_init__(self) -> None:
+        # Without this, skip_days >= lookback_days makes formation_window's end
+        # index land at or before its start -- and a negative end wraps through
+        # Python's negative indexing to a bar near the END of the series, which
+        # is look-ahead dressed as a formation return. Refuse the construction
+        # rather than report the number it would produce.
+        if self.skip_days >= self.lookback_days:
+            raise ValueError(f"skip_days ({self.skip_days}) must be smaller than "
+                             f"lookback_days ({self.lookback_days}); the formation window "
+                             "would otherwise be empty or reversed")
+        if self.skip_days < 0:
+            raise ValueError(f"skip_days must not be negative, got {self.skip_days}")
+        # top_n larger than the universe is fine and means "hold them all";
+        # the slice in weights() already truncates. Zero or negative is not.
+        if self.top_n < 1:
+            raise ValueError(f"top_n must be at least 1, got {self.top_n}")
 
     @property
     def parameters(self) -> dict[str, float]:
