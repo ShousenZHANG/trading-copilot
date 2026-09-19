@@ -35,6 +35,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
@@ -48,9 +49,31 @@ except ImportError as exc:  # no SDK, OR an SDK major that moved FastMCP (2.x ->
     _MCP_IMPORT_ERROR = exc
     FastMCP = None  # type: ignore[assignment]
 
-API_KEY = os.environ.get("FINNHUB_API_KEY", "").strip()
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
 BASE_URL = "https://finnhub.io/api/v1"
 TIMEOUT_SECONDS = 15
+
+
+def _api_key() -> str:
+    """Read the key at call time, loading .env if the client injected nothing.
+
+    This used to be an import-time module constant. An MCP client expands
+    ${FINNHUB_API_KEY} from its own environment, so launching Claude Code
+    without sourcing .env injected an empty string and every tool on this
+    server returned HTTP 401 - including healthcheck. scripts/copilot/service.py
+    owns the allow-list and the .env parsing; this server must not keep a
+    second copy of either.
+    """
+    key = os.environ.get("FINNHUB_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        from copilot.service import load_credentials
+    except ImportError:
+        return ""
+    load_credentials()
+    return os.environ.get("FINNHUB_API_KEY", "").strip()
 
 
 class _NoServer:
@@ -68,21 +91,22 @@ mcp: Any = FastMCP("finnhub") if FastMCP is not None else _NoServer()
 
 
 def _require_key() -> None:
-    if not API_KEY:
+    if not _api_key():
         raise RuntimeError(
-            "FINNHUB_API_KEY environment variable not set. "
+            "FINNHUB_API_KEY is not set in the environment or in .env. "
             "Get a free key at https://finnhub.io/register and put it in .env."
         )
 
 
 def _redact(text: str) -> str:
     """Strip the API key from anything that may reach the model or a log."""
-    return text.replace(API_KEY, "<redacted>") if API_KEY else text
+    key = _api_key()
+    return text.replace(key, "<redacted>") if key else text
 
 
 def _get(endpoint: str, **params: Any) -> Any:
     _require_key()
-    params["token"] = API_KEY
+    params["token"] = _api_key()
     url = f"{BASE_URL}/{endpoint}"
     try:
         with httpx.Client(timeout=TIMEOUT_SECONDS) as client:
@@ -315,7 +339,7 @@ def healthcheck() -> dict:
             return {"ok": False, "reason": "Unexpected response shape", "result": result}
         # Deliberately no key material in the payload: the result is returned
         # verbatim to the model and lands in transcripts.
-        return {"ok": True, "aapl_price": result.get("c"), "key_configured": bool(API_KEY)}
+        return {"ok": True, "aapl_price": result.get("c"), "key_configured": bool(_api_key())}
     except Exception as e:
         return {"ok": False, "reason": _redact(str(e))}
 
@@ -327,7 +351,7 @@ def main() -> None:
               "pinned PEP 723 dependencies (mcp[cli]>=1.2.0,<2) are provisioned.",
               file=sys.stderr)
         raise SystemExit(2)
-    if not API_KEY:
+    if not _api_key():
         print(
             "WARNING: FINNHUB_API_KEY not set. Server will start but every tool will error.",
             file=sys.stderr,
