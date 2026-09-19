@@ -1,6 +1,6 @@
 ---
 name: investment-chat
-description: Give concise evidence-backed investment guidance in conversation for US stocks, ETFs, Nasdaq indexes, and Chinese RMB investment gold; record user-reported actual purchases/sales and retrieve holdings. Use for investment conversations or transaction updates, not repository development.
+description: Give concise evidence-backed investment guidance in conversation for registered US ETFs, Nasdaq indexes, and Chinese RMB investment gold; record user-reported actual purchases/sales and retrieve holdings. Use for investment conversations or transaction updates, not repository development.
 ---
 
 # Investment conversation
@@ -11,10 +11,11 @@ Read [the operation schema](references/operations.md) only when recording operat
 
 ## Recommendation
 
-1. Resolve the instrument: US ticker; `^NDX` Nasdaq-100; `^IXIC` Composite;
-   `QQQ`/`QQQM` ETF; `GOLD.CNY` China investment bars/coins in RMB. Ask when an
-   ambiguity affects the action. A bare request about Nasdaq can cover both
-   indexes and QQQ/QQQM. Preserve index versus tradable ETF identities.
+1. Resolve the instrument: a registered US ETF (the whitelist in
+   scripts/copilot/instruments.py — unknown tickers are rejected, never
+   provisionally accepted); `^NDX` Nasdaq-100 and `^IXIC` Composite as
+   benchmarks; `GOLD.CNY` Shanghai Gold Exchange Au99.99 in RMB. Ask when an
+   ambiguity affects the action. Preserve index versus tradable ETF identities.
 2. Read `get_investment_context`. Distinguish incomplete history from a complete
    portfolio. Read any user strategy supplied in this conversation/project.
 3. Call `collect_market_snapshot` for current evidence. Check every quality status,
