@@ -32,6 +32,7 @@ API docs: https://finnhub.io/docs/api
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -48,6 +49,12 @@ except ImportError as exc:  # no SDK, OR an SDK major that moved FastMCP (2.x ->
     # deleted mcp.server.fastmcp, and that distinction is the whole diagnosis.
     _MCP_IMPORT_ERROR = exc
     FastMCP = None  # type: ignore[assignment]
+
+# mcp.server.fastmcp raises the root logger to INFO, which makes httpx log every
+# request URL. Nothing this server sends is worth that risk, so httpx stays at
+# WARNING regardless of what the SDK does to the root logger.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -106,17 +113,22 @@ def _redact(text: str) -> str:
 
 def _get(endpoint: str, **params: Any) -> Any:
     _require_key()
-    params["token"] = _api_key()
     url = f"{BASE_URL}/{endpoint}"
+    # The token goes in a header, never the query string. mcp.server.fastmcp
+    # installs a RichHandler at INFO on the root logger, so httpx logs the full
+    # request URL on every call - a token in the query string is written to the
+    # server's stderr in clear text on every single request.
+    headers = {"X-Finnhub-Token": _api_key()}
     try:
         with httpx.Client(timeout=TIMEOUT_SECONDS) as client:
-            response = client.get(url, params=params)
+            response = client.get(url, params=params, headers=headers)
             response.raise_for_status()
             return response.json()
     except httpx.HTTPStatusError as e:
         body = _redact(e.response.text[:200])
-        # `from None`: the chained httpx exception carries the full request URL,
-        # and the URL carries ?token=<API_KEY>.
+        # `from None`: defence in depth. The URL no longer carries the token,
+        # but the chained httpx exception still carries full request context,
+        # and _redact() above covers an error body that echoes the key back.
         raise RuntimeError(
             f"Finnhub API error {e.response.status_code} for /{endpoint}: {body}"
         ) from None
