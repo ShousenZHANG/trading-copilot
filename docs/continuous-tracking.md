@@ -1,5 +1,11 @@
 # Continuous Tracking
 
+> **Partly historical (0.5.0).** <!-- historical --> The reasoning about why scheduled runs
+> belong on the local machine still holds and is recorded in
+> [ADR-0002](adr/0002-local-scheduling-and-evidence-only-stubs.md). The concrete commands
+> below invoke `scripts/memory.py`, deleted in 0.5.0 with the multi-agent pipeline; the
+> replacement scan and notification runner is not built yet.
+
 > Scheduled runs belong on the machine that holds the state. This document
 > explains why the GitHub Actions cron workflows were retired, and what replaced
 > them.

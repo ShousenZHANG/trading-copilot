@@ -57,7 +57,6 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Explicit allow-list of top-level paths to include (fail-closed).
 INCLUDE_PATHS = [
-    ".claude/agents",
     ".claude/commands",
     ".claude/skills",
     ".claude/config",
@@ -65,7 +64,6 @@ INCLUDE_PATHS = [
     ".claude-plugin",
     ".codex-plugin",
     ".codex/config.toml",
-    ".codex/agents",
     ".agents/skills",
     "skills",
     "AGENTS.md",
