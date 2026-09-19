@@ -35,11 +35,31 @@ class ProviderError(Exception):
         super().__init__(message)
 
 
+# Parameter names that carry a credential but contain none of the substrings
+# below. IBKR's Flex Web Service passes its token as a single character, `t`.
+_SECRET_PARAM_NAMES = frozenset({"t", "auth", "sig", "signature", "session", "sid", "pwd", "credential"})
+_SECRET_PARAM_SUBSTRINGS = ("key", "token", "secret", "password")
+
+
 def safe_url(url: str) -> str:
+    """Drop credential-bearing query parameters, then scrub any live secret value.
+
+    Two layers, because the first alone has failed: name matching cannot cover a
+    parameter name nobody has seen yet, and this URL is written into evidence
+    records and persisted by HttpClient._cache(). The second layer also covers a
+    credential that appears in the path rather than the query.
+    """
     parts = urlsplit(url)
     query = [(key, value) for key, value in parse_qsl(parts.query)
-             if not any(secret in key.lower() for secret in ("key", "token", "secret", "password"))]
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+             if key.lower() not in _SECRET_PARAM_NAMES
+             and not any(secret in key.lower() for secret in _SECRET_PARAM_SUBSTRINGS)]
+    cleaned = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+    # Imported here rather than at module scope: providers.py must stay
+    # importable on its own, and service.py is the higher layer.
+    from .service import secret_values
+    for value in secret_values():
+        cleaned = cleaned.replace(value, "[redacted]")
+    return cleaned
 
 
 def finite_number(value, *, positive: bool = False) -> float:
