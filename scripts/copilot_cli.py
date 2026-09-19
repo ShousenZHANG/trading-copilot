@@ -43,12 +43,6 @@ def main() -> int:
     record = sub.add_parser("record")
     record.add_argument("--input", default="-", help="operation JSON file or stdin")
     record.add_argument("--idempotency-key", required=True)
-    prepare = sub.add_parser("prepare-run")
-    prepare.add_argument("instruments", nargs="+")
-    prepare.add_argument("--mode", choices=("tactical", "accumulation"), default="tactical")
-    prepare.add_argument("--horizon", choices=("daily", "swing", "long_term"), default="daily")
-    resume = sub.add_parser("resume-run")
-    resume.add_argument("run_id")
     backup = sub.add_parser("backup")
     backup.add_argument("destination")
     args = parser.parse_args()
@@ -65,10 +59,6 @@ def main() -> int:
             result = service.review(args.snapshot_id, read_object(args.input), db_path=args.db)
         elif args.command == "record":
             result = service.record(read_object(args.input), args.idempotency_key, db_path=args.db)
-        elif args.command == "prepare-run":
-            result = service.prepare_run(args.instruments, mode=args.mode, horizon=args.horizon, db_path=args.db)
-        elif args.command == "resume-run":
-            result = service.resume_run(args.run_id, db_path=args.db)
         else:
             from copilot.journal import backup
             result = backup(args.destination, db_path=service.database_path(args.db))

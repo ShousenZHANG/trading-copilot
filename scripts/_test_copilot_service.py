@@ -82,16 +82,6 @@ class ServiceTests(unittest.TestCase):
                 service.review(value["snapshot_id"], proposal(), db_path=self.db, now=NOW)
         self.assertEqual(service.context(db_path=self.db)["recommendations"], [])
 
-    def test_tampered_resume_manifest_rejected(self):
-        run_id = "a" * 24
-        root = Path(self.temp.name)
-        path = root / "data/runs" / run_id
-        path.mkdir(parents=True)
-        (path / "manifest.json").write_text(json.dumps({"valid_until": "2099-01-01T00:00:00Z"}))
-        with patch.object(service, "ROOT", root):
-            with self.assertRaisesRegex(ValueError, "manifest changed"):
-                service.resume_run(run_id, db_path=self.db)
-
     def test_gold_and_index_views_keep_instrument_scope(self):
         for symbol, marker in [("^NDX", "指数研究观点"), ("GOLD.CNY", "黄金基准研究")]:
             value = fixture(symbol)

@@ -160,52 +160,6 @@ def render_decision(decision: dict, stored: dict) -> str:
     return "\n".join(lines)
 
 
-def prepare_run(instrument_ids: list[str], *, mode="tactical", horizon="daily", db_path=None) -> dict:
-    """Fresh evidence per invocation; resume is explicit, with checked version identity."""
-    collected = collect(instrument_ids, horizon, db_path=db_path)
-    current = context(db_path=db_path)
-    manifest = {"schema_version": 1, "snapshot_id": collected["snapshot_id"],
-                "portfolio_version": current["portfolio_version"], "mode": mode, "horizon": horizon,
-                "created_at": collected["created_at"], "valid_until": collected["valid_until"],
-                "instrument_ids": list(collected["instruments"]), "code_version": code_version()}
-    identity = hashlib.sha256(strict_json(manifest).encode()).hexdigest()[:24]
-    run_dir = ROOT / "data/runs" / identity
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "manifest.json").write_text(strict_json(manifest), encoding="utf-8")
-    (run_dir / "snapshot.json").write_text(strict_json(collected), encoding="utf-8")
-    return {"run_id": identity, "run_dir": str(run_dir), "manifest": manifest, "snapshot": collected}
-
-
-def code_version() -> str:
-    digest = hashlib.sha256()
-    files = list((ROOT / "scripts/copilot").glob("*.py"))
-    files.extend(ROOT / path for path in ("mcps/copilot_mcp.py", "scripts/copilot_cli.py", ".mcp.json"))
-    for folder in (".claude/agents", ".claude/commands", ".claude/skills", ".claude/config"):
-        files.extend((ROOT / folder).rglob("*.md"))
-    for file in sorted(files):
-        digest.update(file.relative_to(ROOT).as_posix().encode())
-        digest.update(file.read_bytes())
-    return digest.hexdigest()
-
-
-def resume_run(run_id: str, *, db_path=None) -> dict:
-    if len(run_id) != 24 or any(c not in "0123456789abcdef" for c in run_id):
-        raise ValueError("invalid run_id")
-    run_dir = ROOT / "data/runs" / run_id
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    if hashlib.sha256(strict_json(manifest).encode()).hexdigest()[:24] != run_id:
-        raise ValueError("run manifest changed; prepare a new run")
-    expiry = datetime.fromisoformat(manifest["valid_until"].replace("Z", "+00:00"))
-    if datetime.now(timezone.utc) >= expiry:
-        raise ValueError("run evidence expired; collect a fresh snapshot")
-    if manifest["portfolio_version"] != context(db_path=db_path)["portfolio_version"]:
-        raise ValueError("portfolio changed; prepare a new run")
-    if manifest["code_version"] != code_version():
-        raise ValueError("policy or prompts changed; prepare a new run")
-    return {"run_id": run_id, "run_dir": str(run_dir), "manifest": manifest,
-            "snapshot": snapshot(manifest["snapshot_id"], db_path=db_path)}
-
-
 def capabilities() -> dict:
     load_credentials()
     return {"schema_version": 1, "credentials_present": {k: bool(os.getenv(k)) for k in KEY_NAMES},
