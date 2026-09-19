@@ -7,10 +7,11 @@ matrix job that installs zero third-party packages.
 from __future__ import annotations
 
 import json
+import statistics
 import sys
 import unittest
 import urllib.error
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from copilot.backtest import frame as frame_mod
 from copilot.backtest import history
+from copilot.backtest import metrics
 from copilot.backtest import universe
 
 
@@ -358,6 +360,57 @@ class HistoryFetchThrottle(unittest.TestCase):
             with self.assertRaises(history.HistoryError):
                 history.fetch("SPY", until_epoch=1700000000)
         self.assertGreater(history._last_request_at, 0.0)
+
+
+class Metrics(unittest.TestCase):
+    def curve(self, values, start=date(2020, 1, 2)):
+        return [(start + timedelta(days=i), v) for i, v in enumerate(values)]
+
+    def test_max_drawdown_finds_peak_trough_and_duration(self):
+        dd = metrics.max_drawdown(self.curve([100, 120, 60, 80, 130]))
+        self.assertAlmostEqual(dd.depth, 0.5)
+        self.assertEqual(dd.peak_date, date(2020, 1, 3))
+        self.assertEqual(dd.trough_date, date(2020, 1, 4))
+        self.assertEqual(dd.recovery_date, date(2020, 1, 6))
+        self.assertEqual(dd.duration_days, 3)
+
+    def test_unrecovered_drawdown_reports_no_recovery_date(self):
+        dd = metrics.max_drawdown(self.curve([100, 120, 60]))
+        self.assertIsNone(dd.recovery_date)
+        self.assertAlmostEqual(dd.depth, 0.5)
+
+    def test_flat_curve_has_zero_drawdown(self):
+        dd = metrics.max_drawdown(self.curve([100, 100, 100]))
+        self.assertEqual(dd.depth, 0.0)
+
+    def test_cagr_matches_a_hand_computed_doubling(self):
+        curve = [(date(2010, 1, 4), 100.0), (date(2020, 1, 3), 200.0)]
+        self.assertAlmostEqual(metrics.cagr(curve), 0.0718, places=3)
+
+    def test_sharpe_is_zero_for_a_flat_curve(self):
+        self.assertEqual(metrics.sharpe(self.curve([100, 100, 100, 100])), 0.0)
+
+    def test_sharpe_declares_its_risk_free_rate(self):
+        self.assertEqual(metrics.RISK_FREE_RATE, 0.0)
+
+    def test_annual_volatility_annualises_by_sqrt_252(self):
+        import math
+        curve = self.curve([100, 110, 100, 110, 100])
+        daily = [0.10, -1 / 11, 0.10, -1 / 11]
+        expected = statistics.stdev(daily) * math.sqrt(252)
+        self.assertAlmostEqual(metrics.annual_volatility(curve), expected, places=6)
+
+    def test_turnover_is_annualised_one_way_notional(self):
+        # 50 traded on an average value of 100 over exactly one year = 0.5.
+        self.assertAlmostEqual(
+            metrics.annual_turnover(traded_notional=50.0, average_value=100.0, years=1.0), 0.5)
+
+    def test_turnover_of_a_never_traded_book_is_zero(self):
+        self.assertEqual(metrics.annual_turnover(traded_notional=0.0, average_value=100.0, years=3.0), 0.0)
+
+    def test_window_slices_a_calendar_year(self):
+        curve = [(date(2007, 12, 31), 100.0), (date(2008, 6, 1), 60.0), (date(2009, 1, 2), 90.0)]
+        self.assertEqual(len(metrics.window(curve, 2008)), 1)
 
 
 if __name__ == "__main__":

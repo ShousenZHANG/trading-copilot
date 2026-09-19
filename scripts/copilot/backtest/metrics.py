@@ -1,0 +1,106 @@
+"""Risk and return metrics. Pure functions over an equity curve.
+
+Formula sources: annualized return, volatility and max drawdown follow
+microsoft/qlib `contrib/evaluate.py::risk_analysis` (MIT), re-implemented in
+the stdlib. Nothing is vendored.
+"""
+from __future__ import annotations
+
+import math
+import statistics
+from dataclasses import dataclass
+from datetime import date
+from typing import Sequence
+
+TRADING_DAYS_PER_YEAR = 252
+DAYS_PER_YEAR = 365.25
+
+#: Declared, not assumed. Sharpe here is excess return over zero. A reader who
+#: wants a T-bill benchmark must say so; silently baking one in makes two
+#: backtests from different years incomparable.
+RISK_FREE_RATE = 0.0
+
+Curve = Sequence[tuple[date, float]]
+
+
+@dataclass(frozen=True)
+class Drawdown:
+    depth: float
+    peak_date: date | None
+    trough_date: date | None
+    recovery_date: date | None
+    duration_days: int
+
+
+def max_drawdown(curve: Curve) -> Drawdown:
+    """Deepest peak-to-trough fall, with the days from peak to recovery.
+
+    `duration_days` runs peak to recovery when recovery happened, peak to the
+    end of the curve when it has not. Reporting only the trough understates how
+    long a holder actually spent underwater, which is the number that decides
+    whether someone abandons a strategy.
+    """
+    if len(curve) < 2:
+        return Drawdown(0.0, None, None, None, 0)
+    peak_value, peak_date = curve[0][1], curve[0][0]
+    best = Drawdown(0.0, None, None, None, 0)
+    for when, value in curve:
+        if value > peak_value:
+            peak_value, peak_date = value, when
+            continue
+        depth = (peak_value - value) / peak_value
+        if depth > best.depth:
+            best = Drawdown(depth, peak_date, when, None, 0)
+    if best.peak_date is None:
+        return best
+    recovery = next((w for w, v in curve
+                     if w > best.trough_date and v >= _value_at(curve, best.peak_date)), None)
+    end = recovery or curve[-1][0]
+    return Drawdown(best.depth, best.peak_date, best.trough_date, recovery,
+                    (end - best.peak_date).days)
+
+
+def _value_at(curve: Curve, when: date) -> float:
+    for w, v in curve:
+        if w == when:
+            return v
+    raise KeyError(when)
+
+
+def cagr(curve: Curve) -> float:
+    if len(curve) < 2:
+        return 0.0
+    years = (curve[-1][0] - curve[0][0]).days / DAYS_PER_YEAR
+    if years <= 0 or curve[0][1] <= 0:
+        return 0.0
+    return (curve[-1][1] / curve[0][1]) ** (1 / years) - 1
+
+
+def daily_returns(curve: Curve) -> list[float]:
+    return [(curve[i][1] / curve[i - 1][1]) - 1 for i in range(1, len(curve))
+            if curve[i - 1][1] > 0]
+
+
+def annual_volatility(curve: Curve) -> float:
+    returns = daily_returns(curve)
+    if len(returns) < 2:
+        return 0.0
+    return statistics.stdev(returns) * math.sqrt(TRADING_DAYS_PER_YEAR)
+
+
+def sharpe(curve: Curve) -> float:
+    vol = annual_volatility(curve)
+    if vol == 0:
+        return 0.0
+    return (cagr(curve) - RISK_FREE_RATE) / vol
+
+
+def annual_turnover(*, traded_notional: float, average_value: float, years: float) -> float:
+    """One-way traded notional over average book value, per year."""
+    if average_value <= 0 or years <= 0:
+        return 0.0
+    return traded_notional / average_value / years
+
+
+def window(curve: Curve, year: int) -> list[tuple[date, float]]:
+    return [(w, v) for w, v in curve if w.year == year]
