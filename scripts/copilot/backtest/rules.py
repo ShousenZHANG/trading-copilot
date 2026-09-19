@@ -27,7 +27,23 @@ MIN_DAILY_VOLATILITY = 1e-6
 
 
 def _returns(series: Sequence[float]) -> list[float]:
-    return [(series[i] / series[i - 1]) - 1 for i in range(1, len(series)) if series[i - 1] > 0]
+    """Simple returns between consecutive prices. Raises rather than drops.
+
+    A previous version silently skipped a non-positive price instead of
+    raising -- the same silent-drop failure MomentumTopN.weights() below
+    refuses, and for the same reason: a shortened, still-plausible-looking
+    returns list is indistinguishable from a real one to every caller
+    downstream. Unreachable today given frame.PriceFrame's own
+    construction-time validation, but a stranger copying this file's other
+    pattern deserves the consistent one, not a silent exception to it.
+    """
+    returns = []
+    for i in range(1, len(series)):
+        if series[i - 1] <= 0:
+            raise ValueError(f"non-positive price {series[i - 1]} at index {i - 1}; cannot "
+                             "compute a return, and dropping it would silently shorten the series")
+        returns.append((series[i] / series[i - 1]) - 1)
+    return returns
 
 
 @dataclass(frozen=True)

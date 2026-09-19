@@ -17,6 +17,7 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -26,6 +27,7 @@ from runtime import force_utf8_stdio  # noqa: E402
 force_utf8_stdio()
 
 from copilot.backtest import admission, bxn, engine, history, rules, universe  # noqa: E402
+from copilot.backtest import frame as frame_mod  # noqa: E402
 
 DEFAULT_OUT_DIR = ROOT / "data" / "audit"
 SENSITIVITY_STEP = 0.10
@@ -71,18 +73,35 @@ def _fetch(symbol: str) -> history.Series:
     return history.fetch(symbol)
 
 
-def verify_universe() -> int:
-    """Re-observe the tier table against the live endpoint. Prints a diff."""
+def verify_universe(symbols: Iterable[str] | None = None) -> int:
+    """Re-observe the tier table against the live endpoint. Prints a diff.
+
+    Defaults to universe.default_candidates() (the qualified tier, sorted)
+    rather than a separately hand-picked set, so this and the CLI's normal
+    --universe flag share one notion of "the symbols worth checking" instead
+    of two independently maintained lists. Pass --universe alongside
+    --verify-universe to check a different set instead -- a near-miss tier
+    such as universe.NO_2008_BARS, or a couple of symbols for a quick check.
+
+    Builds a real PriceFrame per symbol and reads span_years()/
+    sessions_in_year() from it rather than hand-rolling the identical
+    (last - first).days / 365.25 arithmetic on the raw Series: those methods
+    are otherwise implemented, documented and unit-tested with no production
+    caller.
+    """
     problems = 0
-    for symbol in sorted(universe.QUALIFIED | universe.NO_2008_BARS | universe.PARTIAL_2008):
+    checked = sorted(symbols) if symbols is not None else list(universe.default_candidates())
+    for symbol in checked:
         try:
             series = _fetch(symbol)
         except history.NotCovered as exc:
             print(f"  NOT COVERED {symbol}: {exc}")
             problems += 1
             continue
-        frame_years = (series.dates[-1] - series.dates[0]).days / 365.25
-        bars = {y: sum(1 for d in series.dates if d.year == y) for y in (2008, 2020, 2022)}
+        symbol_frame = frame_mod.build(dates=list(series.dates), symbols=[symbol],
+                                       closes=[[c] for c in series.split_and_dividend_adjusted])
+        frame_years = symbol_frame.span_years()
+        bars = {y: symbol_frame.sessions_in_year(y) for y in (2008, 2020, 2022)}
         expected = symbol in universe.QUALIFIED
         actual = all(bars[y] / admission.STRESS_SESSIONS[y] >= admission.MIN_STRESS_COVERAGE
                      for y in bars) and frame_years >= admission.MIN_YEARS
@@ -177,7 +196,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.verify_calendars:
         return 1 if verify_calendars() else 0
     if args.verify_universe:
-        return 1 if verify_universe() else 0
+        override = tuple(s.strip().upper() for s in args.universe.split(",") if s.strip())
+        return 1 if verify_universe(override or None) else 0
     if not args.universe:
         parser.error("--universe is required unless a --verify-* or --self-test flag is given")
 

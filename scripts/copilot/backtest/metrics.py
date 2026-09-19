@@ -12,8 +12,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Sequence
 
+from .frame import DAYS_PER_YEAR
+
 TRADING_DAYS_PER_YEAR = 252
-DAYS_PER_YEAR = 365.25
 
 #: Declared, not assumed. Sharpe here is excess return over zero. A reader who
 #: wants a T-bill benchmark must say so; silently baking one in makes two
