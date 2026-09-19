@@ -1112,5 +1112,50 @@ class BxnProxy(unittest.TestCase):
             bxn.parse_csv("DATE,BXN\n2009-09-18,298.140000\n")
 
 
+class CliContract(unittest.TestCase):
+    def test_cli_module_imports_without_third_party_packages(self):
+        import importlib
+        module = importlib.import_module("backtest_cli")
+        self.assertTrue(hasattr(module, "main"))
+
+    def test_universe_is_fetched_once_not_once_per_family(self):
+        # Three families over 12 symbols would be 36 Yahoo requests if each
+        # family loaded its own data, against a rate-limit evidence base of one
+        # 30-request run. It also lets the three backtests disagree if Yahoo
+        # revised a bar mid-run.
+        import backtest_cli
+        source = Path(backtest_cli.__file__).read_text(encoding="utf-8")
+        self.assertEqual(source.count("history.fetch("), 1)
+        self.assertIn("def load_universe(", source)
+
+    def test_sensitivity_walks_each_parameter_both_ways(self):
+        import backtest_cli
+        grid = backtest_cli.sensitivity_grid({"lookback_days": 252.0, "top_n": 5.0})
+        self.assertIn({"lookback_days": 227.0, "top_n": 5.0}, grid)
+        self.assertIn({"lookback_days": 277.0, "top_n": 5.0}, grid)
+        self.assertIn({"lookback_days": 252.0, "top_n": 4.0}, grid)
+        self.assertIn({"lookback_days": 252.0, "top_n": 6.0}, grid)
+        self.assertEqual(len(grid), 4)
+
+    def test_output_directory_is_gitignored_audit(self):
+        import backtest_cli
+        self.assertTrue(str(backtest_cli.DEFAULT_OUT_DIR).replace("\\", "/").endswith("data/audit"))
+
+    def test_cross_check_script_is_never_imported_by_shipped_code(self):
+        # Matched as an import statement, not as a substring: rules.py's own
+        # docstring names "scripts/_cross_check_bt.py" as the oracle that
+        # cross-checks it (Q39's "cross-check against independent
+        # implementations"), and a bare substring search would flag that
+        # documentation as if it were a real import.
+        import subprocess
+        hits = subprocess.run(
+            ["git", "grep", "-lE", r"^\s*(import|from)\s+_cross_check_bt\b",
+             "--", "scripts", "mcps", "evals"],
+            capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[1]))
+        found = [line for line in hits.stdout.splitlines()
+                 if not line.endswith(("_cross_check_bt.py", "_test_backtest.py"))]
+        self.assertEqual(found, [])
+
+
 if __name__ == "__main__":
     unittest.main()
