@@ -51,11 +51,16 @@ def _url(value, provider=None):
 
 
 def _redact(value):
+    """Scrub live credential values from anything that may reach a model or disk.
+
+    The name list is not repeated here: it comes from service.KEY_NAMES through
+    secret_values(), because a second hardcoded copy had already drifted -
+    SEC_USER_AGENT was loaded and never redacted.
+    """
+    from .service import secret_values
     if isinstance(value, str):
-        for name in ("FRED_API_KEY", "FINNHUB_API_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "ALPACA_API_KEY", "ALPACA_SECRET_KEY"):
-            secret = os.getenv(name)
-            if secret:
-                value = value.replace(secret, "[redacted]")
+        for secret in secret_values():
+            value = value.replace(secret, "[redacted]")
         return value
     if isinstance(value, list):
         return [_redact(item) for item in value]
