@@ -92,11 +92,24 @@ def verify_universe(symbols: Iterable[str] | None = None) -> int:
     problems = 0
     checked = sorted(symbols) if symbols is not None else list(universe.default_candidates())
     for symbol in checked:
+        unfetchable = symbol in universe.UNFETCHABLE
         try:
             series = _fetch(symbol)
         except history.NotCovered as exc:
-            print(f"  NOT COVERED {symbol}: {exc}")
+            # A symbol the tier table already records as unfetchable coming back
+            # unfetchable is the table being RIGHT, not a problem to report. Only
+            # an unexpected disappearance is drift.
+            flag = "ok " if unfetchable else "DRIFT"
+            if not unfetchable:
+                problems += 1
+            print(f"  {flag} {symbol:<5} not covered: {exc}")
+            continue
+        if unfetchable:
+            # The other direction: a symbol recorded as unfetchable that now
+            # fetches. The table is stale and the tier should be re-derived.
             problems += 1
+            print(f"  DRIFT {symbol:<5} is tiered unfetchable but returned "
+                  f"{len(series.dates)} bars")
             continue
         symbol_frame = frame_mod.build(dates=list(series.dates), symbols=[symbol],
                                        closes=[[c] for c in series.split_and_dividend_adjusted])

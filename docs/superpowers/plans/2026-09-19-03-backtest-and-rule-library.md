@@ -2588,6 +2588,60 @@ mid-run. The report now carries `alignment` and any provenance caveats.
 
 ---
 
+## Post-implementation verification (2026-09-19)
+
+Both deferred verifications ran. Neither changed a design decision; one found a
+defect in this plan's own cross-check code and one found a defect in the CLI.
+
+**The tier table holds, with zero drift.** `--verify-universe` over all 22
+qualified symbols returned `ok` for every one, each with exactly 253/253/251
+bars in 2008/2020/2022 — SPY 33.63y down to VEA 19.15y. The eight non-qualified
+equity symbols were re-checked too and all landed in their recorded tiers:
+QQQM 5.93y with 56 of 253 bars in 2020, SCHD 14.91y with zero 2008, VOO 16.02y
+with zero 2008, VXUS 15.64y, XLRE 10.95y, XLC 8.25y, VT 18.23y with exactly the
+recorded 131 of 253 bars in 2008, and SPLG still HTTP 404 on the chart endpoint.
+
+That run surfaced a defect in `verify_universe` itself: SPLG coming back
+unfetchable is the tier table being *right*, but the `NotCovered` handler
+counted every such symbol as a problem, so the command exited 1 on a correct
+classification. Fixed, along with the missing opposite direction — a symbol
+tiered unfetchable that starts fetching is now reported as drift rather than
+falling through to the qualified comparison and being called `ok` for the wrong
+reason.
+
+**The `bt` cross-check crashed on this plan's own code, then passed.**
+`float(result.prices.iloc[-1])` raised `TypeError: float() argument must be a
+string or a real number, not 'Series'` — `Result.prices` is a DataFrame with one
+column per backtest, so `.iloc[-1]` yields a row. The red-light check had never
+actually executed. An earlier review reasoned through this script's fixture and
+judged the assertion sound; it could not have caught this, because it was told
+not to install `bt`.
+
+Once fixed, all four checks pass against bt 1.2.3 on pandas 3.0.6, CPython 3.13
+win_amd64, 45 packages, prebuilt `core.cp313-win_amd64.pyd`, no compiler:
+
+- `RunIfOutOfBounds` alone over ten years produced a NAV curve with **one
+  distinct value, 100.0**. The bar-0 defect is now observed, not inferred. The
+  assertion was strengthened from "ends at 100" to `nunique() == 1`, which
+  proves the curve never moved rather than merely that it came back.
+- `Or([RunMonthly, RunIfOutOfBounds])` invests, ending at `187.3077392506`.
+- A trigger placed before `WeighEqually` ended at `187.2712958372`,
+  **bit-identical** to an explicitly daily stack and different from the Or
+  stack. The silent-degradation claim is now observed too, and pinned from both
+  sides.
+- The cross-check Q39 actually asks for was missing entirely: the script's
+  docstring said "cross-check of the rule families against `bt`" while running
+  none of them. Added — over 2610 bars of daily-rebalanced equal weight with
+  fractional shares and zero costs, this engine and `bt` differ by at most
+  **8.37e-15** relative. Our engine also reproduces bit-for-bit across runs,
+  confirming the `sorted()` determinism fix.
+
+The band *logic* is deliberately not cross-checked against `bt`: its
+`RunIfOutOfBounds` implements only the relative 25% half of Bogleheads 5/25, so
+agreement there would mean ours was wrong.
+
+---
+
 ## What this plan deliberately does not build
 
 Recorded so a later reader does not mistake absence for oversight.

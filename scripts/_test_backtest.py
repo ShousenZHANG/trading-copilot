@@ -1325,6 +1325,49 @@ class CliContract(unittest.TestCase):
         import backtest_cli
         self.assertTrue(str(backtest_cli.DEFAULT_OUT_DIR).replace("\\", "/").endswith("data/audit"))
 
+    def test_verify_universe_accepts_an_unfetchable_symbol_staying_unfetchable(self):
+        # SPLG is tiered UNFETCHABLE because the chart endpoint 404s for it. A
+        # live run reporting that is the tier table being RIGHT; counting it as
+        # a problem made --verify-universe exit 1 on a correct classification.
+        import contextlib
+        import io
+        import backtest_cli
+        from copilot.backtest import history
+        with mock.patch.object(backtest_cli, "_fetch",
+                               side_effect=history.NotCovered("SPLG: HTTP 404")), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            problems = backtest_cli.verify_universe(["SPLG"])
+        self.assertEqual(problems, 0)
+        self.assertIn("ok ", out.getvalue())
+
+    def test_verify_universe_flags_an_unexpected_disappearance(self):
+        import contextlib
+        import io
+        import backtest_cli
+        from copilot.backtest import history
+        with mock.patch.object(backtest_cli, "_fetch",
+                               side_effect=history.NotCovered("SPY: HTTP 404")), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            problems = backtest_cli.verify_universe(["SPY"])
+        self.assertEqual(problems, 1)
+        self.assertIn("DRIFT", out.getvalue())
+
+    def test_verify_universe_flags_an_unfetchable_symbol_that_now_fetches(self):
+        # The other direction: the tier table claims SPLG cannot be fetched. If
+        # it can, the table is stale -- without this branch the symbol fell
+        # through to the qualified/not-qualified comparison and, having a short
+        # history, was reported "ok" for the wrong reason.
+        import contextlib
+        import io
+        import backtest_cli
+        with mock.patch.object(backtest_cli, "_fetch",
+                               side_effect=lambda s: self._qualifying_series(s)), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            problems = backtest_cli.verify_universe(["SPLG"])
+        self.assertEqual(problems, 1)
+        self.assertIn("DRIFT", out.getvalue())
+        self.assertIn("tiered unfetchable", out.getvalue())
+
     def test_verify_universe_uses_price_frame_helpers_not_hand_rolled_arithmetic(self):
         # frame.PriceFrame.span_years()/sessions_in_year() were implemented,
         # documented and unit-tested with no production caller; verify_universe

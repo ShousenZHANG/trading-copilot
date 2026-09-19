@@ -19,6 +19,17 @@ cash for its whole length. Upstream has one mock unit test for this algo and no
 Separately, the trigger silently degrades to daily rebalancing if placed before
 the `Weigh*` algo, because `StrategyBase.run` clears `self.temp` every bar.
 
+Both of those were read out of the source when this ADR was first written, not
+run. They have since been executed: on 2026-09-19 `scripts/_cross_check_bt.py`
+was run against a real `bt==1.2.3` install (pandas 3.0.6, CPython 3.13
+win_amd64, 45 packages, prebuilt `core.cp313-win_amd64.pyd`). A ten-year
+two-asset backtest driven by `RunIfOutOfBounds` alone produced a NAV curve with
+**one distinct value, 100.0** — 100% cash for every bar of the run. A stack with
+the trigger placed before `WeighEqually` ended at `187.2712958372`, bit-identical
+to an explicitly daily stack and different from the correctly-ordered
+`Or([RunMonthly, RunIfOutOfBounds])` stack's `187.3077392506`. Both claims now
+rest on observation.
+
 **The offline CI matrix installs zero third-party packages.** It imports every
 `_test_*.py` and every `--self-test` module. A module-scope `import bt` breaks
 three Python versions. A function-scope import collides with
@@ -54,6 +65,16 @@ creating a derivative work, and using to verify other data.
    declares only `ffn>=1.1.2` and ffn 1.2.2 was published two days before this
    verification. It sets `MPLBACKEND=Agg`, because `bt/backtest.py:11` imports
    pyplot unconditionally and an unset backend selects `tkagg`.
+
+   The cross-check itself was run on 2026-09-19 and agrees: over 2610 bars of
+   daily-rebalanced equal weight with fractional shares and zero costs, this
+   repository's engine and `bt` differ by at most **8.37e-15** relative — about
+   38 ULPs of float64, pure accumulation round-off. The script asserts a `1e-12`
+   tolerance, which leaves roughly 120x headroom against a pandas or platform
+   float change while staying far tighter than any real behavioural divergence.
+   The band *logic* is deliberately not compared: `bt`'s `RunIfOutOfBounds`
+   implements only the relative 25% half of Bogleheads 5/25 (`algos.py:408`
+   divides by the target weight), so agreement there would mean ours was wrong.
 
 3. **"Preserve raw and adjusted prices separately" is re-defined for this
    module** as split-adjusted (`quote.close`) versus split-and-dividend-adjusted
