@@ -181,14 +181,25 @@ def _hardcoded_codex_secrets(config_text: str) -> list[str]:
     return _hardcoded_mcp_secrets(json.dumps({"mcpServers": normalized}))
 
 
+#: Matches an archive member ending in "..._history.<ext>" or
+#: "...-history.<ext>", any extension, after the name has been lower-cased and
+#: had backslashes normalized to forward slashes. A bare
+#: `.endswith("_history.csv")` check missed "BXN-History.csv" (hyphen),
+#: "bxn_history.txt" (any other extension) and "BXN_History.csv.gz"
+#: (compressed) -- all real variants a vendor-data drop could arrive as.
+_VENDOR_HISTORY_RE = re.compile(r"[_-]history\.[a-z0-9.]+$")
+
+
 def _forbidden_archive_name(name: str) -> bool:
     """True for an archive member that must never ship (secrets/personal state).
 
-    This is the single definition of the leak rule; ``_audit_zip`` is its only
-    caller, and ``main`` runs the audit. Keeping a second inline copy in ``main``
-    is what let the two drift apart in the first place.
+    This is the single definition of the leak rule. ``build()`` calls it
+    before writing each file so a forbidden member never enters the archive in
+    the first place; ``_audit_zip`` calls it again afterwards as a backstop.
+    Keeping a second inline copy in either caller is what let them drift apart
+    in the first place.
     """
-    low = name.lower()
+    low = name.lower().replace("\\", "/")
     if low.endswith("/.env") or low.endswith("/positions.md"):
         return True
     if "trading_memory.md" in low:
@@ -199,7 +210,7 @@ def _forbidden_archive_name(name: str) -> bool:
     # personal non-commercial use and forbid distribution and derivative works;
     # a CSV dropped under scripts/, evals/ or docs/ would otherwise be picked up
     # by _iter_files' rglob and shipped silently. See ADR-0006 clause 6.
-    if low.endswith("_history.csv") or "/vendor-data/" in low:
+    if _VENDOR_HISTORY_RE.search(low) or "/vendor-data/" in low:
         return True
     return False
 
@@ -261,12 +272,19 @@ def build(version: str, stamp: str | None) -> Path:
                 if _excluded(rel):
                     skipped += 1
                     continue
-                # final hard leak guard
+                arcname = f"trading-copilot/{rel}"
+                if _forbidden_archive_name(arcname):
+                    print(f"  !! LEAK GUARD blocked: {rel}", file=sys.stderr)
+                    skipped += 1
+                    continue
+                # final hard leak guard: an independent second layer for the
+                # handful of names it was originally written for, kept even
+                # though _forbidden_archive_name now covers the same ground
                 if any(g in rel for g in leak_guard) and not rel.endswith(".example"):
                     print(f"  !! LEAK GUARD blocked: {rel}", file=sys.stderr)
                     skipped += 1
                     continue
-                zf.write(f, arcname=f"trading-copilot/{rel}")
+                zf.write(f, arcname=arcname)
                 added += 1
 
     print(f"Built {out.relative_to(ROOT)}  ({added} files, {skipped} skipped)")
@@ -369,6 +387,19 @@ def _self_test() -> int:
             _required_files_are_shippable()),
         (".github/ is not in the shipped payload",
             not any(inc.startswith(".github") for inc in INCLUDE_PATHS)),
+        # --- vendor-history bypasses the reviewer found ---------------------
+        ("archive leak: hyphenated History variant",
+            _forbidden_archive_name("trading-copilot/scripts/BXN-History.csv")),
+        ("archive leak: non-csv extension",
+            _forbidden_archive_name("trading-copilot/evals/bxn_history.txt")),
+        ("archive leak: compressed extension",
+            _forbidden_archive_name("trading-copilot/scripts/BXN_History.csv.gz")),
+        ("archive leak: vendor-data segment with backslashes",
+            _forbidden_archive_name("trading-copilot\\evals\\vendor-data\\bxn.csv")),
+        ("archive leak: mixed-case member",
+            _forbidden_archive_name("TRADING-COPILOT/SCRIPTS/BXN_HISTORY.CSV")),
+        ("archive ok: our own fixture still ships",
+            not _forbidden_archive_name("trading-copilot/evals/prices/2026.json")),
     ]
 
     passed = 0
@@ -400,6 +431,9 @@ def main() -> int:
         print("ERROR: release audit failed:", file=sys.stderr)
         for p in problems:
             print(f"  {p}", file=sys.stderr)
+        out.unlink(missing_ok=True)
+        print(f"Deleted {out.relative_to(ROOT)}: a failed-audit artifact must not remain in dist/",
+              file=sys.stderr)
         return 1
     print("Release audit passed: no secrets, no personal state, listing complete.")
     return 0
