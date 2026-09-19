@@ -18,6 +18,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from copilot.backtest import admission
+from copilot.backtest import bxn
 from copilot.backtest import engine
 from copilot.backtest import frame as frame_mod
 from copilot.backtest import history
@@ -922,6 +923,76 @@ class AdmissionGate(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown waiver"):
             admission.assess(self.passing_result(), sessions_by_year=admission.STRESS_SESSIONS,
                              waivers={"whatever": "because"})
+
+    def test_bxn_q29_waiver_waives_2008_in_admission_while_keeping_it_visible(self):
+        # A waiver does not delete a failure -- it records a reason beside it and
+        # flips `admitted`. Prove both halves for bxn.Q29_WAIVER specifically, not
+        # just that admitted becomes True.
+        r = self.passing_result()
+        r.curve = [(w, v) for w, v in r.curve if w.year != 2008]
+        without_waiver = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS)
+        self.assertFalse(without_waiver.admitted)
+        self.assertTrue(any("2008" in f for f in without_waiver.failures))
+
+        report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS,
+                                  waivers=bxn.Q29_WAIVER)
+        self.assertTrue(report.admitted, report.failures)
+        self.assertTrue(report.waived)
+        self.assertIn("ADR-0006", " ".join(report.waiver_reasons))
+        # Still visible: waiving does not delete the failure from the record.
+        self.assertTrue(any("2008" in f for f in report.failures))
+
+
+class BxnProxy(unittest.TestCase):
+    CSV = "DATE,BXN\n09/18/2009,298.140000\n09/21/2009,299.500000\n09/22/2009,301.250000\n"
+
+    def test_parses_the_two_column_close_only_file(self):
+        frame = bxn.parse_csv(self.CSV)
+        self.assertEqual(frame.symbols, ("^BXN",))
+        self.assertEqual(frame.dates[0], date(2009, 9, 18))
+        self.assertAlmostEqual(frame.column("^BXN")[0], 298.14)
+
+    def test_rejects_an_unexpected_header(self):
+        with self.assertRaisesRegex(ValueError, "header"):
+            bxn.parse_csv("DATE,BXNT\n09/18/2009,1.0\n")
+
+    def test_rejects_an_empty_file(self):
+        with self.assertRaises(ValueError):
+            bxn.parse_csv("DATE,BXN\n")
+
+    def test_the_waiver_text_cites_the_adr(self):
+        self.assertIn("ADR-0006", bxn.Q29_WAIVER["stress_2008"])
+        self.assertIn("2009-09-18", bxn.Q29_WAIVER["stress_2008"])
+
+    def test_waiver_covers_2008_only(self):
+        self.assertEqual(set(bxn.Q29_WAIVER), {"stress_2008"})
+
+    def test_the_label_never_claims_the_funds_passed(self):
+        label = bxn.evidence_label(("QQQI", "JEPQ"))
+        self.assertIn("index proxy", label.lower())
+        self.assertNotIn("passed", label.lower())
+        for symbol in ("QQQI", "JEPQ"):
+            self.assertIn(symbol, label)
+
+    def test_module_never_writes_to_disk(self):
+        # Cboe's terms forbid storing the file. urlopen( contains open( as a
+        # substring, so the filesystem call is matched with a negative lookbehind
+        # rather than a bare `in` check.
+        import re
+        source = Path(bxn.__file__).read_text(encoding="utf-8")
+        for forbidden in ("write_text", "write_bytes", "pathlib", "mkdir", "shutil", "tempfile"):
+            self.assertNotIn(forbidden, source, forbidden)
+        self.assertIsNone(re.search(r"(?<!url)open\(", source),
+                          "bxn.py must not open a file; the CSV stays in memory")
+
+    # --- "verify rather than assume" items beyond the plan's 7 tests ---
+
+    def test_stress_2008_key_is_actually_waivable(self):
+        self.assertIn("stress_2008", admission.WAIVABLE)
+
+    def test_rejects_a_malformed_date_instead_of_silently_misparsing(self):
+        with self.assertRaises(ValueError):
+            bxn.parse_csv("DATE,BXN\n2009-09-18,298.140000\n")
 
 
 if __name__ == "__main__":
