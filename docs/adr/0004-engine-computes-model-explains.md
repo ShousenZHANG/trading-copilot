@@ -1,6 +1,6 @@
 # ADR-0004: The policy engine computes every order figure; the language model only explains
 
-Status: accepted, 2026-09-19.
+Status: accepted, 2026-09-19. Clauses 3 and 6 amended by [ADR-0005](0005-verified-data-constraints.md).
 
 ## Context
 
