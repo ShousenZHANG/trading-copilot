@@ -2483,6 +2483,65 @@ git commit -m "feat(backtest): CLI, parameter sensitivity, and the bt cross-chec
 
 ---
 
+## Amendments applied during execution
+
+Every task's code below is what was *planned*. Review found real defects in
+several of those code blocks, and the repository is the source of truth for what
+shipped. The substantive changes, all committed on this branch:
+
+**Task 1 (`universe.py`).** `provenance_unverified` was set but never read, so
+ADR-0006's promise that SMH "stays in the qualified tier with a caveat flag"
+caveated nothing. `classify()` now appends `_PROVENANCE_CAVEAT` to `reason` as
+well as setting the boolean. It also gained an `isinstance` guard, so a
+non-string raises `ValueError` rather than `AttributeError`.
+
+**Task 2 (`frame.py`).** The ragged-row message read `expected 2`, while the
+plan's own test asserted the substring `2 values` — the implementation was
+wrong, not the test. `span_years` and `sessions_in_year` gained docstrings
+stating plainly that they are descriptive and carry no data-density guarantee: a
+two-bar frame dated 2008-01-02 and 2023-01-03 returns `span_years() == 15.003`
+and `sessions_in_year(2008) == 1`, which would pass a naive gate. An admission
+decision must compare against an expected session count, never against zero.
+
+**Task 3 (`history.py`).** `to_frame` truncated silently: an 18-year series
+intersected with a one-bar series returned a valid one-bar frame and the eventual
+failure said only "backtest spans 0.00 years". A new `alignment(series)` reports
+per-symbol first/last/bars/dropped_bars, the common window, which symbol binds
+the start and which the end, and how many bars were lost against the longest
+input. `to_frame`'s empty-intersection error now names the binding symbols.
+`Series.dropped_bars`, previously computed and discarded, is surfaced there.
+
+**Tasks 4 and 5 (`metrics.py`, `engine.py`).** Two silent-corruption paths, both
+reachable and both verified by execution. `cagr` returned a Python `complex`
+whenever the curve ended negative — `(-5.0/100.0) ** (1/years)` with a
+non-integer exponent — and `sharpe`'s `vol == 0` guard could swallow it and
+report a reassuring 0.0. `daily_returns`' `if curve[i-1][1] > 0` filter was
+asymmetric, dropping the return leaving a non-positive bar while keeping the one
+entering it: on a $10,000 book dipping to a single -$50 bar, annualized
+volatility read 5.64 instead of 0.0221, a 255x misstatement. Both are closed by a
+single `_validated(curve)` boundary check that raises on non-positive or
+non-finite values and on non-increasing dates, called from `cagr`,
+`annual_volatility`, `sharpe`, `max_drawdown` and `daily_returns`; the asymmetric
+filter is deleted. `max_drawdown`'s `depth > best.depth` became `>=` so that when
+two drawdowns are equally deep the later one wins — it is the one more likely
+still open, and on `[100, 50, 100, 50]` the old code reported the first with a
+recovery date while the second sat unrecovered at the end of the curve.
+`engine._validate` now rejects non-finite weights (`abs(nan - 1.0) > tol` and
+`nan < 0` are both False, so a NaN weight passed validation and, with
+`integer_shares=False`, produced an all-NaN curve with no exception at all), and
+`engine.run` raises if a bar's portfolio value is non-finite or non-positive.
+`CostModel.max_pct_of_notional` became `float | None`, because `0.0` was being
+read as "no cap" rather than "cap at zero"; `free()` now passes `None`.
+
+**Task 9 (`backtest_cli.py`).** Restructured before implementation: the universe
+is fetched once by `load_universe` and shared by all three families, rather than
+re-fetched per family. Three families over twelve symbols would otherwise make 36
+Yahoo requests against a rate-limit evidence base of one 30-request run, and
+re-fetching invites the three backtests to disagree because a bar was revised
+mid-run. The report now carries `alignment` and any provenance caveats.
+
+---
+
 ## What this plan deliberately does not build
 
 Recorded so a later reader does not mistake absence for oversight.
