@@ -73,8 +73,8 @@ jobs:
 
       - name: Integration test suites
         run: |
-          python scripts/_test_memory.py
-          python scripts/_test_validation.py
+          python scripts/_test_ticker_rating.py
+          python scripts/_test_config.py
 
       - name: Manifests parse
         run: |
@@ -173,14 +173,14 @@ jobs:
           names = set(zipfile.ZipFile(zips[-1]).namelist())
 
           required = [
-              "scripts/portfolio_check.py", "scripts/trigger_state.py",
-              "scripts/benchmarks.py", "scripts/memory.py",
-              "scripts/parse_rating.py", "scripts/assemble_report.py",
+              "scripts/ticker.py", "scripts/parse_rating.py", "scripts/notify.py",
+              "scripts/copilot_cli.py", "scripts/copilot/config.py",
               "evals/scorer.py", "evals/stockbench/backtest_engine.py",
               "mcps/finnhub_mcp.py", "mcps/akshare_mcp.py",
               "mcps/copilot_mcp.py", "scripts/copilot/service.py",
               ".codex/config.toml", ".codex-plugin/plugin.json", "AGENTS.md",
               ".claude-plugin/plugin.json", "README.md", "DISCLAIMER.md",
+              "config/user.example.toml",
           ]
           missing = [r for r in required
                      if not any(n.endswith(r) for n in names)]
