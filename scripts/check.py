@@ -339,7 +339,6 @@ def check_docs() -> None:
                 f"{HISTORICAL_MARKER})")
 
 
-
 def _is_ignored(candidate: str) -> bool:
     """True when .gitignore covers the path. Fails open if git is unavailable."""
     try:
