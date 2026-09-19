@@ -695,6 +695,32 @@ class RuleFamilies(unittest.TestCase):
         self.assertFalse(rule.should_rebalance(frame, 100, on_target, 0))
         self.assertTrue(rule.should_rebalance(frame, 370, on_target, 0))
 
+    def test_momentum_refuses_a_skip_that_swallows_the_formation_window(self):
+        # A negative formation end wraps through Python negative indexing to a
+        # bar near the END of the series: look-ahead dressed as a return.
+        with self.assertRaisesRegex(ValueError, "smaller than"):
+            rules.MomentumTopN(("FAST", "SLOW"), lookback_days=21, skip_days=21)
+        with self.assertRaisesRegex(ValueError, "smaller than"):
+            rules.MomentumTopN(("FAST", "SLOW"), lookback_days=21, skip_days=63)
+
+    def test_momentum_refuses_a_non_positive_top_n(self):
+        with self.assertRaisesRegex(ValueError, "top_n"):
+            rules.MomentumTopN(("FAST", "SLOW"), top_n=0)
+        with self.assertRaisesRegex(ValueError, "top_n"):
+            rules.MomentumTopN(("FAST", "SLOW"), top_n=-1)
+
+    def test_momentum_top_n_wider_than_the_universe_holds_them_all(self):
+        weights = rules.MomentumTopN(("FAST", "SLOW"), top_n=5,
+                                     lookback_days=252, skip_days=21).weights(self.rising(), 300)
+        self.assertEqual(set(weights), {"FAST", "SLOW"})
+        self.assertAlmostEqual(sum(weights.values()), 1.0)
+
+    def test_inverse_volatility_refuses_a_lookback_too_short_for_a_stdev(self):
+        with self.assertRaisesRegex(ValueError, "at least 2"):
+            rules.InverseVolatility(("FAST", "SLOW"), lookback_days=1)
+        with self.assertRaisesRegex(ValueError, "rebalance_days"):
+            rules.InverseVolatility(("FAST", "SLOW"), rebalance_days=0)
+
     def test_rules_are_frozen_so_state_cannot_leak_between_runs(self):
         import dataclasses
         for rule in (rules.FixedWeightBands({"FAST": 1.0}),
