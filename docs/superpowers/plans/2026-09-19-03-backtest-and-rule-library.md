@@ -2533,6 +2533,52 @@ recovery date while the second sat unrecovered at the end of the curve.
 `CostModel.max_pct_of_notional` became `float | None`, because `0.0` was being
 read as "no cap" rather than "cap at zero"; `free()` now passes `None`.
 
+**Final hardening round (whole-branch review).** Five more real defects, each
+verified by execution or mutation before being fixed.
+
+`engine.py` iterated `set(positions) | set(desired)`, whose order varies with
+`PYTHONHASHSEED`. Because float addition is not associative, the same frame and
+rule produced four distinct bit patterns for the final value across ten seeds —
+directly contradicting the module docstring's opening claim of determinism. Now
+`sorted(...)`, with a subprocess test that runs the same backtest under several
+hash seeds and asserts byte-identical output.
+
+The momentum family's warm-up consumes 252 bars from the *start* of the frame,
+so on a universe whose earliest bar is VEA's 2007-07-26 the curve begins
+2008-07-14 and rule 1 fails with 123 of 253 sessions and months 1-6 missing —
+for reasons that have nothing to do with the strategy. The verdict is correct;
+its invisibility was the defect. `universe.FIRST_BAR` and
+`warmup_headroom_bars()` now hold the verified inception dates (VEA is the only
+qualified symbol with under 252 bars of headroom before 2008), stress-year
+failures name the curve's start date, and ADR-0006 records the constraint.
+
+`PriceFrame` was a bare frozen dataclass, so every check `build()` performed was
+skipped by direct construction. Validation moved into `__post_init__`;
+`build()` is now pure normalization.
+
+`backtest_cli.py --self-test` passed against a `main()` gutted to raise on every
+invocation, and the fetch-once test counted a source substring rather than
+behaviour — moving `load_universe` into the per-family loop, the exact bug the
+test's comment warns about, left it passing while the CLI made 8 fetches instead
+of 2. Both are now behavioural: the self-test runs `main()` end to end against a
+synthetic feed, and the fetch test counts real calls.
+
+`sensitivity_grid` emitted neighbour parameter dicts that nothing ever ran, so
+Q29 rule 4's divergence half was unimplemented. Each rule family gained
+`with_parameters()`, and `run_family` now backtests every neighbour and reports
+its CAGR, max drawdown and the largest delta against the base run — with an
+explicit note that no pass/fail threshold is applied, because none was ever
+established and inventing one would be making up a governance rule the user
+never approved.
+
+Also: the two caveats the user's Q22=C answer requires be public — inverse
+volatility over equity-only ETFs is not risk parity, momentum has no cash exit —
+existed only as source docstrings annotated "(Q22=C)" as a reminder nobody acted
+on. They are now `caveats` on each rule, copied into the JSON report and printed
+under each family in the console summary. `PriceFrame.slice()` was deleted as the
+fourth write-only surface this package has produced; it is recoverable from git
+if a caller ever appears.
+
 **Task 9 (`backtest_cli.py`).** Restructured before implementation: the universe
 is fetched once by `load_universe` and shared by all three families, rather than
 re-fetched per family. Three families over twelve symbols would otherwise make 36
