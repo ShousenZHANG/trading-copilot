@@ -25,14 +25,9 @@ warnings: list[str] = []
 checked = 0
 
 EXPECTED_COMMANDS = {
-    "advise.md",
-    "analyze.md",
-    "debate.md",
-    "earnings.md",
     "gold.md",
     "portfolio.md",
     "scan.md",
-    "screen.md",
     "watchlist.md",
     "weekly-review.md",
 }
@@ -67,15 +62,6 @@ _WORKFLOW_PINNED_INSTALLS = (
     ("npm i -g @anthropic-ai/claude-code", "@anthropic-ai/claude-code@"),
     ("pip install ruff", "ruff=="),
 )
-
-OPUS_AGENTS = {"research-manager", "portfolio-manager", "investment-advisor"}
-INTERNAL_DEBATE_AGENTS = {
-    "bull-researcher",
-    "bear-researcher",
-    "aggressive-debator",
-    "conservative-debator",
-    "neutral-debator",
-}
 
 
 def rel(path: Path) -> str:
@@ -182,46 +168,26 @@ def check_commands() -> None:
     if extra:
         warn(f".claude/commands: unexpected command files {sorted(extra)}")
     for command in command_dir.glob("*.md"):
-        parse_frontmatter(command)
-
-    analyze = read(command_dir / "analyze.md")
-    required = [
-        "Step 1: Analysts (PARALLEL",
-        "scripts/assemble_report.py",
-        "scripts/validate_outputs.py run",
-    ]
-    for marker in required:
-        if marker not in analyze:
-            err(f".claude/commands/analyze.md: missing pipeline guardrail '{marker}'")
+        meta = parse_frontmatter(command)
+        for key in ("description", "argument-hint"):
+            if key not in meta:
+                err(f"{rel(command)}: missing frontmatter key '{key}'")
 
 
 def check_agents() -> None:
-    agent_files = sorted((ROOT / ".claude" / "agents").rglob("*.md"))
-    if len(agent_files) < 14:
-        err(f".claude/agents: expected at least 14 agent prompts, found {len(agent_files)}")
-    for path in agent_files:
+    """The deep pipeline is gone (ADR-0004). Any agent that still exists must be
+    well-formed, but zero agents is the expected state."""
+    agent_dir = ROOT / ".claude" / "agents"
+    if not agent_dir.is_dir():
+        return
+    for path in sorted(agent_dir.rglob("*.md")):
         meta = parse_frontmatter(path)
-        name = meta.get("name")
-        model = meta.get("model")
-        tools = meta.get("tools")
         for key in ("name", "description", "tools", "model"):
             if key not in meta:
                 err(f"{rel(path)}: missing frontmatter key '{key}'")
-        if not name:
-            continue
-        if name in OPUS_AGENTS and model != "opus":
-            err(f"{rel(path)}: {name} must remain Opus-tier")
-        if name not in OPUS_AGENTS and model not in {"sonnet"}:
-            err(f"{rel(path)}: non-decider agent should remain Sonnet-tier, got {model!r}")
-        if not tools:
+        if not meta.get("tools"):
             err(f"{rel(path)}: tools list is empty")
-        text = read(path)
-        if name in INTERNAL_DEBATE_AGENTS:
-            if "Output language**: English" not in text:
-                err(f"{rel(path)}: internal debate agent must output English")
-        elif "Output language" in text and "Chinese" not in text:
-            warn(f"{rel(path)}: user-facing agent mentions output language but not Chinese")
-        check_agent_mcp_grants(path, name, tools or "", text)
+        check_agent_mcp_grants(path, meta.get("name", ""), meta.get("tools") or "", read(path))
 
 
 def known_mcp_servers() -> set[str]:
@@ -280,26 +246,17 @@ def check_skill_mirror() -> None:
     for relative in (".codex-plugin/plugin.json", "mcps/copilot_mcp.py", "scripts/copilot/service.py"):
         if not (ROOT / relative).is_file():
             err(f"missing shared runtime component: {relative}")
-    # Preserve the original named mirror check for readable diagnostics.
-    source = ROOT / ".claude" / "skills" / "trading-copilot" / "SKILL.md"
-    mirror = ROOT / ".agents" / "skills" / "trading-copilot" / "SKILL.md"
-    if not mirror.exists():
-        return
-    if read(source) != read(mirror):
-        err(".agents/skills/trading-copilot/SKILL.md drifted from .claude source")
 
 
 def check_docs_and_workflows() -> None:
-    methodology = read(ROOT / "docs" / "methodology.md")
-    stale_markers = [
-        "ANALYSTS (sequential)",
-        "Why sequential analysts (not parallel)",
-    ]
-    for marker in stale_markers:
-        if marker in methodology:
-            err(f"docs/methodology.md: stale sequential-analyst marker '{marker}'")
-    if "ANALYSTS (parallel fan-out)" not in methodology:
-        err("docs/methodology.md: missing current parallel analyst description")
+    """Docs must not advertise commands or agents the plugin no longer ships."""
+    stale = ("/analyze", "/advise", "/debate", "/earnings", "/screen",
+             "portfolio-manager", "research-manager", "bull-researcher")
+    for relative in ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md"):
+        text = read(ROOT / relative)
+        for marker in stale:
+            if marker in text:
+                err(f"{relative}: still references removed feature '{marker}'")
 
 
 

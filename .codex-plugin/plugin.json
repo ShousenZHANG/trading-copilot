@@ -1,7 +1,7 @@
 {
   "name": "trading-copilot",
-  "version": "0.4.0",
-  "description": "Conversational daily investment research with verified free-data snapshots and a local operation journal. US stocks/ETFs, Nasdaq and Chinese investment bullion; optional deep analysis.",
+  "version": "0.5.0",
+  "description": "Rule-driven long-term ETF and Chinese gold accumulation: verified free-data snapshots, backtested rules the user adopts, deterministic orders, local journal. No return is promised.",
   "author": {
     "name": "eddy.zhang24",
     "email": "eddy.zhang24@gmail.com"
@@ -10,8 +10,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Trading Copilot",
-    "shortDescription": "Verified research and local investment records.",
-    "longDescription": "Conversational daily investment research with verified free-data snapshots and a local operation journal. US stocks/ETFs, Nasdaq and Chinese investment bullion; optional deep analysis.",
+    "shortDescription": "Backtested ETF and gold rules with a local journal.",
+    "longDescription": "Rule-driven long-term ETF and Chinese gold accumulation: verified free-data snapshots, backtested rules the user adopts, deterministic orders, local journal. No return is promised.",
     "developerName": "eddy.zhang24",
     "category": "Productivity",
     "capabilities": [],

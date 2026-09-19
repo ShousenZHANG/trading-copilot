@@ -1,8 +1,8 @@
 {
   "name": "trading-copilot",
   "displayName": "Trading Copilot",
-  "version": "0.4.0",
-  "description": "Conversational daily investment research with verified free-data snapshots and a local operation journal. US stocks/ETFs, Nasdaq and Chinese investment bullion; optional deep analysis.",
+  "version": "0.5.0",
+  "description": "Rule-driven long-term ETF and Chinese gold accumulation: verified free-data snapshots, backtested rules the user adopts, deterministic orders, local journal. No return is promised.",
   "author": {
     "name": "eddy.zhang24",
     "email": "eddy.zhang24@gmail.com"
@@ -11,14 +11,12 @@
   "keywords": [
     "trading",
     "finance",
-    "stocks",
+    "etf",
     "gold",
     "macro",
-    "etf",
-    "equity-research",
     "portfolio",
     "risk-management",
-    "multi-agent",
+    "backtest",
     "investment-research",
     "market-data",
     "mcp"
@@ -26,22 +24,7 @@
   "homepage": "https://github.com/ShousenZHANG/trading-copilot",
   "repository": "https://github.com/ShousenZHANG/trading-copilot",
   "commands": "./.claude/commands",
-  "agents": [
-    "./.claude/agents/analysts/fundamentals-analyst.md",
-    "./.claude/agents/analysts/macro-analyst.md",
-    "./.claude/agents/analysts/market-analyst.md",
-    "./.claude/agents/analysts/news-analyst.md",
-    "./.claude/agents/analysts/social-analyst.md",
-    "./.claude/agents/investment-advisor.md",
-    "./.claude/agents/managers/portfolio-manager.md",
-    "./.claude/agents/managers/research-manager.md",
-    "./.claude/agents/researchers/bear-researcher.md",
-    "./.claude/agents/researchers/bull-researcher.md",
-    "./.claude/agents/risk-debators/aggressive-debator.md",
-    "./.claude/agents/risk-debators/conservative-debator.md",
-    "./.claude/agents/risk-debators/neutral-debator.md",
-    "./.claude/agents/trader.md"
-  ],
+  "agents": [],
   "skills": "./.claude/skills",
   "mcpServers": "./.mcp.json"
 }
