@@ -115,6 +115,7 @@ jobs:
       - name: Pinned calendars and real MCP tool persistence
         run: |
           uv run --no-project --with yfinance==1.7.0 --with exchange-calendars==4.13.2 --with tzdata==2026.3 python scripts/_test_market_data.py --calendars
+          uv run --no-project --with exchange-calendars==4.13.2 --with tzdata==2026.3 python scripts/backtest_cli.py --verify-calendars
           uv run --no-project --quiet --script scripts/copilot_probe.py
 
       # The repo checker and the official validator disagreed for a whole
@@ -175,6 +176,8 @@ jobs:
           required = [
               "scripts/ticker.py", "scripts/parse_rating.py", "scripts/notify.py",
               "scripts/copilot_cli.py", "scripts/copilot/config.py",
+              "scripts/backtest_cli.py", "scripts/copilot/backtest/engine.py",
+              "scripts/copilot/backtest/rules.py", "scripts/copilot/backtest/admission.py",
               "evals/scorer.py", "evals/stockbench/backtest_engine.py",
               "mcps/finnhub_mcp.py", "mcps/akshare_mcp.py",
               "mcps/copilot_mcp.py", "scripts/copilot/service.py",
@@ -194,7 +197,8 @@ jobs:
                     or n.endswith(".env") or "/data/runs/" in n
                     or "/data/decisions/" in n or "/data/state/" in n
                     or "config/user.toml" in n
-                    or n.endswith((".sqlite", ".sqlite-wal", ".sqlite-shm")) or "portfolio_state.json" in n]
+                    or n.endswith((".sqlite", ".sqlite-wal", ".sqlite-shm")) or "portfolio_state.json" in n
+                    or n.lower().endswith("_history.csv")]
           if leaked:
               sys.exit("personal state leaked into zip: " + ", ".join(leaked))
 
