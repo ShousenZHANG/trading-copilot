@@ -285,6 +285,18 @@ def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None,
             warnings.append(f"{eid}: exact publication/observation timestamp is unknown; keep the source's date-level meaning")
         if eid in market_ids and rec.get("latest_session", item.get("latest_session")) != item.get("latest_session"):
             blockers.append(f"market evidence {eid} session is stale")
+        # A cited market record must describe the instrument being assessed.
+        # This is stronger than anything the policy did before: the old
+        # dynamic-ETF branch bound identity only for symbols the registry had
+        # provisionally typed as stock, so a registered symbol such as QQQ was
+        # never checked here at all. Providers are deliberately not
+        # allow-listed, so a new price source needs no change to this gate.
+        # Research records declare none of these fields; only a declared field
+        # is compared, and omitting one is not an error.
+        if eid in market_ids:
+            for field in ("instrument_id", "currency", "unit", "price_kind", "asset_class"):
+                if rec.get(field) is not None and rec[field] != identity[field]:
+                    blockers.append(f"market evidence {eid} {field} does not match the instrument identity")
     verified_claims, claim_issues = _claims(proposal, snapshot, evidence, market_ids, ids)
     blockers.extend(claim_issues)
     if proposal.get("snapshot_id", snapshot["snapshot_id"]) != snapshot["snapshot_id"]:
