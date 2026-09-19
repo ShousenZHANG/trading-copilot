@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
+# The allow-list of names load_credentials() will read out of .env. This is a
+# deliberate boundary: an unknown name in .env is never promoted into the
+# process environment. Adding a credential means adding its name here AND
+# re-running scripts/sync_runtimes.py, because the generated Codex config
+# forwards exactly this tuple.
 KEY_NAMES = (
     "FINNHUB_API_KEY", "FRED_API_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY",
     "ALPACA_API_KEY", "ALPACA_SECRET_KEY", "SEC_USER_AGENT",
@@ -17,7 +22,14 @@ KEY_NAMES = (
 
 
 def load_credentials() -> None:
-    """Load only provider settings; preserve explicit process environment overrides."""
+    """Load only the allow-listed provider settings from .env.
+
+    A real process override still wins. An EMPTY one does not: an MCP client
+    expanding `${VAR}` against a host environment that never sourced .env
+    injects "", and `setdefault` would let that empty string mask the real
+    value. Every Finnhub tool in this repository returned HTTP 401 for exactly
+    that reason.
+    """
     path = ROOT / ".env"
     if not path.is_file():
         return
@@ -29,8 +41,23 @@ def load_credentials() -> None:
         name, value = name.strip(), value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        if name in KEY_NAMES and value:
-            os.environ.setdefault(name, value)
+        if name in KEY_NAMES and value and not os.environ.get(name, "").strip():
+            os.environ[name] = value
+
+
+def secret_values() -> tuple[str, ...]:
+    """Every live credential value, for redaction. Single source of truth.
+
+    Callers that scrub text or URLs must use this rather than keeping their own
+    list of variable names, which is how research_data._redact drifted from
+    KEY_NAMES: SEC_USER_AGENT was loaded and never redacted.
+    """
+    seen: list[str] = []
+    for name in KEY_NAMES:
+        value = os.environ.get(name, "").strip()
+        if value and value not in seen:
+            seen.append(value)
+    return tuple(seen)
 
 
 def database_path(db_path: str | Path | None = None) -> Path:
