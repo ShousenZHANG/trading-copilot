@@ -29,10 +29,15 @@ CHART_HOST = "https://query1.finance.yahoo.com/v8/finance/chart"
 #: HTTP 429 on the first request with no Retry-After. This one returned 200.
 USER_AGENT = "Mozilla/5.0 TradingCopilot/1.0 (personal research)"
 
-#: New York is UTC-5 or UTC-4. A daily bar is stamped at the exchange open, so
-#: converting naively in UTC shifts bars across midnight. Five hours is the
-#: winter offset; four in summer. Subtracting the winter offset and taking the
-#: date is correct in both, because the open is 09:30 local either way.
+#: New York is UTC-5 (winter) or UTC-4 (summer). Subtracting the fixed winter
+#: offset and taking the date is correct for any stamp from 05:00 UTC onward,
+#: which covers every open (13:30-14:30 UTC) and close (20:00-21:00 UTC) stamp
+#: Yahoo actually emits for a daily bar. A stamp within five hours of UTC
+#: midnight would be misfiled by this fixed offset, but Yahoo does not emit
+#: those. Proven, not assumed: verified against the open stamps this module's
+#: tests use. Do not replace this with zoneinfo -- ZoneInfo("America/New_York")
+#: raises on Windows without the tzdata package, which this stdlib-only path
+#: deliberately does not depend on.
 _NEW_YORK_WINTER_OFFSET = timedelta(hours=5)
 
 #: One request every 1.5s, single process. Observed: 30 consecutive requests at
@@ -56,6 +61,9 @@ class Series:
     dates: tuple[date, ...]
     split_adjusted: tuple[float, ...]
     split_and_dividend_adjusted: tuple[float, ...]
+    #: Consumed by `alignment()`, per symbol -- not dead weight. A symbol
+    #: whose feed is mostly null still produces a structurally valid Series,
+    #: so this is the only place a caller can see that before trusting it.
     dropped_bars: int
 
 
@@ -138,6 +146,44 @@ def fetch(symbol: str, *, until_epoch: int | None = None, timeout: float = 30.0)
     return parse_chart(symbol, body)
 
 
+def alignment(series: Sequence[Series]) -> dict:
+    """Report per-symbol date coverage and the intersection. Reports; never judges.
+
+    This does not raise on thin or non-overlapping coverage and invents no
+    threshold -- `to_frame` silently returning a valid but tiny frame is a
+    real failure mode (one one-bar symbol in a 22-symbol sweep quietly caps
+    the whole backtest at a single day), and the fix is attribution a caller
+    can log or gate on, not a judgment made here.
+    """
+    if not series:
+        raise ValueError("no series to align")
+    per_symbol = {
+        s.symbol: {
+            "first": s.dates[0].isoformat(),
+            "last": s.dates[-1].isoformat(),
+            "bars": len(s.dates),
+            "dropped_bars": s.dropped_bars,
+        }
+        for s in series
+    }
+    common = set(series[0].dates)
+    for s in series[1:]:
+        common &= set(s.dates)
+    common_sorted = sorted(common)
+    binds_start = max(series, key=lambda s: s.dates[0]).symbol
+    binds_end = min(series, key=lambda s: s.dates[-1]).symbol
+    longest = max(len(s.dates) for s in series)
+    return {
+        "per_symbol": per_symbol,
+        "common_first": common_sorted[0].isoformat() if common_sorted else None,
+        "common_last": common_sorted[-1].isoformat() if common_sorted else None,
+        "common_bars": len(common_sorted),
+        "binds_start": binds_start,
+        "binds_end": binds_end,
+        "bars_lost_vs_longest": longest - len(common_sorted),
+    }
+
+
 def to_frame(series: Sequence[Series], *, dividend_adjusted: bool = True) -> PriceFrame:
     """Intersect several symbols onto their common dates.
 
@@ -150,7 +196,13 @@ def to_frame(series: Sequence[Series], *, dividend_adjusted: bool = True) -> Pri
     for s in series[1:]:
         common &= set(s.dates)
     if not common:
-        raise ValueError("these symbols share no common trading dates")
+        info = alignment(series)
+        start = info["binds_start"]
+        end = info["binds_end"]
+        raise ValueError(
+            "these symbols share no common trading dates — "
+            f"binds_start={start} (first bar {info['per_symbol'][start]['first']}), "
+            f"binds_end={end} (last bar {info['per_symbol'][end]['last']})")
     dates = sorted(common)
     lookup = {}
     for s in series:

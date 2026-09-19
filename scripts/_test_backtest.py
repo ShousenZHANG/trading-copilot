@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+import urllib.error
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -118,6 +120,15 @@ class PriceFrameContract(unittest.TestCase):
         self.assertEqual(sliced.dates, (date(2020, 1, 3), date(2020, 1, 6)))
         self.assertEqual(sliced.column("SPY"), (101.0, 99.0))
 
+    def test_slice_can_retain_exactly_one_row(self):
+        sliced = self.frame().slice(date(2020, 1, 3), date(2020, 1, 3))
+        self.assertEqual(sliced.dates, (date(2020, 1, 3),))
+        self.assertEqual(sliced.span_years(), 0.0)
+
+    def test_slice_rejects_start_after_end(self):
+        with self.assertRaisesRegex(ValueError, "no bars between"):
+            self.frame().slice(date(2020, 1, 6), date(2020, 1, 2))
+
     def test_sessions_in_year_counts_bars(self):
         self.assertEqual(self.frame().sessions_in_year(2020), 3)
         self.assertEqual(self.frame().sessions_in_year(2008), 0)
@@ -161,6 +172,19 @@ class HistoryParsing(unittest.TestCase):
         series = history.parse_chart("SPY", payload)
         self.assertEqual(len(series.dates), 2)
         self.assertEqual(series.split_adjusted, (100.0, 102.0))
+        self.assertEqual(series.split_and_dividend_adjusted, (99.0, 101.0))
+        self.assertEqual(series.dropped_bars, 1)
+
+    def test_drops_bars_where_adjclose_is_null(self):
+        # Symmetric to the close=None case above: a null on the OTHER series
+        # must drop the same bar and keep both arrays aligned to each other.
+        payload = chart_payload(timestamps=[1577941200, 1578027600, 1578114000],
+                                closes=[100.0, 101.0, 102.0],
+                                adjcloses=[99.0, None, 101.0])
+        series = history.parse_chart("SPY", payload)
+        self.assertEqual(len(series.dates), 2)
+        self.assertEqual(series.split_adjusted, (100.0, 102.0))
+        self.assertEqual(series.split_and_dividend_adjusted, (99.0, 101.0))
         self.assertEqual(series.dropped_bars, 1)
 
     def test_rejects_an_empty_result(self):
@@ -174,14 +198,26 @@ class HistoryParsing(unittest.TestCase):
         with self.assertRaisesRegex(history.NotCovered, "delisted"):
             history.parse_chart("SPLG", body)
 
-    def test_dates_come_back_in_new_york_not_utc(self):
-        # 1578016200 is 2020-01-03 02:00 UTC, which is 2020-01-02 21:00 in New
-        # York. Real Yahoo daily stamps sit at the exchange open, where the two
-        # calendars agree; this is the defensive case, and taking the UTC date
-        # would file the bar under the wrong session.
-        series = history.parse_chart("SPY", chart_payload(timestamps=[1578016200], closes=[1.0],
-                                                          adjcloses=[1.0]))
+    def test_dates_come_back_in_new_york_for_a_winter_open_stamp(self):
+        # 2020-01-02 14:30:00 UTC is the exchange open in EST (UTC-5): 09:30
+        # local. int(datetime(2020, 1, 2, 14, 30, tzinfo=timezone.utc)
+        # .timestamp()) == 1577975400. Taking the UTC date directly would
+        # still give 2020-01-02 here, so this is the case that actually
+        # discriminates the offset: the fixed 5-hour subtraction must land on
+        # the same session date Yahoo stamps, not shift it.
+        series = history.parse_chart(
+            "SPY", chart_payload(timestamps=[1577975400], closes=[1.0], adjcloses=[1.0]))
         self.assertEqual(series.dates[0], date(2020, 1, 2))
+
+    def test_dates_come_back_in_new_york_for_a_summer_open_stamp(self):
+        # 2020-07-01 13:30:00 UTC is the exchange open in EDT (UTC-4): 09:30
+        # local. int(datetime(2020, 7, 1, 13, 30, tzinfo=timezone.utc)
+        # .timestamp()) == 1593610200. The loader subtracts the fixed WINTER
+        # offset (5h) even in summer, landing on 08:30 -- the wrong clock time
+        # but still 2020-07-01, which is all _to_new_york_date promises.
+        series = history.parse_chart(
+            "SPY", chart_payload(timestamps=[1593610200], closes=[1.0], adjcloses=[1.0]))
+        self.assertEqual(series.dates[0], date(2020, 7, 1))
 
 
 class HistoryUrl(unittest.TestCase):
@@ -225,6 +261,103 @@ class HistoryToFrame(unittest.TestCase):
         self.assertEqual(f.dates, (date(2020, 1, 3), date(2020, 1, 6)))
         self.assertEqual(f.column("SPY"), (100.0, 101.0))
         self.assertEqual(f.column("QQQ"), (198.0, 199.0))
+
+    def test_empty_intersection_names_the_binding_symbols(self):
+        spy = history.Series(
+            symbol="SPY",
+            dates=(date(2020, 1, 2),),
+            split_adjusted=(100.0,),
+            split_and_dividend_adjusted=(99.0,),
+            dropped_bars=0,
+        )
+        newetf = history.Series(
+            symbol="NEWETF",
+            dates=(date(2021, 1, 4),),
+            split_adjusted=(10.0,),
+            split_and_dividend_adjusted=(10.0,),
+            dropped_bars=0,
+        )
+        with self.assertRaisesRegex(ValueError, r"binds_start=NEWETF.*binds_end=SPY"):
+            history.to_frame([spy, newetf])
+
+
+class HistoryAlignment(unittest.TestCase):
+    def series(self):
+        spy = history.Series(
+            symbol="SPY",
+            dates=(date(2020, 1, 2), date(2020, 1, 3), date(2020, 1, 6)),
+            split_adjusted=(100.0, 101.0, 102.0),
+            split_and_dividend_adjusted=(99.0, 100.0, 101.0),
+            dropped_bars=1,
+        )
+        qqq = history.Series(
+            symbol="QQQ",
+            dates=(date(2020, 1, 3), date(2020, 1, 6), date(2020, 1, 7)),
+            split_adjusted=(200.0, 201.0, 202.0),
+            split_and_dividend_adjusted=(198.0, 199.0, 200.0),
+            dropped_bars=2,
+        )
+        return spy, qqq
+
+    def test_reports_the_binding_symbols_and_bars_lost(self):
+        info = history.alignment(self.series())
+        self.assertEqual(info["binds_start"], "QQQ")  # latest first-date: 2020-01-03
+        self.assertEqual(info["binds_end"], "SPY")  # earliest last-date: 2020-01-06
+        self.assertEqual(info["common_first"], "2020-01-03")
+        self.assertEqual(info["common_last"], "2020-01-06")
+        self.assertEqual(info["common_bars"], 2)
+        self.assertEqual(info["bars_lost_vs_longest"], 1)  # longest=3, common=2
+
+    def test_surfaces_dropped_bars_per_symbol(self):
+        info = history.alignment(self.series())
+        self.assertEqual(info["per_symbol"]["SPY"]["dropped_bars"], 1)
+        self.assertEqual(info["per_symbol"]["QQQ"]["dropped_bars"], 2)
+        self.assertEqual(info["per_symbol"]["SPY"]["first"], "2020-01-02")
+        self.assertEqual(info["per_symbol"]["SPY"]["bars"], 3)
+
+
+class HistoryFetchThrottle(unittest.TestCase):
+    """No network: urlopen is monkeypatched on every path through fetch()."""
+
+    def tearDown(self):
+        history._last_request_at = 0.0
+
+    class _FakeResponse:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def read(self):
+            return self._body
+
+    def test_throttle_timestamp_updates_on_success(self):
+        history._last_request_at = 0.0
+        body = chart_payload().encode("utf-8")
+        with mock.patch.object(history.urllib.request, "urlopen",
+                               return_value=self._FakeResponse(body)):
+            history.fetch("SPY", until_epoch=1700000000)
+        self.assertGreater(history._last_request_at, 0.0)
+
+    def test_throttle_timestamp_updates_on_http_error(self):
+        history._last_request_at = 0.0
+        error = urllib.error.HTTPError(url="x", code=500, msg="boom", hdrs=None, fp=None)
+        with mock.patch.object(history.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(history.HistoryError):
+                history.fetch("SPY", until_epoch=1700000000)
+        self.assertGreater(history._last_request_at, 0.0)
+
+    def test_throttle_timestamp_updates_on_url_error(self):
+        history._last_request_at = 0.0
+        error = urllib.error.URLError("no route to host")
+        with mock.patch.object(history.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(history.HistoryError):
+                history.fetch("SPY", until_epoch=1700000000)
+        self.assertGreater(history._last_request_at, 0.0)
 
 
 if __name__ == "__main__":

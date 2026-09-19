@@ -41,9 +41,25 @@ class PriceFrame:
                      closes=[list(self.closes[i]) for i in keep])
 
     def sessions_in_year(self, year: int) -> int:
+        """Count of bars dated in `year`. Descriptive only.
+
+        This is a raw count, not a density guarantee: it says nothing about
+        which days are missing or why. An admission decision must compare
+        this against an expected session count for the year (e.g. an
+        exchange calendar's ~252), never against zero or against this method
+        alone — a frame can hold a single bar for a year and still return 1.
+        """
         return sum(1 for d in self.dates if d.year == year)
 
     def span_years(self) -> float:
+        """Calendar distance from the first bar to the last. Descriptive only.
+
+        This is endpoint arithmetic, not a data-density guarantee: a 2-bar
+        frame with dates 2008-01-02 and 2023-01-03 returns 15.003 here even
+        though everything between those two bars is missing. Do not use this
+        as an admission gate by itself — combine it with `sessions_in_year`
+        against an expected session count.
+        """
         return (self.dates[-1] - self.dates[0]).days / DAYS_PER_YEAR
 
     def __len__(self) -> int:
