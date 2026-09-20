@@ -16,7 +16,7 @@ schema_version = 1
 
 [etf]
 universe = ["QQQ", "SPY", "VEA", "VWO", "IWM"]
-investable_total_usd = 0
+investable_cash_usd = 0
 min_cash_reserve_pct = 0.15
 max_drawdown_pct = 0.20
 adopted_rule_id = ""
@@ -104,6 +104,64 @@ class ConfigTests(unittest.TestCase):
     def test_secrets_are_not_config_fields(self):
         with self.assertRaisesRegex(ValueError, "unknown section 'smtp'"):
             cfg.load_config(self.write(VALID + '\n[smtp]\npassword = "x"\n'))
+
+
+class CashSemantics(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "user.toml"
+
+    def write(self, text: str) -> Path:
+        self.path.write_text(text, encoding="utf-8")
+        return self.path
+
+    def test_the_field_is_named_for_cash(self):
+        config = cfg.load_config(self.write(VALID.replace(
+            "investable_cash_usd = 0", "investable_cash_usd = 5000.0")))
+        self.assertAlmostEqual(config.etf.investable_cash_usd, 5000.0)
+
+    def test_the_old_name_is_refused_and_names_the_new_one(self):
+        # VALID already carries the current field name, so the old-name
+        # rejection is exercised by reintroducing it here.
+        stale = VALID.replace("investable_cash_usd = 0", "investable_total_usd = 0")
+        with self.assertRaisesRegex(ValueError, "investable_cash_usd"):
+            cfg.load_config(self.write(stale))
+
+    def test_the_error_explains_the_semantics_not_just_the_rename(self):
+        stale = VALID.replace("investable_cash_usd = 0", "investable_total_usd = 0")
+        try:
+            cfg.load_config(self.write(stale))
+        except ValueError as exc:
+            self.assertIn("cash", str(exc).lower())
+        else:
+            self.fail("expected ValueError")
+
+
+class AdoptionPointer(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "user.toml"
+
+    def write(self, text: str) -> Path:
+        self.path.write_text(text, encoding="utf-8")
+        return self.path
+
+    def config(self, pointer):
+        return self.write(VALID.replace('adopted_rule_id = ""', f'adopted_rule_id = "{pointer}"'))
+
+    def test_a_well_formed_pointer_is_accepted(self):
+        self.assertEqual(cfg.load_config(self.config("rule-0123456789abcdef")).etf.adopted_rule_id,
+                         "rule-0123456789abcdef")
+
+    def test_empty_means_nothing_is_adopted(self):
+        self.assertEqual(cfg.load_config(self.config("")).etf.adopted_rule_id, "")
+
+    def test_a_malformed_pointer_is_refused(self):
+        for bad in ("momentum", "rule-XYZ", "rule-0123", "rule-0123456789ABCDEF"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "adopted_rule_id"):
+                cfg.load_config(self.config(bad))
 
 
 if __name__ == "__main__":
