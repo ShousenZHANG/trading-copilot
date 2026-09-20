@@ -341,6 +341,22 @@ class SleeveLimits(unittest.TestCase):
         from copilot.policy import limit_for
         self.assertAlmostEqual(limit_for("correlation", "physical_gold"), 0.7)
 
+    def test_a_non_single_name_limit_read_from_a_real_decision_is_not_hardcoded(self):
+        # Mutation-review finding: replacing `limit = limit_for(name, sleeve)`
+        # with a hardcoded `limit = 0.25` for every check survives all of
+        # this class's other tests, because they either call limit_for()
+        # directly (never exercising assess_proposal's loop) or check
+        # single_name, whose real ETF limit genuinely IS 0.25. liquidity's
+        # real limit is 0.01 and drawdown's is 0.15, so reading either one as
+        # 0.25 out of a real decision proves the loop stopped reading
+        # limit_for per-check.
+        snapshot = fixture()
+        p = proposal(action="buy")
+        context = complete_context(snapshot, p)
+        decision = assess_proposal(p, snapshot, context, now=NOW)
+        self.assertAlmostEqual(decision["risk_checks"]["liquidity"]["limit"], 0.01)
+        self.assertAlmostEqual(decision["risk_checks"]["drawdown"]["limit"], 0.15)
+
 
 class SectorMap(unittest.TestCase):
     def test_every_sector_etf_maps_to_one_sector(self):

@@ -193,6 +193,19 @@ engine can turn an adopted rule into an order.
 - 25% single-ETF exposure with no correlation check is a real concentration
   the user accepted with eyes open (Decision clause 7); this tool will not
   flag a QQQ-plus-SPY basket as concentrated even though it effectively is.
+- **The sector check has the same gap, from the same missing data.**
+  `instruments.sector_of` returns `"diversified"` for QQQ, QQQM, JEPQ and
+  QQQI -- identical to SPY/VOO/IVV -- because "diversified" means "no
+  single-sector attribution available," not "measured as diversified." The
+  Nasdaq-100 is structurally concentrated in mega-cap technology and
+  communications, and nothing in the sector check says so: a QQQ-plus-XLK
+  basket reports only XLK's technology weight against the 25% sector limit,
+  while the basket's true technology exposure is materially higher. They are
+  deliberately not relabelled `technology` -- QQQ is genuinely more
+  diversified than XLK, so that label would overstate the concentration in
+  the other direction -- and the truthful measure, look-through holdings
+  overlap, is the same one Decision clause 7 already names as unavailable
+  from any configured source.
 - A stale coverage declaration cannot silently persist, because any trade
   invalidates it (Decision clause 4). But a *wrong* declaration — holdings
   the user mis-reports as complete — will size against a wrong total, and that

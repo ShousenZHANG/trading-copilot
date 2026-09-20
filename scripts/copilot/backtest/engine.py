@@ -106,6 +106,15 @@ class CostModel:
 class Result:
     rule_name: str
     parameters: dict[str, float]
+    #: The symbols the frame actually held, in the frame's own order. Added so
+    #: a Result is self-describing about what it ran over: rule_name and
+    #: parameters alone cannot distinguish two runs of the same family and
+    #: knobs over two different baskets, which is exactly what let a caller
+    #: claim a genuine, admitted Result for a universe it never ran (see
+    #: ruleset.build_adoption's binding check). Defaults to an empty tuple so
+    #: every existing hand-built Result in the admission-gate tests, which
+    #: predate this field and never touch universe, keeps constructing.
+    universe: tuple[str, ...] = field(default_factory=tuple)
     curve: list[tuple[date, float]] = field(default_factory=list)
     cash_history: list[float] = field(default_factory=list)
     positions_history: list[dict[str, float]] = field(default_factory=list)
@@ -141,7 +150,7 @@ def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostMod
     """Trade at each bar's close, paying costs on the traded notional."""
     if not 0.0 <= cash_floor_pct < 1.0:
         raise ValueError(f"cash_floor_pct must be in [0, 1), got {cash_floor_pct}")
-    result = Result(rule_name=rule.name, parameters=dict(rule.parameters))
+    result = Result(rule_name=rule.name, parameters=dict(rule.parameters), universe=frame.symbols)
     cash = float(start_cash)
     positions: dict[str, float] = {}
     last_rebalance_index: int | None = None

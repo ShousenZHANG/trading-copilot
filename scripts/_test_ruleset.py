@@ -205,6 +205,55 @@ class AdoptionRecord(unittest.TestCase):
                        targets={"IWM": 0.3, "QQQ": 0.3, "SPY": 0.3})
 
 
+class ResultMustDescribeTheAdoption(unittest.TestCase):
+    """Defect 1 (CRITICAL, post-845b810 review): build_adoption must refuse a
+    Result that does not describe the family/parameters/universe being
+    adopted. Without this, two working bypasses reach the same outcome as
+    the literal `{"admitted": True}` the module already blocks: (a) a
+    hand-built Result with fabricated fields, and (b) a genuine admitted
+    Result claimed for a different configuration than the one that actually
+    produced it -- its metrics then describe a strategy that never ran with
+    those parameters/universe.
+    """
+    def build(self, **overrides):
+        frame, rule, result = admitted_result()
+        kwargs = dict(sleeve="etf", family=rule.name, parameters=dict(rule.parameters),
+                      universe=tuple(frame.symbols), targets=None, result=result,
+                      cost_model={"per_share_usd": 0.0035, "minimum_usd": 1.0,
+                                  "max_pct_of_notional": 0.01, "spread_bps": 2.0},
+                      cash_floor_pct=0.15, integer_shares=True)
+        kwargs.update(overrides)
+        return ruleset.build_adoption(**kwargs)
+
+    def test_the_genuinely_matched_case_still_succeeds(self):
+        record = self.build()
+        self.assertTrue(record["admission"]["admitted"])
+
+    def test_a_fabricated_result_with_a_mismatched_family_is_refused(self):
+        # Bypass (a): a hand-built Result whose fields do not correspond to
+        # any real backtest. Reusing a genuine, admitted curve/costs here
+        # proves the refusal comes from the name mismatch, not from the
+        # admission gate rejecting the curve.
+        _, _, real = admitted_result()
+        fake = bt_engine.Result(rule_name="not_even_a_real_family_name",
+                                parameters=dict(real.parameters), curve=list(real.curve),
+                                universe=real.universe, traded_notional=real.traded_notional,
+                                total_costs=real.total_costs, rebalance_count=real.rebalance_count)
+        with self.assertRaisesRegex(ValueError, "rule_name"):
+            self.build(result=fake)
+
+    def test_a_result_admitted_under_different_parameters_is_refused(self):
+        # Bypass (b): a real, admitted top_n=2 Result must not be recordable
+        # under a top_n=5 identity -- the attached admission.metrics.cagr
+        # would then describe a strategy that never ran.
+        with self.assertRaisesRegex(ValueError, "parameters"):
+            self.build(parameters={"top_n": 5.0, "lookback_days": 50.0, "skip_days": 5.0})
+
+    def test_a_result_admitted_over_a_different_universe_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "universe"):
+            self.build(universe=("QQQ",))
+
+
 class CostAwareSizing(unittest.TestCase):
     def model(self):
         return bt_engine.CostModel()

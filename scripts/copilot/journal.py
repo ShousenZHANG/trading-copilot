@@ -466,8 +466,19 @@ def record_operation(operation: dict, idempotency_key: str, *, db_path: Any = No
         return receipt
 
 
-def get_context(instrument_ids: Any = None, as_of: Any = None, *, db_path: Any = None) -> dict:
-    """Read holdings and audit context; as_of means information known by that UTC time."""
+def get_context(instrument_ids: Any = None, as_of: Any = None, *, sleeve: str = "etf",
+                db_path: Any = None) -> dict:
+    """Read holdings and audit context; as_of means information known by that UTC time.
+
+    `sleeve` selects which sleeve's coverage declaration to read. Coverage
+    declarations are per-sleeve rows in one shared table; a lookup with no
+    WHERE on sleeve returns whichever declaration is newest regardless of
+    which sleeve it names, so a gold declaration could mark the etf sleeve
+    (or any other) complete. Defaults to "etf" because that is the only
+    sleeve with a coverage-declaring caller today (COVERAGE_SLEEVES).
+    """
+    if sleeve not in COVERAGE_SLEEVES:
+        raise ValueError(f"sleeve must be one of {COVERAGE_SLEEVES}, got {sleeve!r}")
     instruments = {instrument_ids} if isinstance(instrument_ids, str) else set(instrument_ids or [])
     with _connection(db_path) as connection:
         connection.execute("BEGIN")
@@ -489,7 +500,8 @@ def get_context(instrument_ids: Any = None, as_of: Any = None, *, db_path: Any =
             # it is reported as stale rather than silently honoured.
             declared = connection.execute(
                 "SELECT base_currency, portfolio_version FROM coverage_declarations "
-                "ORDER BY declared_at DESC, declaration_id LIMIT 1").fetchone()
+                "WHERE sleeve = ? ORDER BY declared_at DESC, declaration_id LIMIT 1",
+                (sleeve,)).fetchone()
             if declared and declared[1] == portfolio_version:
                 complete, completeness, base_currency = True, "declared", declared[0]
             elif declared:

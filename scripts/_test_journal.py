@@ -398,6 +398,27 @@ class CoverageDeclarations(unittest.TestCase):
                 portfolio_version=journal.get_context(db_path=self.db)["portfolio_version"],
                 db_path=self.db)
 
+    def test_a_declaration_for_another_sleeve_does_not_leak_into_this_ones_coverage(self):
+        # get_context's coverage lookup must filter on sleeve. COVERAGE_SLEEVES
+        # = ("etf",) blocks record_coverage_declaration from ever creating a
+        # gold row, so this inserts one directly, the way a security review
+        # demonstrated the bypass: without a WHERE sleeve = ?, the newest row
+        # in the shared table wins regardless of which sleeve it names, and a
+        # gold declaration reported the etf sleeve complete.
+        version = journal.get_context(db_path=self.db)["portfolio_version"]
+        with journal._connection(self.db) as connection:
+            connection.execute(
+                "INSERT INTO coverage_declarations VALUES (?,?,?,?,?)",
+                ("coverage-gold-simulated", "gold", "USD", version, journal._stamp()))
+        context = journal.get_context(db_path=self.db, sleeve="etf")
+        self.assertFalse(context["portfolio_complete"])
+        self.assertEqual(context["completeness"], "unknown")
+        self.assertIsNone(context["base_currency"])
+
+    def test_get_context_refuses_an_unsupported_sleeve(self):
+        with self.assertRaisesRegex(ValueError, "sleeve"):
+            journal.get_context(db_path=self.db, sleeve="crypto")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
