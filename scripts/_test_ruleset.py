@@ -29,15 +29,21 @@ def admitted_result(family="momentum_top_n", parameters=None, days=5200):
     caller's claim, so the tests have to hand it something a backtest actually
     produced.
     """
-    parameters = parameters or {"top_n": 2.0, "lookback_days": 252.0, "skip_days": 21.0}
-    symbols = ["IWM", "QQQ", "SPY"]
+    # top_n=4 over five symbols, not top_n=2 over three: at the default 15%
+    # cash floor a two-name rotation puts 42.5% in one holding, above the ETF
+    # sleeve's 25% single-name limit, so build_adoption now refuses it as a rule
+    # that could never produce an executable order. Four of five is a real
+    # rotation and clears the limit at 21.25% a name.
+    parameters = parameters or {"top_n": 4.0, "lookback_days": 252.0, "skip_days": 21.0}
+    symbols = ["IWM", "IVV", "QQQ", "SPY", "VTI"]
     start = date(2005, 1, 3)
     dates, closes, day = [], [], start
     i = 0
     while len(dates) < days:
         if day.weekday() < 5:
             dates.append(day)
-            closes.append([100.0 + i * 0.01, 100.0 + i * 0.02, 100.0 + i * 0.015])
+            closes.append([100.0 + i * 0.01, 100.0 + i * 0.02, 100.0 + i * 0.015,
+                           100.0 + i * 0.012, 100.0 + i * 0.018])
             i += 1
         day += timedelta(days=1)
     frame = frame_mod.build(dates=dates, symbols=symbols, closes=closes)
@@ -54,8 +60,8 @@ class RuleIdentity(unittest.TestCase):
     def material(self, **overrides):
         base = dict(
             family="momentum_top_n",
-            parameters={"top_n": 2.0, "lookback_days": 252.0, "skip_days": 21.0},
-            universe=("IWM", "QQQ", "SPY"),
+            parameters={"top_n": 4.0, "lookback_days": 252.0, "skip_days": 21.0},
+            universe=("IVV", "IWM", "QQQ", "SPY", "VTI"),
             targets=None,
             cost_model={"per_share_usd": 0.0035, "minimum_usd": 1.0,
                         "max_pct_of_notional": 0.01, "spread_bps": 2.0},
@@ -72,8 +78,8 @@ class RuleIdentity(unittest.TestCase):
         self.assertRegex(ruleset.rule_id(**self.material()), r"^rule-[0-9a-f]{16}$")
 
     def test_universe_order_does_not_change_the_id(self):
-        self.assertEqual(ruleset.rule_id(**self.material(universe=("IWM", "QQQ", "SPY"))),
-                         ruleset.rule_id(**self.material(universe=("SPY", "IWM", "QQQ"))))
+        self.assertEqual(ruleset.rule_id(**self.material(universe=("IVV", "IWM", "QQQ", "SPY", "VTI"))),
+                         ruleset.rule_id(**self.material(universe=("VTI", "SPY", "IWM", "QQQ", "IVV"))))
 
     def test_every_identity_input_changes_the_id(self):
         # The first draft tested three of nine inputs. Two rules differing only
@@ -83,7 +89,7 @@ class RuleIdentity(unittest.TestCase):
         base = ruleset.rule_id(**self.material())
         variants = {
             "family": {"family": "inverse_volatility"},
-            "parameters": {"parameters": {"top_n": 3.0, "lookback_days": 252.0, "skip_days": 21.0}},
+            "parameters": {"parameters": {"top_n": 5.0, "lookback_days": 252.0, "skip_days": 21.0}},
             "universe": {"universe": ("IWM", "QQQ")},
             "targets": {"targets": {"QQQ": 1.0}},
             "cost_model": {"cost_model": {"per_share_usd": 0.005, "minimum_usd": 1.0,
@@ -161,7 +167,7 @@ class AdoptionRecord(unittest.TestCase):
             self.assertIn(key, record["admission"]["metrics"], key)
 
     def test_universe_is_stored_sorted(self):
-        self.assertEqual(self.build()["universe"], ["IWM", "QQQ", "SPY"])
+        self.assertEqual(self.build()["universe"], ["IVV", "IWM", "QQQ", "SPY", "VTI"])
 
     def test_only_the_etf_sleeve_exists(self):
         # ADR-0005 clause 2 deferred the gold sleeve; a gold adoption would skip
@@ -202,7 +208,72 @@ class AdoptionRecord(unittest.TestCase):
             self.build(family="fixed_weight_bands",
                        parameters={"relative_band": 0.25, "absolute_band": 0.05,
                                    "calendar_days": 365.0},
-                       targets={"IWM": 0.3, "QQQ": 0.3, "SPY": 0.3})
+                       targets={"IVV": 0.3, "IWM": 0.3, "QQQ": 0.3, "SPY": 0.3, "VTI": 0.3})
+
+
+class AnUnexecutableRuleIsRefused(unittest.TestCase):
+    """A rule whose largest holding can never clear the sleeve's single-name
+    limit is not a rule that sometimes pauses -- it can never produce an
+    executable order at all, and every daily evaluation would return
+    research_only forever. The arithmetic is N >= 4(1 - cash_floor) against the
+    25% ETF ceiling, so four holdings at the default 15% floor.
+    """
+
+    def check(self, **overrides):
+        from copilot.ruleset import _refuse_an_unexecutable_rule
+        kwargs = dict(family="momentum_top_n",
+                      parameters={"top_n": 4.0, "lookback_days": 252.0, "skip_days": 21.0},
+                      symbols=[f"S{i}" for i in range(12)], targets=None, cash_floor_pct=0.15)
+        kwargs.update(overrides)
+        return _refuse_an_unexecutable_rule(**kwargs)
+
+    def momentum(self, top_n):
+        return {"parameters": {"top_n": float(top_n), "lookback_days": 252.0,
+                               "skip_days": 21.0}}
+
+    def test_four_holdings_clear_the_limit_at_the_default_cash_floor(self):
+        self.check(**self.momentum(4))
+        self.check(**self.momentum(5))
+
+    def test_fewer_than_four_holdings_cannot(self):
+        for top_n in (1, 2, 3):
+            with self.assertRaisesRegex(ValueError, "never produce an executable order"):
+                self.check(**self.momentum(top_n))
+
+    def test_a_wide_universe_does_not_rescue_a_concentrated_rule(self):
+        # The limit is on a HOLDING, not on the pool it is drawn from. A
+        # twelve-symbol universe with top_n=2 still puts 42.5% in one name.
+        with self.assertRaises(ValueError):
+            self.check(symbols=[f"S{i}" for i in range(12)], **self.momentum(2))
+
+    def test_a_larger_cash_floor_buys_concentration(self):
+        with self.assertRaises(ValueError):
+            self.check(cash_floor_pct=0.40, **self.momentum(2))
+        self.check(cash_floor_pct=0.50, **self.momentum(2))
+
+    def test_fixed_weights_are_judged_on_their_largest_target(self):
+        self.check(family="fixed_weight_bands", parameters={}, symbols=list("ABCD"),
+                   targets={k: 0.25 for k in "ABCD"})
+        with self.assertRaises(ValueError):
+            self.check(family="fixed_weight_bands", parameters={}, symbols=list("ABCD"),
+                       targets={"A": 0.5, "B": 0.2, "C": 0.2, "D": 0.1})
+
+    def test_the_message_says_what_to_change(self):
+        with self.assertRaises(ValueError) as caught:
+            self.check(**self.momentum(2))
+        message = str(caught.exception)
+        self.assertIn("42.5%", message)
+        self.assertIn("25%", message)
+        self.assertIn("cash floor", message)
+
+    def test_inverse_volatility_is_not_bounded_at_adoption_time(self):
+        # Its weights depend on realised volatility, so the only honest
+        # pre-trade bound is 1.0 and enforcing that would reject every such
+        # rule. It can still pause on a day when one name's weight breaches the
+        # limit, and that is visible when it happens.
+        self.check(family="inverse_volatility",
+                   parameters={"lookback_days": 63.0, "rebalance_days": 21.0},
+                   symbols=["A", "B"])
 
 
 class ResultMustDescribeTheAdoption(unittest.TestCase):
