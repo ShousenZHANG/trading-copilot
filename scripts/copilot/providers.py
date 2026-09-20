@@ -489,9 +489,18 @@ class NasdaqIndexProvider:
 #: whitelist that guesses is not one.
 SUPPORTED_US_EXCHANGES = frozenset({"NASDAQ", "NYSE", "AMEX", "ARCA", "NYSE ARCA", "PSE", "NASDAQ-GM"})
 
+#: Nasdaq's own listing tiers. Only NASDAQ-GM appeared across the 39-symbol
+#: probe, but Global Select and Capital Market are the other two tiers a US ETF
+#: can sit on, and a fund moving between them is an ordinary event that would
+#: otherwise drop it to a single upstream and — per ADR-0007 clause 6 — pause
+#: the whole sleeve. The hyphen is what makes this safe to accept as a family:
+#: "NASDAQ DUBAI" separates with a space, so it stays refused.
+_NASDAQ_TIER = re.compile(r"^NASDAQ-[A-Z]{2}$")
+
 
 def is_supported_us_exchange(label: str) -> bool:
-    return str(label or "").upper() in SUPPORTED_US_EXCHANGES
+    text = str(label or "").upper()
+    return text in SUPPORTED_US_EXCHANGES or bool(_NASDAQ_TIER.match(text))
 
 
 def unsupported_exchange_detail(label: str) -> str:

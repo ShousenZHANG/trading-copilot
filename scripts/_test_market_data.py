@@ -461,6 +461,19 @@ class ExchangeWhitelist(unittest.TestCase):
         for label in ("NASDAQ-GM", "PSE", "NYSE ARCA"):
             self.assertTrue(is_supported_us_exchange(label), label)
 
+    def test_the_other_nasdaq_listing_tiers_are_accepted(self):
+        # Only NASDAQ-GM appeared across the 39-symbol probe, but Global Select
+        # and Capital Market are the other two tiers a US ETF can sit on. A fund
+        # moving between them is ordinary, and refusing the new label would drop
+        # it to one upstream and -- per ADR-0007 clause 6 -- pause the whole
+        # sleeve. The hyphen is what keeps this safe: NASDAQ DUBAI separates
+        # with a space.
+        from copilot.providers import is_supported_us_exchange
+        for label in ("NASDAQ-GS", "NASDAQ-CM"):
+            self.assertTrue(is_supported_us_exchange(label), label)
+        for label in ("NASDAQ-DUBAI", "NASDAQ-GLOBAL", "NASDAQ DUBAI"):
+            self.assertFalse(is_supported_us_exchange(label), label)
+
     def test_the_refusal_names_the_label_it_saw(self):
         from copilot.providers import unsupported_exchange_detail
         self.assertIn("XETRA", unsupported_exchange_detail("XETRA"))
