@@ -187,6 +187,27 @@ def render_decision(decision: dict, stored: dict) -> str:
     return "\n".join(lines)
 
 
+def declare_coverage(*, sleeve: str = "etf", base_currency: str = "USD",
+                     portfolio_version: str | None = None, db_path=None) -> dict:
+    """Declare that a sleeve's recorded holdings are complete.
+
+    Omitting portfolio_version reads the current one, which is the normal path.
+    Passing one explicitly lets a caller assert WHICH book it inspected, so a
+    declaration written against a stale reading is refused rather than silently
+    applied to a book that moved in between.
+    """
+    from .journal import coverage_history, record_coverage_declaration
+    path = database_path(db_path)
+    version = portfolio_version or context(db_path=db_path)["portfolio_version"]
+    receipt = record_coverage_declaration(sleeve=sleeve, base_currency=base_currency,
+                                          portfolio_version=version, db_path=path)
+    receipt["history"] = coverage_history(db_path=path)
+    receipt["message"] = (
+        f"已记录 {sleeve} sleeve 的持仓覆盖声明（基准货币 {base_currency}）。"
+        "任何新成交都会让这条声明失效，届时需要重新声明。")
+    return receipt
+
+
 def capabilities() -> dict:
     load_credentials()
     return {"schema_version": 1, "credentials_present": {k: bool(os.getenv(k)) for k in KEY_NAMES},

@@ -291,5 +291,113 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(context["portfolio_version"], self.context()["portfolio_version"])
 
 
+class CoverageDeclarations(unittest.TestCase):
+    """self.operation() below is the same executed-fixture shape JournalTests
+    uses (execution_status: "executed"), so recording it actually changes
+    _portfolio_version -- a pending operation would not, since _portfolio_version
+    filters on had_execution."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.db = Path(self.directory.name) / "private" / "copilot.sqlite"
+        self.now = "2026-09-06T12:00:00Z"
+
+    def operation(self, **overrides):
+        result = {"statement": "我已经买了 10 股 QQQ，成交价 500 美元，9月4日成交。", "execution_status": "executed", "instrument_id": "QQQ", "side": "buy", "quantity": "10", "unit": "share", "price": "500", "currency": "USD", "occurred_at": "2026-09-04", "source_message_id": "thread-a-message-1", "account_id": "broker-a", "fees": None}
+        result.update(overrides)
+        return result
+
+    def test_an_empty_journal_reports_unknown_coverage(self):
+        context = journal.get_context(db_path=self.db)
+        self.assertFalse(context["portfolio_complete"])
+        self.assertEqual(context["completeness"], "unknown")
+        self.assertIsNone(context["base_currency"])
+
+    def test_a_declaration_makes_coverage_complete(self):
+        version = journal.get_context(db_path=self.db)["portfolio_version"]
+        journal.record_coverage_declaration(sleeve="etf", base_currency="USD",
+                                            portfolio_version=version, db_path=self.db)
+        context = journal.get_context(db_path=self.db)
+        self.assertTrue(context["portfolio_complete"])
+        self.assertEqual(context["completeness"], "declared")
+        self.assertEqual(context["base_currency"], "USD")
+
+    def test_recording_a_trade_invalidates_the_declaration(self):
+        # This is the whole safety property: a declaration cannot go stale
+        # silently, because _portfolio_version hashes the executed operations.
+        version = journal.get_context(db_path=self.db)["portfolio_version"]
+        journal.record_coverage_declaration(sleeve="etf", base_currency="USD",
+                                            portfolio_version=version, db_path=self.db)
+        self.assertTrue(journal.get_context(db_path=self.db)["portfolio_complete"])
+        journal.record_operation(self.operation(), "key-after-declaration", db_path=self.db, now=self.now)
+        context = journal.get_context(db_path=self.db)
+        self.assertFalse(context["portfolio_complete"])
+        self.assertEqual(context["completeness"], "stale_declaration")
+        self.assertIsNone(context["base_currency"])
+
+    def test_declaring_against_a_version_that_is_not_current_is_refused(self):
+        with self.assertRaisesRegex(journal.JournalConflict, "portfolio_version"):
+            journal.record_coverage_declaration(sleeve="etf", base_currency="USD",
+                                                portfolio_version="not-the-current-version",
+                                                db_path=self.db)
+
+    def test_redeclaring_after_a_trade_restores_coverage(self):
+        journal.record_coverage_declaration(
+            sleeve="etf", base_currency="USD",
+            portfolio_version=journal.get_context(db_path=self.db)["portfolio_version"],
+            db_path=self.db)
+        journal.record_operation(self.operation(), "key-1", db_path=self.db, now=self.now)
+        self.assertFalse(journal.get_context(db_path=self.db)["portfolio_complete"])
+        journal.record_coverage_declaration(
+            sleeve="etf", base_currency="USD",
+            portfolio_version=journal.get_context(db_path=self.db)["portfolio_version"],
+            db_path=self.db)
+        self.assertTrue(journal.get_context(db_path=self.db)["portfolio_complete"])
+
+    def test_a_declaration_is_immutable(self):
+        journal.record_coverage_declaration(
+            sleeve="etf", base_currency="USD",
+            portfolio_version=journal.get_context(db_path=self.db)["portfolio_version"],
+            db_path=self.db)
+        with journal._connection(self.db) as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("UPDATE coverage_declarations SET base_currency='CNY'")
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("DELETE FROM coverage_declarations")
+
+    def test_the_history_of_declarations_is_readable(self):
+        # An auditor must be able to see what was declared and when, including
+        # declarations that later went stale.
+        journal.record_coverage_declaration(
+            sleeve="etf", base_currency="USD",
+            portfolio_version=journal.get_context(db_path=self.db)["portfolio_version"],
+            db_path=self.db)
+        journal.record_operation(self.operation(), "key-1", db_path=self.db, now=self.now)
+        journal.record_coverage_declaration(
+            sleeve="etf", base_currency="USD",
+            portfolio_version=journal.get_context(db_path=self.db)["portfolio_version"],
+            db_path=self.db)
+        history = journal.coverage_history(db_path=self.db)
+        self.assertEqual(len(history), 2)
+        self.assertTrue(history[0]["current"])
+        self.assertFalse(history[1]["current"])
+
+    def test_an_unsupported_base_currency_is_refused(self):
+        for bad in ("", "usd", "EURO", "US$"):
+            with self.assertRaisesRegex(ValueError, "base_currency"):
+                journal.record_coverage_declaration(
+                    sleeve="etf", base_currency=bad,
+                    portfolio_version=journal.get_context(db_path=self.db)["portfolio_version"],
+                    db_path=self.db)
+
+    def test_an_unsupported_sleeve_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "sleeve"):
+            journal.record_coverage_declaration(
+                sleeve="crypto", base_currency="USD",
+                portfolio_version=journal.get_context(db_path=self.db)["portfolio_version"],
+                db_path=self.db)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
