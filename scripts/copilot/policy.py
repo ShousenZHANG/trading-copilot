@@ -25,6 +25,32 @@ _INDICATOR_SAMPLES = {"sma20": 20, "sma50": 50, "sma200": 200, "rsi14": 15, "atr
                       "return_20_sessions": 21, "return_252_sessions": 253,
                       "high_252_sessions": 252, "low_252_sessions": 252}
 
+#: Concentration is a different risk for a fund than for a single company. A
+#: broad-market ETF already holds hundreds of names, so the 5% ceiling written
+#: for individual stocks makes any ETF sleeve unexecutable: 8-12 holdings is
+#: 8-12% each and a top-5 momentum rotation is 20%. 25% is conventional, not
+#: measured -- see ADR-0007 clause 2.
+_SLEEVE_LIMITS = {"etf": {"single_name": 0.25}}
+
+#: Checks that cannot be made informative for a sleeve, with the reason. This is
+#: deliberately not a threshold: daily-return correlation among broad equity
+#: ETFs is structurally 0.85-0.95, so 0.7 rejects every basket and any cap loose
+#: enough to admit one rejects nothing. The informative measure is look-through
+#: holdings overlap and no configured source provides fund constituents.
+#: ADR-0007 clause 7 records the consequence: beyond single-name and sector
+#: concentration the ETF sleeve has no diversification check.
+_SLEEVE_EXEMPT = {
+    "etf": {"correlation": "equity ETF return correlation is structurally 0.85-0.95, so no "
+                           "threshold separates a diversified basket from a concentrated "
+                           "one; look-through holdings overlap is the informative measure "
+                           "and no configured source provides fund constituents"},
+}
+
+
+def limit_for(name: str, asset_class: str) -> float:
+    """The limit for a risk check, per sleeve. Defaults to the stock limit."""
+    return _SLEEVE_LIMITS.get(asset_class, {}).get(name, _LIMITS[name][1])
+
 
 def _time(value: object, name: str) -> datetime:
     try:
@@ -161,7 +187,8 @@ def _claims(proposal: dict, snapshot: dict, evidence: dict, market_ids: set[str]
     return verified, list(dict.fromkeys(issues))
 
 
-def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None, *, now=None) -> dict:
+def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None, *,
+                    now=None, source: str = "model") -> dict:
     """Validate a model proposal against immutable evidence and trusted context.
 
     Invalid schema raises ValueError. Unavailable/stale/conflicting data returns
@@ -187,6 +214,8 @@ def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None,
     ids = _strings(proposal.get("evidence_ids"), "evidence_ids")
     if not reasons:
         raise ValueError("at least one reason is required")
+    if source not in ("model", "engine"):
+        raise ValueError(f"source must be 'model' or 'engine', got {source!r}")
     for key in ("price", "quantity", "target_weight", "stop_loss"):
         if key in proposal and not _number(proposal[key], positive=True):
             raise ValueError(f"{key} must be a finite positive number")
@@ -204,6 +233,22 @@ def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None,
     identity = get_instrument(instrument_id)
     if identity["instrument_id"] != instrument_id:
         raise ValueError("proposal must use the canonical instrument_id")
+    # ADR-0004 clause 2: the model has no interface through which it can alter
+    # quantity, direction or rule identity. A model-supplied `price` is allowed
+    # only where it can be checked: equal to the snapshot's own price for a
+    # market instrument, or equal to a captured merchant quote for gold. Before
+    # this, a proposal claiming 4242.0 against a snapshot price of 100.0
+    # returned buy/actionable and the 4242.0 was written to an immutable table.
+    if source == "model":
+        for key in ("quantity", "target_weight", "stop_loss"):
+            if key in proposal:
+                raise ValueError(f"{key} is computed by the engine and must not be supplied "
+                                 f"by a proposal; call evaluate_rule instead")
+        if "price" in proposal and identity["asset_class"] != "physical_gold":
+            if proposal["price"] != item.get("price"):
+                raise ValueError(f"price must equal the snapshot price for {instrument_id}; "
+                                 f"the proposal says {proposal['price']!r} and the snapshot "
+                                 f"says {item.get('price')!r}")
     item_ids = _strings(item.get("evidence_ids"), "instrument.evidence_ids")
     research_sections = item.get("research", {})
     if not isinstance(research_sections, dict) or any(not isinstance(section, dict) for section in research_sections.values()):
@@ -319,7 +364,14 @@ def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None,
     inputs = context.get("verified_risk_inputs", {}) if complete else {}
     if not isinstance(inputs, dict):
         raise ValueError("verified_risk_inputs must be an object")
-    for name, (field, limit, strict) in _LIMITS.items():
+    sleeve = identity["asset_class"]
+    for name, (field, _default, strict) in _LIMITS.items():
+        exempt = _SLEEVE_EXEMPT.get(sleeve, {}).get(name)
+        if exempt:
+            checks[name] = {"status": "not_applicable", "value": None, "limit": None,
+                            "detail": exempt}
+            continue
+        limit = limit_for(name, sleeve)
         value = inputs.get(field)
         eligible = _number(value) and 0 <= value <= 1
         check = "unknown" if not eligible else "pass" if (value < limit if strict else value <= limit) else "fail"

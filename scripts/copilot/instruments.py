@@ -67,6 +67,33 @@ def normalize_instrument(value: str) -> str:
     return symbol
 
 
+#: Static sector attribution for the registry. The nine SPDR select-sector funds
+#: and the two semiconductor funds are single-sector by construction; everything
+#: else is broad and gets "diversified", which is not a sector and therefore
+#: never concentrates. This exists so policy's sector limit is computable at all
+#: -- no configured source provides fund constituents, so the alternative is a
+#: permanently "unknown" check that blocks execution for an invisible reason.
+#:
+#: Defensive ETFs are included because the map must cover the whole registry;
+#: the ETF sleeve itself still refuses them (config rejects DEFENSIVE_ETFS).
+_SECTORS = {
+    "XLK": "technology", "XLF": "financials", "XLE": "energy", "XLV": "health_care",
+    "XLY": "consumer_discretionary", "XLP": "consumer_staples", "XLI": "industrials",
+    "XLB": "materials", "XLU": "utilities", "XLRE": "real_estate",
+    "XLC": "communication_services", "SMH": "technology", "SOXX": "technology",
+    "TLT": "government_bonds", "BND": "aggregate_bonds",
+    "GLD": "gold", "IAU": "gold", "SGOL": "gold", "GLDM": "gold",
+}
+
+
+def sector_of(value: str) -> str:
+    """The sector a registry symbol concentrates in, or "diversified"."""
+    symbol = normalize_instrument(value)
+    if symbol not in ETF_REGISTRY:
+        raise ValueError(f"{symbol} is not in the ETF registry")
+    return _SECTORS.get(symbol, "diversified")
+
+
 def get_instrument(value: str) -> dict:
     symbol = normalize_instrument(value)
     if symbol in {"GOLD.CNY", "SGE.SHAU"}:
