@@ -415,5 +415,264 @@ class ModelMayNotSupplyNumbers(unittest.TestCase):
             assess_proposal(proposal(), fixture(), None, now=NOW, source="whatever")
 
 
+def bars_series(count=300, start=100.0, step=0.05):
+    from datetime import date as _date, timedelta as _td
+    rows, day, i = [], _date(2025, 1, 1), 0
+    while len(rows) < count:
+        if day.weekday() < 5:
+            close = start + i * step
+            rows.append({"session": day.isoformat(), "open": close, "high": close,
+                         "low": close, "close": close, "volume": 5_000_000,
+                         "adjusted_close": close})
+            i += 1
+        day += _td(days=1)
+    return rows
+
+
+def engine_fixture(symbols=("QQQ", "SPY"), count=300):
+    """A snapshot evaluate_rule can actually consume.
+
+    fixture() is not usable here: its single evidence record carries no
+    instrument_id, so market-evidence selection finds nothing, and no bars, so a
+    rule has no series to compute a weight from.
+
+    observed_at is pinned to each symbol's own last bar session (not a fixed
+    calendar date): policy's own gate requires a market evidence record's
+    observation date to equal the instrument's latest_session, and bars_series
+    starting 2025-01-01 for `count` bars lands nowhere near a fixed date such as
+    2026-09-04 -- the mismatch made every order data_insufficient before this
+    fix, which was the first thing this fixture broke on.
+    """
+    instruments, evidence = {}, []
+    for offset, symbol in enumerate(symbols):
+        eid = f"market_{symbol}"
+        rows = bars_series(count=count, start=100.0 + offset * 10, step=0.05 + offset * 0.01)
+        instruments[symbol] = {
+            **get_instrument(symbol), "quality_status": "pass",
+            "latest_session": rows[-1]["session"], "expected_session": rows[-1]["session"],
+            "price": rows[-1]["close"],
+            "indicators": {"sma200": rows[-1]["close"] * 0.95, "sample_count": count},
+            "evidence_ids": [eid], "issues": [], "sources": ["synthetic"]}
+        evidence.append({
+            "evidence_id": eid, "provider": "yahoo", "upstream": "Yahoo Finance",
+            "source_url": "https://example.test/prices", "status": "ok",
+            "observed_at": rows[-1]["session"] + "T20:00:00+00:00",
+            "retrieved_at": "2026-09-06T00:59:00+00:00",
+            "instrument_id": symbol, "asset_class": "etf", "currency": "USD",
+            "unit": "share", "price_kind": "regular_session_close",
+            "indicator_basis": "total_return_adjusted", "bars": rows,
+            "latest_session": rows[-1]["session"], "missing_sessions": []})
+    return seal({"schema_version": 1, "created_at": "2026-09-06T01:00:00+00:00",
+                 "decision_at": "2026-09-06T01:00:00+00:00",
+                 "valid_until": "2026-09-06T12:00:00+00:00", "status": "ready",
+                 "instruments": instruments, "evidence": evidence, "issues": []})
+
+
+def declared_context(**overrides):
+    base = {"portfolio_version": "v1", "portfolio_complete": True, "base_currency": "USD",
+            "completeness": "declared", "holdings": [], "recommendations": []}
+    base.update(overrides)
+    return base
+
+
+def bands_adoption(**overrides):
+    # cash_floor_pct is 0.6, not the 0.15 the plan drafted: universe is exactly
+    # two ETFs at a 50/50 target, and the ETF sleeve's single-name cap is 25%
+    # (policy.py's _SLEEVE_LIMITS, landed in Task 3). A 0.5 weight survives that
+    # cap only once at least half of total_value is withheld as cash -- 0.15
+    # leaves each name at ~42% of total_value, which always fails single_name
+    # regardless of price. 0.6 leaves ~20% each, comfortably under 0.25. See the
+    # report for the full arithmetic.
+    base = {"schema_version": 1, "rule_id": "rule-0123456789abcdef", "sleeve": "etf",
+            "family": "fixed_weight_bands",
+            "parameters": {"relative_band": 0.25, "absolute_band": 0.05, "calendar_days": 365.0},
+            "universe": ["QQQ", "SPY"], "targets": {"QQQ": 0.5, "SPY": 0.5},
+            "cost_model": {"per_share_usd": 0.0035, "minimum_usd": 1.0,
+                           "max_pct_of_notional": 0.01, "spread_bps": 2.0},
+            "cash_floor_pct": 0.6, "integer_shares": True,
+            "admission": {"admitted": True, "waived": False, "metrics": {"cagr": 0.08}},
+            "waived": False}
+    base.update(overrides)
+    return base
+
+
+class EngineProducedOrders(unittest.TestCase):
+    def run_rule(self, **overrides):
+        from copilot.policy import evaluate_rule
+        kwargs = dict(adoption=bands_adoption(), snapshot=engine_fixture(),
+                      context=declared_context(), investable_cash=20000.0, now=NOW)
+        kwargs.update(overrides)
+        return evaluate_rule(**kwargs)
+
+    def test_one_order_per_universe_symbol_with_the_engine_tuple(self):
+        result = self.run_rule()
+        self.assertEqual({o["instrument_id"] for o in result["orders"]}, {"QQQ", "SPY"})
+        self.assertEqual(result["rule_id"], "rule-0123456789abcdef")
+        self.assertRegex(result["evaluation_id"], r"^eval-[0-9a-f]{16}$")
+        for order in result["orders"]:
+            for key in ("action", "quantity", "limit_price", "rule_id"):
+                self.assertIn(key, order, f"{order['instrument_id']} missing {key}")
+
+    def test_the_orders_are_actionable_on_a_declared_book(self):
+        # The whole point. If this is research_only the engine produced nothing
+        # a person can act on and the plan has not delivered.
+        result = self.run_rule()
+        self.assertEqual(result["execution_scope"], "actionable", result["orders"][0]["reasons"])
+        for order in result["orders"]:
+            self.assertEqual(order["execution_scope"], "actionable")
+            self.assertGreater(order["quantity"], 0)
+
+    def test_limit_price_is_the_snapshot_price_and_says_which_basis(self):
+        snapshot = engine_fixture()
+        result = self.run_rule(snapshot=snapshot)
+        for order in result["orders"]:
+            self.assertEqual(order["limit_price"],
+                             snapshot["instruments"][order["instrument_id"]]["price"])
+            self.assertEqual(order["limit_price_basis"], "split_adjusted_close")
+
+    def test_the_measured_risk_inputs_are_reported_and_passed(self):
+        result = self.run_rule()
+        for order in result["orders"]:
+            checks = order["risk_checks"]
+            self.assertEqual(checks["single_name"]["status"], "pass")
+            self.assertEqual(checks["sector"]["status"], "pass")
+            self.assertEqual(checks["liquidity"]["status"], "pass")
+            self.assertEqual(checks["drawdown"]["status"], "pass")
+            self.assertEqual(checks["correlation"]["status"], "not_applicable")
+
+    def test_unknown_coverage_withholds_every_quantity(self):
+        result = self.run_rule(context={"portfolio_complete": False,
+                                        "portfolio_version": "v1", "holdings": []})
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertFalse(result["coverage_known"])
+        for order in result["orders"]:
+            self.assertNotIn("quantity", order)
+            self.assertNotIn("limit_price", order)
+
+    def test_one_blocked_symbol_pauses_the_whole_evaluation(self):
+        snapshot = engine_fixture()
+        snapshot["instruments"]["SPY"]["quality_status"] = "fail"
+        result = self.run_rule(snapshot=seal(snapshot))
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertIn("SPY", result["blocked_symbols"])
+        for order in result["orders"]:
+            self.assertNotIn("quantity", order)
+
+    def test_a_universe_symbol_missing_from_the_snapshot_pauses_rather_than_raises(self):
+        # Pausing is not raising. The first draft computed weights before this
+        # check and crashed on the missing symbol's absent bars.
+        snapshot = engine_fixture()
+        del snapshot["instruments"]["SPY"]
+        snapshot["evidence"] = [e for e in snapshot["evidence"] if e["evidence_id"] != "market_SPY"]
+        result = self.run_rule(snapshot=seal(snapshot))
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertIn("SPY", result["blocked_symbols"])
+        self.assertEqual({o["instrument_id"] for o in result["orders"]}, {"QQQ", "SPY"})
+
+    def test_an_expired_snapshot_is_refused_before_anything_is_priced(self):
+        # A research-bearing snapshot lives 30 minutes. Sizing against an
+        # expired one and writing the result to an immutable table is worse
+        # than refusing.
+        from datetime import timedelta
+        with self.assertRaisesRegex(ValueError, "expired"):
+            self.run_rule(now=NOW + timedelta(days=2))
+
+    def test_engine_reasons_survive_the_numeric_prose_gate(self):
+        # Engine-authored reasons must carry no bare numbers apart from the
+        # tokenised rule id, or policy blocks its own output.
+        result = self.run_rule()
+        for order in result["orders"]:
+            self.assertNotEqual(order["action"], "data_insufficient",
+                                f"engine blocked its own reasons: {order['reasons']}")
+
+    def test_an_overweight_holding_becomes_a_sell_not_a_target(self):
+        context = declared_context(holdings=[
+            {"instrument_id": "QQQ", "quantity": 400, "currency": "USD"}])
+        result = self.run_rule(context=context, investable_cash=0.0)
+        qqq = next(o for o in result["orders"] if o["instrument_id"] == "QQQ")
+        self.assertIn(qqq["action"], ("reduce", "sell"))
+        self.assertLess(qqq["delta_shares"], 0)
+        self.assertEqual(qqq["quantity"], abs(qqq["delta_shares"]))
+
+    def test_the_brake_halves_a_buy_and_records_both_quantities(self):
+        plain = self.run_rule()
+        braked = self.run_rule(brake={"level": "reduce_50", "reason": "issuer halt",
+                                      "evidence_ids": ["news_QQQ"]})
+        for before, after in zip(plain["orders"], braked["orders"]):
+            self.assertEqual(after["brake"]["pre_brake_quantity"], before["quantity"])
+            self.assertEqual(after["quantity"], before["quantity"] // 2)
+            self.assertFalse(after["brake"]["backtested"])
+
+    def test_skip_returns_a_decision_rather_than_raising(self):
+        # The first draft wrote the post-brake quantity into a proposal while
+        # gating on the pre-brake one, so skip hit policy's positive-number
+        # check and raised out of an MCP tool with no try/except.
+        result = self.run_rule(brake={"level": "skip", "reason": "halt",
+                                      "evidence_ids": ["news_QQQ"]})
+        for order in result["orders"]:
+            self.assertEqual(order["action"], "hold")
+            self.assertNotIn("quantity", order)
+            self.assertEqual(order["brake"]["post_brake_quantity"], 0)
+
+    def test_the_brake_never_touches_a_sell(self):
+        # Halving a sell leaves MORE exposure than the rule asked for, which is
+        # an accelerator wearing a brake's name.
+        context = declared_context(holdings=[
+            {"instrument_id": "QQQ", "quantity": 400, "currency": "USD"}])
+        plain = self.run_rule(context=context, investable_cash=0.0)
+        braked = self.run_rule(context=context, investable_cash=0.0,
+                               brake={"level": "reduce_50", "reason": "halt",
+                                      "evidence_ids": ["news_QQQ"]})
+        plain_qqq = next(o for o in plain["orders"] if o["instrument_id"] == "QQQ")
+        braked_qqq = next(o for o in braked["orders"] if o["instrument_id"] == "QQQ")
+        self.assertEqual(braked_qqq["quantity"], plain_qqq["quantity"])
+        self.assertEqual(braked_qqq["brake"]["applied_to_side"], "sell")
+        self.assertFalse(braked_qqq["brake"]["changed"])
+
+    def test_brake_evidence_never_enters_evidence_ids(self):
+        result = self.run_rule(brake={"level": "skip", "reason": "halt",
+                                      "evidence_ids": ["news_QQQ"]})
+        for order in result["orders"]:
+            self.assertNotIn("news_QQQ", order["evidence_ids"])
+            self.assertIn("news_QQQ", order["brake"]["evidence_ids"])
+
+    def test_an_unknown_brake_level_raises(self):
+        with self.assertRaises(ValueError):
+            self.run_rule(brake={"level": "double", "reason": "x", "evidence_ids": ["news_QQQ"]})
+
+    def test_a_snapshot_short_of_the_warmup_raises_naming_both_counts(self):
+        adoption = bands_adoption(
+            family="momentum_top_n",
+            parameters={"top_n": 1.0, "lookback_days": 252.0, "skip_days": 21.0},
+            targets=None)
+        with self.assertRaisesRegex(ValueError, "252"):
+            self.run_rule(adoption=adoption, snapshot=engine_fixture(count=100))
+
+    def test_the_rule_trigger_is_honoured_not_replaced(self):
+        # FixedWeightBands does nothing in `weights`; its behaviour lives in
+        # should_rebalance. Skipping it turns an annual rule into a daily one
+        # and the cost profile the admission gate measured stops applying.
+        result = self.run_rule()
+        self.assertIn("rebalance_due", result)
+        self.assertIsInstance(result["rebalance_due"], bool)
+
+    def test_a_rule_not_due_produces_holds_with_no_quantities(self):
+        context = declared_context(
+            holdings=[{"instrument_id": "QQQ", "quantity": 96, "currency": "USD"},
+                      {"instrument_id": "SPY", "quantity": 87, "currency": "USD"}],
+            recommendations=[{"rule_id": "rule-0123456789abcdef",
+                              "evaluation_session": "2026-09-03",
+                              "rebalance_due": True}])
+        result = self.run_rule(context=context, investable_cash=0.0)
+        if not result["rebalance_due"]:
+            for order in result["orders"]:
+                self.assertEqual(order["action"], "hold")
+                self.assertNotIn("quantity", order)
+
+    def test_a_gold_sleeve_adoption_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "sleeve"):
+            self.run_rule(adoption=bands_adoption(sleeve="gold"))
+
+
 if __name__ == "__main__":
     unittest.main()
