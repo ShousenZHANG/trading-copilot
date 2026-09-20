@@ -76,6 +76,30 @@ _SLEEVE_EXEMPT = {
 }
 
 
+def _is_reported_quote(record: object) -> bool:
+    """A user-reported merchant quote, identified by shape rather than trust.
+
+    Every field is required. A record that merely claims provider
+    "user_reported" without a well-formed quote underneath gets none of the
+    exemptions in `_evidence_blockers` -- the shape IS the credential here,
+    because there is no URL to check and no vendor to hold responsible.
+
+    Deliberately narrow: `retailquote.build` is the only thing that produces
+    this shape, and it validates merchant, product, the CNY-per-gram band and
+    a timezone-aware observation before it does.
+    """
+    if not isinstance(record, dict) or record.get("provider") != "user_reported":
+        return False
+    quote = record.get("retail_quote")
+    if not isinstance(quote, dict):
+        return False
+    return (bool(quote.get("merchant")) and bool(quote.get("product"))
+            and quote.get("currency") == "CNY" and quote.get("unit") == "gram"
+            and quote.get("verification") == "self_reported"
+            and _number(quote.get("ask_per_fine_gram"), positive=True)
+            and record.get("critical_evidence_eligible") is False)
+
+
 def limit_for(name: str, asset_class: str) -> float:
     """The limit for a risk check, per sleeve. Defaults to the stock limit."""
     return _SLEEVE_LIMITS.get(asset_class, {}).get(name, _LIMITS[name][1])
@@ -169,6 +193,18 @@ def _claims(proposal: dict, snapshot: dict, evidence: dict, market_ids: set[str]
         rec = evidence.get(eid) if isinstance(eid, str) else None
         if eid not in ids or rec is None:
             issues.append("claim cites an evidence ID absent from the proposal/snapshot")
+            continue
+        # A reported merchant quote is citable but never claimable. Citing it
+        # is how the retail gate identifies the price a trade will execute at;
+        # claiming against it would let a self-reported number verify as a
+        # market fact, which is exactly what its critical_evidence_eligible:
+        # False is for. The evidence-blocker loop exempts reported quotes from
+        # that flag so they CAN be cited, so the flag's real protection has to
+        # live here instead. Its retail_quote field is a resolvable dict, so
+        # without this a claim on /retail_quote/ask_per_fine_gram verified.
+        if _is_reported_quote(rec):
+            issues.append(f"claim cites reported quote {eid}; a self-reported price can be "
+                          "the price a trade executes at, never evidence that it is correct")
             continue
         try:
             if isinstance(path, str) and path.startswith("/instruments/"):
@@ -342,17 +378,53 @@ def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None,
         blockers.append("proposal has no evidence for this instrument")
     for eid in sorted(set(ids) | market_ids):
         rec = evidence.get(eid)
-        if rec is None or rec.get("status") not in {"pass", "ok", "ready"} or not rec.get("source_url"):
+        # A user-reported merchant quote is a THIRD kind of evidence, and both
+        # checks below were written for the other two. Market data is fetched
+        # and so must carry the URL it came from; news is unverifiable prose and
+        # so may never back a factual claim. A retail quote is neither: it is a
+        # transactable PRICE the user attests to, whose provenance is the
+        # merchant, the product and the moment they observed it -- there is no
+        # URL because no public source in China publishes a bank's 积存金 ask.
+        #
+        # Without this branch the gate at the bottom of this function was a
+        # catch-22 and gold could never execute: it requires the quote's
+        # evidence_id to appear in evidence_ids, and appearing there tripped
+        # "absent or unverified" on the missing source_url. Measured before the
+        # fix: retail_quote status "pass" alongside data_status "blocked".
+        #
+        # This does NOT make a reported price citable as a fact. The record
+        # keeps critical_evidence_eligible: False, it carries no `data` for a
+        # claim path to resolve against, and the retail_quote gate below
+        # re-validates merchant, product, currency, unit, positivity, exact
+        # equality with the proposal, and a 24-hour freshness window.
+        reported = _is_reported_quote(rec)
+        if rec is None or rec.get("status") not in {"pass", "ok", "ready"} or (
+                not rec.get("source_url") and not reported):
             blockers.append(f"evidence {eid} is absent or unverified")
             continue
-        if eid in ids and rec.get("critical_evidence_eligible") is False:
+        if eid in ids and not reported and rec.get("critical_evidence_eligible") is False:
             blockers.append(f"evidence {eid} cannot support a critical recommendation claim")
         retrieved = _time(rec.get("retrieved_at"), f"{eid}.retrieved_at")
         if retrieved > created:
             blockers.append(f"evidence {eid} was retrieved in the future")
         if rec.get("observed_at") is not None:
             observed = _time(rec["observed_at"], f"{eid}.observed_at")
-            if observed > decision_time or observed > retrieved:
+            # `observed > decision_time` is anachronism protection for FETCHED
+            # data: a price stamped after the moment the decision was framed
+            # would be information the decision could not have had. A reported
+            # merchant quote is the opposite case -- the real sequence is
+            # collect the snapshot, open the bank app, then report what it
+            # says, so the quote is newer than decision_at every single time.
+            # Requiring it to precede decision_at would reject exactly the
+            # quotes worth having and admit only stale ones.
+            #
+            # `observed > retrieved` still applies to it: a quote observed
+            # after the moment it was written down is incoherent whoever
+            # supplied it. And the retail gate below re-checks freshness far
+            # more tightly than this one -- against the decision's own clock,
+            # within 24 hours, both directions.
+            too_late = observed > retrieved or (observed > decision_time and not reported)
+            if too_late:
                 blockers.append(f"evidence {eid} has a future observation")
             if eid in market_ids and observed.date().isoformat() != item.get("latest_session"):
                 blockers.append(f"market evidence {eid} observation does not match the current session")

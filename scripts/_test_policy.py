@@ -886,6 +886,130 @@ def gold_proposal():
             "conditions": [], "evidence_ids": ["sge"]}
 
 
+def quoted_gold(**quote_overrides):
+    """A gold snapshot plus a reported merchant quote, and a proposal citing it."""
+    from copilot import retailquote
+    base = dict(merchant="中国银行", product="积存金", ask_per_fine_gram=962.5,
+                observed_at="2026-09-06T01:30:00+00:00")
+    base.update(quote_overrides)
+    attached = retailquote.attach(gold_only_fixture(), retailquote.build(**base), now=NOW)
+    record = next(e for e in attached["evidence"] if e.get("retail_quote"))
+    proposal = dict(gold_proposal(), evidence_ids=["sge", record["evidence_id"]],
+                    retail_quote=record["retail_quote"],
+                    price=record["retail_quote"]["ask_per_fine_gram"])
+    return attached, record, proposal
+
+
+class AReportedQuoteIsExemptOnlyBecauseOfItsShape(unittest.TestCase):
+    """Guarding the two gates relaxed for user-reported quotes.
+
+    A reported merchant ask has no source_url (no public source in China
+    publishes a bank's 积存金 price) and is observed AFTER the snapshot was
+    collected (the real sequence is collect, open the app, report). Both facts
+    tripped blockers written for fetched market data, which made the retail
+    gate a catch-22: it demands the quote be cited, and citing it failed
+    validation. Measured before the fix: retail_quote "pass" beside
+    data_status "blocked".
+
+    The exemption is keyed on SHAPE, not on the provider string, because there
+    is no URL to check and no vendor to hold responsible. Everything below
+    asserts what the relaxation did NOT open up.
+    """
+
+    def blocked_for(self, snapshot, proposal):
+        decision = assess_proposal(proposal, snapshot, now=NOW)
+        return decision["data_status"], " ".join(decision.get("reasons") or [])
+
+    def test_a_well_formed_quote_is_accepted(self):
+        snapshot, _, proposal = quoted_gold()
+        status, _ = self.blocked_for(snapshot, proposal)
+        self.assertEqual(status, "ready")
+
+    def test_claiming_the_provider_without_the_shape_earns_nothing(self):
+        # The exact forgery this guards: a record that says "user_reported" to
+        # dodge the source_url requirement, with no real quote under it.
+        snapshot, record, proposal = quoted_gold()
+        record.pop("retail_quote")
+        seal(snapshot)
+        status, why = self.blocked_for(snapshot, proposal)
+        self.assertEqual(status, "blocked")
+        self.assertIn("absent or unverified", why)
+
+    def test_a_quote_missing_its_merchant_earns_nothing(self):
+        snapshot, record, proposal = quoted_gold()
+        record["retail_quote"] = {**record["retail_quote"], "merchant": ""}
+        seal(snapshot)
+        self.assertEqual(self.blocked_for(snapshot, proposal)[0], "blocked")
+
+    def test_a_quote_priced_in_another_currency_earns_nothing(self):
+        snapshot, record, proposal = quoted_gold()
+        record["retail_quote"] = {**record["retail_quote"], "currency": "USD"}
+        seal(snapshot)
+        self.assertEqual(self.blocked_for(snapshot, proposal)[0], "blocked")
+
+    def test_a_record_calling_itself_verified_earns_nothing(self):
+        # verification must stay "self_reported". A record that upgrades its
+        # own wording is claiming something nothing checked.
+        snapshot, record, proposal = quoted_gold()
+        record["retail_quote"] = {**record["retail_quote"], "verification": "confirmed"}
+        seal(snapshot)
+        self.assertEqual(self.blocked_for(snapshot, proposal)[0], "blocked")
+
+    def test_a_reported_record_cannot_also_be_critical_evidence(self):
+        # The dangerous combination: take the source_url exemption AND the
+        # right to back a factual claim. critical_evidence_eligible must be
+        # False for the shape to qualify at all.
+        snapshot, record, proposal = quoted_gold()
+        record["critical_evidence_eligible"] = True
+        seal(snapshot)
+        self.assertEqual(self.blocked_for(snapshot, proposal)[0], "blocked")
+
+    def test_a_quote_observed_after_it_was_written_down_is_still_blocked(self):
+        # `observed > retrieved` stays enforced for everyone. Only the
+        # comparison against the snapshot's decision_at was lifted.
+        snapshot, record, proposal = quoted_gold()
+        record["observed_at"] = "2026-09-07T00:00:00+00:00"
+        record["retail_quote"] = {**record["retail_quote"],
+                                  "observed_at": "2026-09-07T00:00:00+00:00"}
+        proposal["retail_quote"] = record["retail_quote"]
+        seal(snapshot)
+        status, why = self.blocked_for(snapshot, proposal)
+        self.assertEqual(status, "blocked")
+        self.assertIn("future observation", why)
+
+    def test_a_reported_price_cannot_support_a_numeric_claim(self):
+        # It prices a trade; it never justifies one. The record carries no
+        # `data`, so a claim path has nothing to resolve against.
+        snapshot, record, proposal = quoted_gold()
+        proposal["claims"] = [{"evidence_id": record["evidence_id"],
+                               "path": "/retail_quote/ask_per_fine_gram", "value": 962.5}]
+        self.assertEqual(self.blocked_for(snapshot, proposal)[0], "blocked")
+
+    def test_ordinary_market_evidence_still_needs_a_source_url(self):
+        snapshot, _, proposal = quoted_gold()
+        next(e for e in snapshot["evidence"] if e["evidence_id"] == "sge")["source_url"] = ""
+        seal(snapshot)
+        status, why = self.blocked_for(snapshot, proposal)
+        self.assertEqual(status, "blocked")
+        self.assertIn("absent or unverified", why)
+
+    def test_news_evidence_still_cannot_be_cited(self):
+        # The other critical_evidence_eligible: False record in the system.
+        # Relaxing the check for quotes must not relax it for news.
+        snapshot, _, proposal = quoted_gold()
+        snapshot["evidence"].append({
+            "evidence_id": "news_1", "provider": "finnhub", "upstream": "Finnhub",
+            "source_url": "https://finnhub.io/api/news", "status": "ok",
+            "observed_at": "2026-09-05T12:00:00+00:00",
+            "retrieved_at": "2026-09-06T00:59:00+00:00",
+            "critical_evidence_eligible": False, "data": {"articles": []}})
+        proposal["evidence_ids"] = proposal["evidence_ids"] + ["news_1"]
+        seal(snapshot)
+        status, why = self.blocked_for(snapshot, proposal)
+        self.assertEqual(status, "blocked")
+        self.assertIn("cannot support a critical recommendation claim", why)
+
+
 class TheGoldSleeveHasItsOwnLimits(unittest.TestCase):
     """Four of the five ETF limits cannot describe a one-instrument sleeve.
 

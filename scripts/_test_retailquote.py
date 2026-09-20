@@ -87,17 +87,22 @@ class TheQuoteIsNotAPrediction(unittest.TestCase):
         self.assertNotIn("verified", quote())
 
     def test_the_reported_ask_prices_a_trade_but_never_justifies_one(self):
-        """The price is usable; the claim is not.
+        """The price is usable; the claim is not. Both halves, separately.
 
-        Two independent gates enforce this, and both fire on the record the
-        gate itself forces the proposal to cite: it has no `source_url`,
-        because a number read off a phone has no URL, and it carries
-        `critical_evidence_eligible: False`. Either one alone makes the
-        decision data_insufficient -- see brake.py, which documents the same
-        consequence for news records. So a valid quote moves `retail_quote` to
-        pass and moves nothing else: assessing gold this way is still
-        research_only, and Task 7's evaluate_rule, not this path, is what
-        turns a quote into an order.
+        An earlier reading of this had the whole decision blocked, because the
+        record the retail gate FORCES the proposal to cite tripped two checks
+        written for fetched market data: no `source_url` (a number read off a
+        phone has no URL) and `critical_evidence_eligible: False`. That made
+        the gate a catch-22 -- retail_quote "pass" beside data_status
+        "blocked" -- so gold could never execute at all.
+
+        policy now exempts a well-formed reported quote from both, on shape
+        alone, and moves the real protection to where it belongs: the quote may
+        be CITED, so the gate can identify the price a trade executes at, but
+        it may never be CLAIMED against, so a self-reported number can never
+        verify as a market fact. Without that second half a claim on
+        /retail_quote/ask_per_fine_gram resolved and passed, because the field
+        is a perfectly good dict.
         """
         attached = retailquote.attach(gold_snapshot(), quote(), now=NOW)
         record = next(e for e in attached["evidence"] if e.get("retail_quote"))
@@ -106,10 +111,18 @@ class TheQuoteIsNotAPrediction(unittest.TestCase):
                     "conditions": [], "evidence_ids": ["sge", record["evidence_id"]],
                     "retail_quote": record["retail_quote"],
                     "price": record["retail_quote"]["ask_per_fine_gram"]}
-        decision = assess_proposal(proposal, attached, now=NOW)
-        self.assertEqual(decision["risk_checks"]["retail_quote"]["status"], "pass")
-        self.assertEqual(decision["action"], "data_insufficient")
-        self.assertEqual(decision["execution_scope"], "research_only")
+
+        priced = assess_proposal(proposal, attached, now=NOW)
+        self.assertEqual(priced["risk_checks"]["retail_quote"]["status"], "pass")
+        self.assertEqual(priced["data_status"], "ready")
+        self.assertEqual(priced["action"], "buy")
+
+        claimed = assess_proposal({**proposal, "claims": [
+            {"evidence_id": record["evidence_id"],
+             "path": "/retail_quote/ask_per_fine_gram",
+             "value": record["retail_quote"]["ask_per_fine_gram"]}]}, attached, now=NOW)
+        self.assertEqual(claimed["action"], "data_insufficient")
+        self.assertIn("reported quote", " ".join(claimed.get("reasons") or []))
 
 
 class AttachingItMakesTheGateReachable(unittest.TestCase):
