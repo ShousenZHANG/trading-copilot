@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from copilot import ruleset
+from copilot import sizing
 from copilot.backtest import engine as bt_engine
 from copilot.backtest import frame as frame_mod
 from copilot.backtest import rules as rule_families
@@ -200,6 +201,137 @@ class AdoptionRecord(unittest.TestCase):
                        parameters={"relative_band": 0.25, "absolute_band": 0.05,
                                    "calendar_days": 365.0},
                        targets={"IWM": 0.3, "QQQ": 0.3, "SPY": 0.3})
+
+
+class CostAwareSizing(unittest.TestCase):
+    def model(self):
+        return bt_engine.CostModel()
+
+    def test_zero_cost_sizing_is_the_naive_floor(self):
+        self.assertEqual(sizing.affordable_shares(
+            budget=1000.0, price=333.0, cost_model=bt_engine.CostModel.free()), 3)
+
+    def test_costs_reduce_the_count_when_the_naive_floor_does_not_fit(self):
+        # Verify this arithmetic against the real CostModel defaults before
+        # trusting the expected value; if 3 shares at 333.0 plus commission and
+        # half-spread does NOT exceed 1000.0, change the fixture to a case that
+        # does and say so.
+        self.assertEqual(sizing.affordable_shares(
+            budget=1000.0, price=333.0, cost_model=self.model()), 2)
+
+    def test_the_result_always_fits_and_is_maximal(self):
+        model = self.model()
+        for budget in (100.0, 1000.0, 9999.99, 20000.0, 123456.78):
+            for price in (1.0, 37.5, 333.0, 612.34):
+                shares = sizing.affordable_shares(budget=budget, price=price, cost_model=model)
+                if shares:
+                    notional = shares * price
+                    self.assertLessEqual(
+                        notional + model.total(shares=shares, notional=notional),
+                        budget + 1e-9, f"{budget}/{price}/{shares} did not fit")
+                more = (shares + 1) * price
+                self.assertGreater(more + model.total(shares=shares + 1, notional=more),
+                                   budget, f"{budget}/{price}/{shares} was not maximal")
+
+    def test_a_non_positive_price_raises_and_a_non_positive_budget_is_zero(self):
+        with self.assertRaises(ValueError):
+            sizing.affordable_shares(budget=100.0, price=0.0, cost_model=self.model())
+        self.assertEqual(sizing.affordable_shares(budget=0.0, price=10.0, cost_model=self.model()), 0)
+        self.assertEqual(sizing.affordable_shares(budget=-5.0, price=10.0, cost_model=self.model()), 0)
+
+
+class OrderPlanning(unittest.TestCase):
+    def plan(self, **overrides):
+        kwargs = dict(weights={"AAA": 0.5, "BBB": 0.5},
+                      prices={"AAA": 100.0, "BBB": 50.0},
+                      held_shares={},
+                      investable_cash=10000.0,
+                      cash_floor_pct=0.0,
+                      cost_model=bt_engine.CostModel.free())
+        kwargs.update(overrides)
+        return sizing.plan_orders(**kwargs)
+
+    def test_an_empty_book_produces_pure_buys(self):
+        plan = self.plan()
+        by_symbol = {o["instrument_id"]: o for o in plan["orders"]}
+        self.assertEqual(by_symbol["AAA"]["side"], "buy")
+        self.assertEqual(by_symbol["AAA"]["delta_shares"], 50)
+        self.assertEqual(by_symbol["AAA"]["target_shares"], 50)
+        self.assertEqual(by_symbol["BBB"]["delta_shares"], 100)
+
+    def test_an_overweight_holding_produces_a_sell_of_the_difference(self):
+        # The failure the first draft would have shipped: 600 held against a
+        # target of 17 rendered as "reduce 17 shares", which reads as sell 17.
+        plan = self.plan(held_shares={"AAA": 200}, prices={"AAA": 100.0, "BBB": 50.0},
+                         investable_cash=0.0)
+        by_symbol = {o["instrument_id"]: o for o in plan["orders"]}
+        self.assertEqual(by_symbol["AAA"]["side"], "sell")
+        self.assertEqual(by_symbol["AAA"]["target_shares"], 100)
+        self.assertEqual(by_symbol["AAA"]["delta_shares"], -100)
+
+    def test_the_denominator_is_holdings_plus_cash(self):
+        # 200 AAA at 100.0 is 20000 of holdings; 20000 of cash makes 40000. A
+        # 50% target is 20000, which is the 200 shares already held, so the
+        # delta is zero and the side is hold.
+        plan = self.plan(held_shares={"AAA": 200}, investable_cash=20000.0,
+                         weights={"AAA": 0.5, "BBB": 0.5})
+        by_symbol = {o["instrument_id"]: o for o in plan["orders"]}
+        self.assertEqual(by_symbol["AAA"]["delta_shares"], 0)
+        self.assertEqual(by_symbol["AAA"]["side"], "hold")
+        self.assertAlmostEqual(plan["total_value"], 40000.0)
+
+    def test_a_drift_inside_the_tolerance_is_a_hold_with_no_delta(self):
+        plan = self.plan(held_shares={"AAA": 50, "BBB": 100}, investable_cash=0.0)
+        for order in plan["orders"]:
+            self.assertEqual(order["delta_shares"], 0)
+            self.assertEqual(order["side"], "hold")
+
+    def test_the_cash_floor_is_withheld_from_the_total_not_from_cash(self):
+        # engine.run reserves a fraction of cash + positions, so live sizing
+        # must use the same base or the same admitted rule reserves a different
+        # amount in production than it did in the backtest.
+        plan = self.plan(held_shares={"AAA": 100}, investable_cash=10000.0,
+                         cash_floor_pct=0.20, weights={"AAA": 1.0},
+                         prices={"AAA": 100.0})
+        self.assertAlmostEqual(plan["total_value"], 20000.0)
+        self.assertAlmostEqual(plan["investable_value"], 16000.0)
+        self.assertEqual(plan["orders"][0]["target_shares"], 160)
+        self.assertEqual(plan["orders"][0]["delta_shares"], 60)
+
+    def test_a_buy_that_cash_cannot_fund_is_reported_not_silently_shrunk(self):
+        plan = self.plan(weights={"AAA": 0.5, "BBB": 0.5},
+                         prices={"AAA": 100.0, "BBB": 100000.0},
+                         investable_cash=1000.0)
+        by_symbol = {o["instrument_id"]: o for o in plan["orders"]}
+        self.assertEqual(by_symbol["BBB"]["delta_shares"], 0)
+        self.assertIn("BBB", plan["unfunded"])
+
+    def test_sells_are_not_limited_by_cash(self):
+        # Selling raises cash; a sell must never be trimmed by the cash budget.
+        plan = self.plan(held_shares={"AAA": 500}, investable_cash=0.0,
+                         weights={"AAA": 1.0}, prices={"AAA": 100.0},
+                         cash_floor_pct=0.50)
+        self.assertEqual(plan["orders"][0]["side"], "sell")
+        self.assertEqual(plan["orders"][0]["target_shares"], 250)
+        self.assertEqual(plan["orders"][0]["delta_shares"], -250)
+
+    def test_weights_that_do_not_sum_to_one_are_refused(self):
+        with self.assertRaisesRegex(ValueError, "sum"):
+            self.plan(weights={"AAA": 0.9})
+
+    def test_a_missing_price_is_a_keyerror(self):
+        with self.assertRaises(KeyError):
+            self.plan(prices={"AAA": 100.0})
+
+    def test_a_held_symbol_outside_the_target_set_is_sold_to_zero(self):
+        # A momentum rotation drops names. Leaving them held would silently
+        # diverge from the weights the backtest measured.
+        plan = self.plan(weights={"AAA": 1.0}, prices={"AAA": 100.0, "OLD": 20.0},
+                         held_shares={"OLD": 300}, investable_cash=0.0)
+        by_symbol = {o["instrument_id"]: o for o in plan["orders"]}
+        self.assertEqual(by_symbol["OLD"]["target_shares"], 0)
+        self.assertEqual(by_symbol["OLD"]["delta_shares"], -300)
+        self.assertEqual(by_symbol["OLD"]["side"], "sell")
 
 
 if __name__ == "__main__":
