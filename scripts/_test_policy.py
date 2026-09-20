@@ -690,5 +690,174 @@ class EngineProducedOrders(unittest.TestCase):
             self.run_rule(adoption=bands_adoption(sleeve="gold"))
 
 
+def prior_evaluations(values, start_hour=1):
+    """Past evaluations as get_context returns them: NEWEST FIRST.
+
+    journal.get_context orders recommendations `recorded_at DESC`, so anything
+    reading that list in place is reading the curve backwards. `values` is given
+    chronologically here and reversed on the way out, so a test that passes
+    proves the reader re-sorted rather than accidentally agreeing with the
+    query's order.
+    """
+    rows = [{"portfolio_total_value": float(v),
+             "created_at": f"2026-09-{start_hour + i:02d}T12:00:00+00:00"}
+            for i, v in enumerate(values)]
+    return list(reversed(rows))
+
+
+class DrawdownIsMeasuredForwards(unittest.TestCase):
+    """A steadily falling book must not report a drawdown of zero.
+
+    riskinputs.portfolio_drawdown walks forward tracking a running peak, so the
+    order it is fed is load-bearing. Fed newest-first, a monotonic decline looks
+    like a monotonic rise and measures 0.0 -- and drawdown is the only one of
+    the five limits that measures the book LOSING money; the other four are
+    concentration and liquidity ratios.
+    """
+
+    def evaluate(self, values, **overrides):
+        from copilot.policy import evaluate_rule
+        context = declared_context(recommendations=prior_evaluations(values))
+        context.update(overrides)
+        return evaluate_rule(adoption=bands_adoption(), snapshot=engine_fixture(),
+                             context=context, investable_cash=20000.0, now=NOW)
+
+    def drawdown_of(self, values, **overrides):
+        result = self.evaluate(values, **overrides)
+        return result["orders"][0]["risk_checks"]["drawdown"]
+
+    def test_a_steady_decline_is_not_reported_as_zero(self):
+        # The case the reversal hid completely: 100 -> 90 -> 70 -> 50 is a 50%
+        # drawdown read forwards and 0% read backwards, so the 15% limit passed
+        # a book that had halved.
+        check = self.drawdown_of([100.0, 90.0, 70.0, 50.0])
+        self.assertGreater(check["value"], 0.15)
+        self.assertEqual(check["status"], "fail")
+
+    def test_a_recovered_drawdown_reports_its_true_depth(self):
+        # 100 -> 120 -> 60 -> 110 is 50% forwards and 45.45% backwards.
+        check = self.drawdown_of([100.0, 120.0, 60.0, 110.0])
+        self.assertAlmostEqual(check["value"], 0.5, places=6)
+
+    def test_a_rising_book_still_reports_no_drawdown(self):
+        check = self.drawdown_of([100.0, 110.0, 120.0])
+        self.assertEqual(check["value"], 0.0)
+        self.assertEqual(check["status"], "pass")
+
+    def test_the_order_of_the_supplied_list_does_not_matter(self):
+        # Sorting is by each row's own created_at, not by the position the
+        # caller happened to put it in.
+        from copilot.policy import evaluate_rule
+        rows = prior_evaluations([100.0, 90.0, 70.0, 50.0])
+        shuffled = [rows[2], rows[0], rows[3], rows[1]]
+        results = []
+        for supplied in (rows, shuffled):
+            result = evaluate_rule(adoption=bands_adoption(), snapshot=engine_fixture(),
+                                   context=declared_context(recommendations=supplied),
+                                   investable_cash=20000.0, now=NOW)
+            results.append(result["orders"][0]["risk_checks"]["drawdown"]["value"])
+        self.assertEqual(results[0], results[1])
+
+    def test_a_row_with_no_timestamp_keeps_the_querys_own_ordering(self):
+        # get_context orders by a `recorded_at` COLUMN that never reaches the
+        # payload, so created_at is the only stamp a row carries and an older
+        # row may not have one. Sorting on an empty-string key would drag such
+        # a row to the front of the series and flip the curve again, so the
+        # sort only runs when every row can take part in it.
+        rows = prior_evaluations([100.0, 50.0])
+        rows[0].pop("created_at")            # rows[0] is the NEWEST after the reversal
+        check = self.drawdown_of([], recommendations=rows)
+        self.assertAlmostEqual(check["value"], 0.5, places=6)
+
+    def test_a_row_without_a_value_is_skipped_rather_than_breaking_the_series(self):
+        rows = prior_evaluations([100.0, 90.0, 50.0])
+        rows.insert(1, {"created_at": "2026-09-04T12:00:00+00:00"})
+        rows.insert(0, {"portfolio_total_value": True, "created_at": "2026-09-05T12:00:00+00:00"})
+        from copilot.policy import evaluate_rule
+        result = evaluate_rule(adoption=bands_adoption(), snapshot=engine_fixture(),
+                               context=declared_context(recommendations=rows),
+                               investable_cash=20000.0, now=NOW)
+        check = result["orders"][0]["risk_checks"]["drawdown"]
+        self.assertEqual(check["status"], "fail")
+        self.assertGreater(check["value"], 0.15)
+
+
+class ARotationDoesNotBlockItsOwnBasket(unittest.TestCase):
+    """A symbol a rotation did not select needs no action, and must not veto it.
+
+    momentum_top_n's weights carry only the chosen names, so an unselected and
+    unheld symbol gets no order from sizing, no measured risk inputs, and every
+    limit reads "unknown". Counting that as a failed evaluation made the whole
+    basket research_only whenever top_n < len(universe) -- which is every real
+    rotation. The three selected names had correct, actionable share counts and
+    were withheld anyway.
+    """
+
+    UNIVERSE = ["IWM", "QQQ", "SPY", "VTI", "VTV"]
+
+    def momentum(self, top_n=4, **overrides):
+        return bands_adoption(
+            family="momentum_top_n",
+            parameters={"top_n": float(top_n), "lookback_days": 252.0, "skip_days": 21.0},
+            targets=None, universe=list(self.UNIVERSE), **overrides)
+
+    def evaluate(self, top_n=4, **kwargs):
+        from copilot.policy import evaluate_rule
+        return evaluate_rule(adoption=self.momentum(top_n), snapshot=engine_fixture(
+            symbols=tuple(self.UNIVERSE), count=300),
+            context=kwargs.pop("context", declared_context()),
+            investable_cash=kwargs.pop("investable_cash", 100000.0), now=NOW, **kwargs)
+
+    def test_a_real_rotation_is_actionable(self):
+        result = self.evaluate(top_n=4)
+        self.assertEqual(result["execution_scope"], "actionable",
+                         [o["reasons"] for o in result["orders"]])
+
+    def test_the_unselected_symbol_is_marked_as_needing_no_action(self):
+        result = self.evaluate(top_n=4)
+        idle = [o for o in result["orders"] if o.get("no_action_required")]
+        # bars_series gives symbol i a slope of 0.05 + 0.01i on a start of
+        # 100 + 10i, so momentum rises with the index and top_n=4 drops IWM.
+        self.assertEqual([o["instrument_id"] for o in idle], ["IWM"])
+        self.assertEqual(idle[0]["action"], "hold")
+        self.assertIsNone(idle[0].get("quantity"))
+
+    def test_the_selected_symbols_all_carry_quantities(self):
+        result = self.evaluate(top_n=4)
+        traded = [o for o in result["orders"] if not o.get("no_action_required")]
+        self.assertEqual(len(traded), 4)
+        for order in traded:
+            self.assertGreater(order["quantity"], 0)
+            self.assertEqual(order["execution_scope"], "actionable")
+
+    def test_a_blocked_symbol_still_vetoes_the_basket(self):
+        # The fix must not turn a genuine data failure into "nothing to do".
+        snapshot = engine_fixture(symbols=tuple(self.UNIVERSE), count=300)
+        snapshot["instruments"]["VTV"]["quality_status"] = "fail"
+        from copilot.policy import evaluate_rule
+        result = evaluate_rule(adoption=self.momentum(4), snapshot=seal(snapshot),
+                               context=declared_context(), investable_cash=100000.0, now=NOW)
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertIn("VTV", result["blocked_symbols"])
+        self.assertFalse(any(o.get("no_action_required") for o in result["orders"]))
+
+    def test_an_unselected_symbol_that_is_held_is_sold_not_idled(self):
+        # Dropping a name is the whole point of a rotation, so a held-but-
+        # unselected symbol must produce a sell, never a no-action hold.
+        context = declared_context(holdings=[
+            {"instrument_id": "IWM", "quantity": 50, "currency": "USD"}])
+        result = self.evaluate(top_n=4, context=context, investable_cash=100000.0)
+        iwm = next(o for o in result["orders"] if o["instrument_id"] == "IWM")
+        if iwm.get("no_action_required"):
+            self.fail("a held name the rotation dropped was idled instead of sold")
+        self.assertIn(iwm["action"], ("reduce", "sell"))
+
+    def test_the_idle_symbol_says_why_rather_than_blaming_risk(self):
+        result = self.evaluate(top_n=4)
+        idle = next(o for o in result["orders"] if o.get("no_action_required"))
+        self.assertTrue(any("未选中" in r or "no position" in r for r in idle["reasons"]),
+                        idle["reasons"])
+
+
 if __name__ == "__main__":
     unittest.main()
