@@ -414,6 +414,18 @@ class TheRenderedMessageAccountsForEveryOrder(unittest.TestCase):
         self.assertIn("SPY 买入 8 股", message)
         self.assertNotIn("VTV", message)
 
+    def test_an_idle_symbol_is_not_named_alongside_a_real_risk_failure(self):
+        # The research-only branch is where the cause is written, so the
+        # no_action_required filter has to hold there too: an idle symbol
+        # listed as a cause sends the user looking for a limit that never
+        # failed. QQQ is the genuine failure here; VTV simply was not selected.
+        message = rendered(execution_scope="research_only",
+                           orders=[order("QQQ", action="hold", execution_scope="research_only"),
+                                   order("VTV", action="hold", execution_scope="research_only",
+                                         no_action_required=True)])
+        self.assertIn("风险检查未通过：QQQ", message)
+        self.assertNotIn("VTV", message)
+
     def test_no_heading_is_printed_with_nothing_under_it(self):
         # A `skip` brake leaves every order without a quantity while the basket
         # itself is still actionable, so the heading "按已采纳规则计算的委托："
