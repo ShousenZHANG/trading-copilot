@@ -859,6 +859,33 @@ class ARotationDoesNotBlockItsOwnBasket(unittest.TestCase):
                         idle["reasons"])
 
 
+def gold_only_fixture():
+    """A minimal GOLD.CNY snapshot assess_proposal accepts."""
+    return seal({"schema_version": 1, "created_at": "2026-09-06T01:00:00+00:00",
+                 "decision_at": "2026-09-06T01:00:00+00:00",
+                 "valid_until": "2026-09-06T12:00:00+00:00", "status": "ready",
+                 "instruments": {"GOLD.CNY": {
+                     **get_instrument("GOLD.CNY"), "quality_status": "pass",
+                     "latest_session": "2026-09-04", "expected_session": "2026-09-04",
+                     "price": 947.09, "indicators": {}, "evidence_ids": ["sge"],
+                     "issues": [], "sources": ["sge"]}},
+                 "evidence": [{"evidence_id": "sge", "provider": "sge",
+                               "upstream": "Shanghai Gold Exchange",
+                               "source_url": "https://www.sge.com.cn/sjzx/quotation_daily_new",
+                               "observed_at": "2026-09-04T07:30:00+00:00",
+                               "retrieved_at": "2026-09-06T00:59:00+00:00",
+                               "instrument_id": "GOLD.CNY", "asset_class": "physical_gold",
+                               "currency": "CNY", "unit": "gram",
+                               "price_kind": "sge_au9999_close", "status": "ok"}],
+                 "issues": []})
+
+
+def gold_proposal():
+    return {"instrument_id": "GOLD.CNY", "action": "buy", "mode": "accumulation",
+            "horizon": "long_term", "reasons": ["scheduled contribution"],
+            "conditions": [], "evidence_ids": ["sge"]}
+
+
 class TheGoldSleeveHasItsOwnLimits(unittest.TestCase):
     """Four of the five ETF limits cannot describe a one-instrument sleeve.
 
@@ -869,23 +896,75 @@ class TheGoldSleeveHasItsOwnLimits(unittest.TestCase):
     never a limit of 1.0, which a reader would take as "measured and passed".
     """
 
+    #: The key these tables are actually looked up by. Both are named _SLEEVE_*
+    #: but limit_for's own parameter is `asset_class`, and assess_proposal
+    #: passes `identity["asset_class"]`. ETF survives the confusion because its
+    #: sleeve and asset_class are both spelled "etf"; gold's are "gold" and
+    #: "physical_gold", and a first draft keyed the table "gold" -- which did
+    #: nothing at all.
+    GOLD_KEY = "physical_gold"
+
+    def test_the_exempt_table_is_keyed_by_the_instruments_own_asset_class(self):
+        from copilot.instruments import get_instrument
+        from copilot.policy import _SLEEVE_EXEMPT
+        self.assertEqual(get_instrument("GOLD.CNY")["asset_class"], self.GOLD_KEY)
+        self.assertIn(self.GOLD_KEY, _SLEEVE_EXEMPT)
+
     def test_gold_exempts_the_four_limits_that_cannot_apply(self):
         from copilot.policy import _SLEEVE_EXEMPT
         for name in ("single_name", "sector", "correlation", "liquidity"):
-            self.assertIn(name, _SLEEVE_EXEMPT["gold"], name)
-            self.assertTrue(_SLEEVE_EXEMPT["gold"][name].strip(),
+            self.assertIn(name, _SLEEVE_EXEMPT[self.GOLD_KEY], name)
+            self.assertTrue(_SLEEVE_EXEMPT[self.GOLD_KEY][name].strip(),
                             f"{name} is exempt with no stated reason")
 
     def test_gold_does_not_exempt_drawdown(self):
         from copilot.policy import _SLEEVE_EXEMPT
         # Drawdown is the one limit that transfers unchanged: it measures the
         # book losing money, which a single asset does just as well as a basket.
-        self.assertNotIn("drawdown", _SLEEVE_EXEMPT["gold"])
+        self.assertNotIn("drawdown", _SLEEVE_EXEMPT[self.GOLD_KEY])
+
+    def test_gold_no_longer_inherits_the_single_stock_defaults(self):
+        # What the wrong key actually produced: a 5% single-name cap on a
+        # position that is 100% of its sleeve by construction, and a 0.7
+        # correlation cap with nothing to correlate against.
+        from copilot.policy import limit_for
+        self.assertEqual(limit_for("single_name", "stock"), 0.05)
+        self.assertEqual(limit_for("drawdown", self.GOLD_KEY), 0.15)
 
     def test_no_gold_limit_is_set_to_one(self):
         from copilot.policy import _SLEEVE_LIMITS
-        for name, limit in _SLEEVE_LIMITS.get("gold", {}).items():
+        for name, limit in _SLEEVE_LIMITS.get(self.GOLD_KEY, {}).items():
             self.assertLess(limit, 1.0, f"{name}=1.0 reads as checked-and-passed")
+
+    def test_a_real_gold_proposal_shows_the_four_reasons(self):
+        """The test that would have caught the wrong key.
+
+        Every other test in this class asserts on the TABLE. None of them
+        asserted what a proposal actually sees, so a table keyed "gold" -- which
+        no lookup ever reads -- passed all of them while GOLD.CNY silently fell
+        through to the single-stock defaults. This one goes through
+        assess_proposal and reads the checks off the decision.
+        """
+        decision = assess_proposal(gold_proposal(), gold_only_fixture(), now=NOW)
+        checks = decision["risk_checks"]
+        for name in ("single_name", "sector", "correlation", "liquidity"):
+            self.assertEqual(checks[name]["status"], "not_applicable", name)
+            self.assertTrue(checks[name].get("detail", "").strip(),
+                            f"{name} is not_applicable with no reason a reader can see")
+            self.assertIsNone(checks[name]["limit"],
+                              f"{name} carries a number, which reads as measured-and-passed")
+
+    def test_a_real_gold_proposal_still_measures_drawdown(self):
+        decision = assess_proposal(gold_proposal(), gold_only_fixture(), now=NOW)
+        self.assertNotEqual(decision["risk_checks"]["drawdown"]["status"], "not_applicable")
+
+    def test_gold_is_still_not_executable_without_a_merchant_quote(self):
+        # Exempting four limits must not, on its own, open the door. GOLD.CNY
+        # is tradable: false, so executability still turns entirely on the
+        # retail quote Task 6 introduces.
+        decision = assess_proposal(gold_proposal(), gold_only_fixture(), now=NOW)
+        self.assertNotEqual(decision.get("execution_scope"), "actionable")
+        self.assertEqual(decision["risk_checks"]["retail_quote"]["status"], "unknown")
 
     def test_the_etf_sleeve_is_unchanged(self):
         from copilot.policy import _SLEEVE_LIMITS, limit_for

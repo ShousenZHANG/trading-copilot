@@ -56,7 +56,16 @@ _SLEEVE_EXEMPT = {
     # would look like a measured one that passed. drawdown is deliberately
     # absent: it measures the book losing money, which one asset does as well
     # as a basket, so it transfers unchanged at the shared 15%.
-    "gold": {
+    # Keyed "physical_gold", NOT "gold". Both tables are named _SLEEVE_* but are
+    # looked up by the instrument's asset_class (see limit_for's own parameter
+    # name, and assess_proposal's `identity["asset_class"]`). ETF works only
+    # because its sleeve and its asset_class happen to share the spelling "etf";
+    # gold's are "gold" and "physical_gold" and the collision does not save it.
+    # A first draft keyed this "gold", which silently did nothing: GOLD.CNY fell
+    # through to the single-stock defaults -- single_name 0.05 against a
+    # position that is 100% of its sleeve by construction -- and every reason
+    # written below reached no reader at all.
+    "physical_gold": {
         "single_name": "gold is the entire gold sleeve by construction; a single-name cap "
                        "would refuse every purchase it is supposed to size",
         "sector": "physical gold is not a member of any equity sector map",
