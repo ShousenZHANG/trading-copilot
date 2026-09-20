@@ -164,6 +164,57 @@ def rule_id(*, family: str, parameters: Mapping[str, float], universe: Sequence[
     return ID_PREFIX + hashlib.sha256(_canonical(material).encode()).hexdigest()[:ID_HEX_LENGTH]
 
 
+def _largest_position_weight(family: str, parameters: Mapping[str, float],
+                             symbols: Sequence[str],
+                             targets: Mapping[str, float] | None) -> float | None:
+    """The largest share of the invested book one holding can take, or None.
+
+    None means the maximum is data-dependent and cannot be known at adoption
+    time. Inverse-volatility weighting is the case: a single unusually calm name
+    can take an arbitrarily large share, so the only honest pre-trade bound is
+    1.0, and enforcing that would reject every such rule. Those rules can
+    therefore still produce a research-only result on a day when one name's
+    weight breaches the sleeve limit, and that is visible when it happens.
+    """
+    if family == "fixed_weight_bands":
+        return max(targets.values()) if targets else None
+    if family == "momentum_top_n":
+        held = min(int(parameters["top_n"]), len(symbols))
+        return 1.0 / held if held else None
+    return None
+
+
+def _refuse_an_unexecutable_rule(family: str, parameters: Mapping[str, float],
+                                 symbols: Sequence[str],
+                                 targets: Mapping[str, float] | None,
+                                 cash_floor_pct: float) -> None:
+    """Refuse a rule whose largest holding can never clear the sleeve's limit.
+
+    A rule that always breaches single-name concentration is not a rule that
+    sometimes pauses -- it can never produce an executable order at all, and
+    every daily evaluation of it would return research_only forever. Catching
+    that here turns a permanent silent failure into one sentence at adoption.
+
+    The arithmetic: N equally weighted holdings with a cash floor f give each
+    one (1 - f) / N of the book. Against the ETF sleeve's 25% ceiling that needs
+    N >= 4(1 - f) -- so four holdings at the default 15% floor, and a
+    twelve-symbol universe does not help a momentum rule that holds only two.
+    """
+    from .policy import limit_for
+
+    largest = _largest_position_weight(family, parameters, symbols, targets)
+    if largest is None:
+        return
+    limit = limit_for("single_name", "etf")
+    worst = (1.0 - cash_floor_pct) * largest
+    if worst > limit + WEIGHT_TOLERANCE:
+        raise ValueError(
+            f"this rule can never produce an executable order: its largest holding would be "
+            f"{worst:.1%} of the book, above the {limit:.0%} single-name limit for an ETF "
+            f"sleeve. Hold more names, raise the cash floor above "
+            f"{1.0 - limit / largest:.0%}, or widen the rule's concentration.")
+
+
 def build_adoption(*, sleeve: str, family: str, parameters: Mapping[str, float],
                    universe: Sequence[str], targets: Mapping[str, float] | None,
                    result, cost_model: Mapping[str, Any], cash_floor_pct: float,
@@ -218,6 +269,9 @@ def build_adoption(*, sleeve: str, family: str, parameters: Mapping[str, float],
         raise ValueError(f"result.universe {sorted(result.universe)!r} does not match the "
                          f"adopted universe {symbols!r}; the admitted backtest must describe "
                          "the strategy being adopted")
+
+    _refuse_an_unexecutable_rule(family, cleaned_parameters, symbols, cleaned_targets,
+                                 float(cash_floor_pct))
 
     report = admission_gate.assess(result, sessions_by_year=admission_gate.STRESS_SESSIONS,
                                    waivers=dict(waivers or {}))
