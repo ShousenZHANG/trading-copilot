@@ -65,7 +65,8 @@ async def run(live=False, symbols=None, trace=False):
                 await session.initialize()
                 listed = await session.list_tools()
                 required = {"collect_market_snapshot", "get_evidence_snapshot", "get_investment_context",
-                            "assess_investment_proposal", "record_investment_operation", "get_data_capabilities"}
+                            "assess_investment_proposal", "record_investment_operation", "get_data_capabilities",
+                            "declare_holdings_coverage", "evaluate_adopted_rule"}
                 assert required <= {tool.name for tool in listed.tools}
                 results["checks"].append("initialize_and_tools_list")
                 empty = await call(session, "get_investment_context", {})
@@ -81,6 +82,9 @@ async def run(live=False, symbols=None, trace=False):
                 assert first["status"] == "executed" and retry["replayed"]
                 assert first["operation_id"] == retry["operation_id"]
                 results["checks"].append("commit_and_idempotent_retry")
+                coverage = await call(session, "declare_holdings_coverage", {})
+                assert coverage["history"][0]["current"]
+                results["checks"].append("declare_coverage")
                 if live:
                     started = time.monotonic()
                     data = await call(session, "collect_market_snapshot",

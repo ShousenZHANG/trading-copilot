@@ -208,6 +208,138 @@ def declare_coverage(*, sleeve: str = "etf", base_currency: str = "USD",
     return receipt
 
 
+def adopt(adoption_inputs: dict, *, db_path=None) -> dict:
+    """Record an adoption and tell the user how to make it live.
+
+    Recording is not activation. The engine trades whatever
+    config/user.toml's etf.adopted_rule_id points at, and only the user edits
+    that file (ADR-0007 clause 8). `adoption_inputs["result"]` must be a real
+    `backtest.engine.Result` object, in memory in this process -- never a JSON
+    payload, because Result cannot survive a JSON round trip with the binding
+    ruleset.build_adoption enforces (rule_name/parameters/universe matching the
+    configuration being adopted) intact. `backtest_cli.py --adopt` is the
+    supported way to reach this: it runs a real backtest and calls this
+    function directly with the in-memory Result it just produced.
+    """
+    from .journal import record_adoption
+    from .ruleset import build_adoption
+    record = build_adoption(**adoption_inputs)
+    receipt = record_adoption(record, db_path=database_path(db_path))
+    receipt["adoption"] = record
+    receipt["next_step"] = (f'set etf.adopted_rule_id = "{record["rule_id"]}" in '
+                            "config/user.toml to make this rule live")
+    return receipt
+
+
+def adoption(rule_id: str, *, db_path=None) -> dict:
+    """Read back a stored adoption. Read-only: recording a new one is `adopt`."""
+    from .journal import load_adoption
+    return load_adoption(rule_id, db_path=database_path(db_path))
+
+
+def _verify_brake_evidence(stored: dict, brake: dict | None) -> None:
+    """Every brake evidence id must name a record that exists and is news.
+
+    The brake is the only evidence field in the system with no validation behind
+    it, and its input is a headline the model read from an aggregator. An id that
+    resolves to nothing would become the stated grounds for zeroing a basket.
+    """
+    ids = list((brake or {}).get("evidence_ids") or [])
+    if not ids:
+        return
+    records = {r.get("evidence_id"): r for r in stored.get("evidence", [])}
+    for eid in ids:
+        record = records.get(eid)
+        if record is None:
+            raise ValueError(f"brake evidence {eid!r} is not in snapshot "
+                             f"{stored.get('snapshot_id')}")
+        if record.get("critical_evidence_eligible") is not False:
+            raise ValueError(f"brake evidence {eid!r} is market evidence, not news; the brake "
+                             "reads news and market evidence belongs in evidence_ids")
+
+
+def render_evaluation(result: dict, stored: dict) -> str:
+    """Render only what the engine produced. Never print a heading with nothing under it."""
+    lines = []
+    if result.get("execution_scope") != "actionable":
+        blocked = result.get("blocked_symbols") or []
+        if blocked:
+            reason = "数据未通过校验：" + "、".join(blocked)
+        elif not result.get("coverage_known"):
+            reason = "持仓覆盖未声明"
+        elif not result.get("rebalance_due"):
+            reason = "规则未触发再平衡"
+        else:
+            reason = "风险检查未全部通过"
+        lines.append(f"研究观点，未给出具体仓位（{reason}）")
+    else:
+        lines.append("按已采纳规则计算的委托：")
+        for order in result["orders"]:
+            if not order.get("quantity"):
+                continue
+            labels = {"buy": "买入", "reduce": "减持", "sell": "清仓"}
+            lines.append(f"  {order['instrument_id']} "
+                         f"{labels.get(order['action'], order['action'])} "
+                         f"{order['quantity']} 股，限价 {order['limit_price']}")
+    unfunded = (result.get("cash_plan") or {}).get("unfunded") or []
+    if unfunded:
+        lines.append("现金不足未下单：" + "、".join(unfunded))
+    if (result.get("brake") or {}).get("level", "none") != "none":
+        lines.append(result["brake"]["disclosure"])
+    if result.get("waived"):
+        lines.append("该规则的准入门槛带有书面豁免，见 ADR-0006")
+    return "\n".join(lines)
+
+
+def evaluate(*, snapshot_id: str, config_path=None, db_path=None,
+            brake: dict | None = None, now=None) -> dict:
+    """Run the adopted rule against a stored snapshot and persist every order.
+
+    All orders are validated before any is written. record_recommendation opens
+    its own transaction per row, so writing as we go would leave half a basket in
+    a table with immutability triggers if a later row failed. That guarantee
+    covers validation failures (a missing required field) -- it does not make
+    the write loop itself atomic across rows, because record_recommendation
+    commits one row per call with no cross-row transaction primitive. A conflict
+    that lands on the FIRST row leaves nothing committed; a conflict landing on
+    a LATER row (a genuine race against a concurrent trade) would still leave
+    earlier rows committed. See _test_copilot_service.py's
+    evaluate_with_a_failing_row for the demonstration and full explanation.
+    """
+    from .config import load_config
+    from .journal import load_adoption, record_recommendation
+    from .policy import evaluate_rule
+    settings = load_config(config_path)
+    pointer = settings.etf.adopted_rule_id
+    if not pointer:
+        raise ValueError("no rule is adopted; set etf.adopted_rule_id in config/user.toml to a "
+                         "rule id printed by `backtest_cli.py --adopt`")
+    path = database_path(db_path)
+    adoption_record = load_adoption(pointer, db_path=path)
+    stored = snapshot(snapshot_id, db_path=db_path)
+    _verify_brake_evidence(stored, brake)
+    current = context(db_path=db_path)
+    result = evaluate_rule(adoption=adoption_record, snapshot=stored, context=current,
+                           investable_cash=settings.etf.investable_cash_usd,
+                           brake=brake, now=now)
+    prepared = []
+    for order in result["orders"]:
+        order["evaluation_id"] = result["evaluation_id"]
+        order["evaluation_session"] = result["evaluation_session"]
+        order["rebalance_due"] = result["rebalance_due"]
+        order["decision_id"] = "decision-" + hashlib.sha256(
+            strict_json(order).encode()).hexdigest()
+        for field in ("snapshot_id", "portfolio_version", "instrument_id", "action"):
+            if not isinstance(order.get(field), str) or not order[field]:
+                raise ValueError(f"order for {order.get('instrument_id')!r} cannot be recorded: "
+                                 f"{field} is missing")
+        prepared.append(order)
+    for order in prepared:
+        record_recommendation(order, db_path=path)
+    result["message"] = render_evaluation(result, stored)
+    return result
+
+
 def capabilities() -> dict:
     load_credentials()
     return {"schema_version": 1, "credentials_present": {k: bool(os.getenv(k)) for k in KEY_NAMES},

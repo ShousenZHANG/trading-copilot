@@ -12,7 +12,8 @@ investable_cash_usd = 0
 # Structural cash reserve and drawdown tolerance. Placeholders until a rule is adopted.
 min_cash_reserve_pct = 0.15
 max_drawdown_pct = 0.20
-# Points at a rule recorded by `copilot_cli.py adopt`, which prints the id.
+# Points at a rule recorded by `backtest_cli.py --universe ... --family ... --adopt`,
+# which prints the id (`copilot_cli.py adopt <rule_id>` reads one back, read-only).
 # Nothing writes this file: keeping the pointer manual is what makes adoption an
 # explicit act of yours rather than something a daily scan can do. Empty means
 # nothing is adopted and the engine produces no orders.

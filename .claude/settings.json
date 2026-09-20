@@ -22,7 +22,9 @@
       "mcp__trading-copilot__get_investment_context",
       "mcp__trading-copilot__assess_investment_proposal",
       "mcp__trading-copilot__record_investment_operation",
-      "mcp__trading-copilot__get_data_capabilities"
+      "mcp__trading-copilot__get_data_capabilities",
+      "mcp__trading-copilot__declare_holdings_coverage",
+      "mcp__trading-copilot__evaluate_adopted_rule"
     ],
     "deny": [
       "Read(/.env)",

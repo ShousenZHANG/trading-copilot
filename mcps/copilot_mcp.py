@@ -71,5 +71,34 @@ def get_data_capabilities() -> dict:
     return service.capabilities()
 
 
+@mcp.tool()
+def declare_holdings_coverage(base_currency: str = "USD") -> dict:
+    """Record that the user has confirmed their recorded holdings are complete.
+
+    Call this only when the user has explicitly said so. It is their assertion,
+    not an inference from what happens to be recorded. Any later trade
+    invalidates it and it must be made again.
+    """
+    return service.declare_coverage(base_currency=base_currency)
+
+
+@mcp.tool()
+def evaluate_adopted_rule(snapshot_id: str, brake_level: str = "none",
+                          brake_reason: str = "",
+                          brake_evidence_ids: list[str] | None = None) -> dict:
+    """Run the adopted rule against a stored snapshot. The engine computes every number.
+
+    You cannot supply a quantity, price or rule id. The only thing you choose is
+    the brake: "none", "reduce_50" or "skip", which may reduce or cancel a
+    purchase and can never enlarge one or change a sale. A non-"none" level needs
+    a stated reason and at least one news evidence id from the snapshot, and is
+    reported as not backtested. Report the engine's orders, never your own
+    figures.
+    """
+    return service.evaluate(snapshot_id=snapshot_id,
+                            brake={"level": brake_level, "reason": brake_reason,
+                                   "evidence_ids": brake_evidence_ids or []})
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

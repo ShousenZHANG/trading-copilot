@@ -37,3 +37,9 @@ approval_mode = "approve"
 
 [mcp_servers."trading-copilot".tools.get_data_capabilities]
 approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.declare_holdings_coverage]
+approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.evaluate_adopted_rule]
+approval_mode = "approve"
