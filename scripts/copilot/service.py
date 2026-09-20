@@ -208,6 +208,29 @@ def declare_coverage(*, sleeve: str = "etf", base_currency: str = "USD",
     return receipt
 
 
+def capture_retail_quote(*, snapshot_id: str, merchant: str, product: str,
+                         ask_per_fine_gram: float, observed_at: str,
+                         db_path=None, now=None) -> dict:
+    """Attach a user-reported merchant gold quote to a stored snapshot.
+
+    Writes a NEW snapshot rather than editing the stored one: snapshots are
+    content-addressed and the journal's triggers forbid an update. The returned
+    snapshot_id is the one to evaluate against.
+    """
+    from .journal import save_snapshot
+    from . import retailquote
+    path = database_path(db_path)
+    stored = snapshot(snapshot_id, db_path=path)
+    moment = now or datetime.now(timezone.utc)
+    quote = retailquote.build(merchant=merchant, product=product,
+                              ask_per_fine_gram=ask_per_fine_gram, observed_at=observed_at)
+    attached = retailquote.attach(stored, quote, now=moment)
+    save_snapshot(attached, db_path=path)
+    return {"snapshot_id": attached["snapshot_id"], "quote": quote,
+            "supersedes": snapshot_id,
+            "disclosure": "商家报价由你本人上报，系统只校验格式与时效，不核实价格真伪"}
+
+
 def adopt(adoption_inputs: dict, *, db_path=None) -> dict:
     """Record an adoption and tell the user how to make it live.
 
