@@ -428,3 +428,364 @@ def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None,
     # while changing created_at would conflict with the append-only ledger.
     decision["decision_id"] = "decision-" + _digest(decision)
     return decision
+
+
+#: How the engine's order side maps onto the five ACTIONS policy accepts. A full
+#: exit is a sell; a partial trim is a reduce. There is no "rebalance" action.
+def _order_action(side: str, target_shares: int) -> str:
+    if side == "buy":
+        return "buy"
+    if side == "sell":
+        return "sell" if target_shares == 0 else "reduce"
+    return "hold"
+
+
+#: market_data.py's collect_snapshot() enforces minimum_history in [260, 400]
+#: and defaults it to 260; that value is not exposed as an importable constant
+#: there, so the floor of its valid range is mirrored here.
+_MIN_HISTORY_BARS = 260
+
+
+def _primary_evidence(snapshot: dict, symbol: str) -> dict:
+    """The market evidence record whose bars the indicators were computed from.
+
+    Selected by the same rule market_data.py's collect_snapshot() uses for
+    `primary` (its `primary = max(successes, key=...)` line), so the live
+    signal is computed on the series the snapshot's own indicators describe.
+    That is a 4-key sort -- bar count clears the collector's own minimum
+    history, then no missing sessions, then total-return-adjusted basis, then
+    most bars -- not the 3-key version ("no missing sessions, then adjusted
+    basis, then most bars") an earlier draft of this docstring described.
+    ADR-0007's Task 1 follow-up made the bar-count test outrank the gap test,
+    because `missing_sessions` is trivially empty for a one-bar record: after
+    that change every symbol can carry a full Yahoo history alongside a
+    single-bar Nasdaq record, and picking naively would intersect a 260-bar
+    history down to one session or mix an unadjusted close into an adjusted
+    series.
+    """
+    item = snapshot.get("instruments", {}).get(symbol) or {}
+    owned = set(item.get("evidence_ids") or [])
+    candidates = [record for record in snapshot.get("evidence", [])
+                  if record.get("evidence_id") in owned
+                  and isinstance(record.get("bars"), list) and record["bars"]
+                  and record.get("critical_evidence_eligible") is not False]
+    if not candidates:
+        raise ValueError(f"{symbol}: no market evidence in this snapshot carries bars; pass the "
+                         "stored snapshot rather than the summary view, which strips them")
+    return max(candidates, key=lambda r: (
+        len(r["bars"]) >= _MIN_HISTORY_BARS,
+        not bool(r.get("missing_sessions")),
+        r.get("indicator_basis") == "total_return_adjusted",
+        len(r["bars"])))
+
+
+def _bars_matrix(snapshot: dict, universe: tuple) -> tuple[list, list, dict]:
+    """Align each symbol's primary bars onto the sessions they all share.
+
+    Intersection, not union: a weight computed from a forward-filled price is one
+    nobody could have traded on. Reads `adjusted_close` when the record's basis is
+    total-return adjusted, because that is the basis the rule families were
+    backtested on; `item["price"]` supplies the limit price separately and the two
+    are never mixed (ADR-0006 clause 3).
+    """
+    from datetime import date as _date
+    per_symbol, records = {}, {}
+    for symbol in universe:
+        record = _primary_evidence(snapshot, symbol)
+        records[symbol] = record
+        adjusted = record.get("indicator_basis") == "total_return_adjusted"
+        series = {}
+        for row in record["bars"]:
+            stamp = row.get("session")
+            close = row.get("adjusted_close") if adjusted else row.get("close")
+            if not stamp or isinstance(close, bool) or not isinstance(close, (int, float)):
+                continue
+            series[_date.fromisoformat(str(stamp)[:10])] = float(close)
+        if not series:
+            raise ValueError(f"{symbol}: no bar carried both a session and a usable close")
+        per_symbol[symbol] = series
+    common = set(per_symbol[universe[0]])
+    for symbol in universe[1:]:
+        common &= set(per_symbol[symbol])
+    if not common:
+        raise ValueError("the adopted universe shares no common session in this snapshot")
+    dates = sorted(common)
+    closes = [[per_symbol[symbol][day] for symbol in universe] for day in dates]
+    return dates, closes, records
+
+
+def _build_rule(adoption: dict):
+    """Rebuild the rule object from the stored adoption, never from a model payload."""
+    from .backtest import rules as rule_families
+    family = adoption["family"]
+    universe = tuple(adoption["universe"])
+    p = {k: float(v) for k, v in (adoption.get("parameters") or {}).items()}
+    if family == "fixed_weight_bands":
+        targets = adoption.get("targets")
+        if not targets:
+            raise ValueError("fixed_weight_bands requires stored targets")
+        return rule_families.FixedWeightBands(
+            {str(k): float(v) for k, v in targets.items()},
+            relative_band=p["relative_band"], absolute_band=p["absolute_band"],
+            calendar_days=int(p["calendar_days"]))
+    if family == "inverse_volatility":
+        return rule_families.InverseVolatility(
+            universe, lookback_days=int(p["lookback_days"]),
+            rebalance_days=int(p["rebalance_days"]))
+    if family == "momentum_top_n":
+        return rule_families.MomentumTopN(
+            universe, top_n=int(p["top_n"]), lookback_days=int(p["lookback_days"]),
+            skip_days=int(p["skip_days"]))
+    raise ValueError(f"unknown rule family {family!r}")
+
+
+def _last_rebalance_index(context: dict, adoption: dict, dates: list) -> int | None:
+    """Index of the session this rule last rebalanced on, from prior decisions.
+
+    The rule families decide WHETHER to trade in `should_rebalance`, not in
+    `weights`: FixedWeightBands.weights returns the stored targets unconditionally
+    and all of its behaviour -- the 25% relative band, the 5-point absolute band,
+    the calendar leg -- lives in the trigger. Evaluating `weights` alone turns an
+    annual rule into a daily one and the turnover the admission gate measured
+    stops describing it.
+    """
+    from datetime import date as _date
+    sessions = [r.get("evaluation_session") for r in (context.get("recommendations") or [])
+                if r.get("rule_id") == adoption["rule_id"] and r.get("rebalance_due")]
+    stamps = sorted({_date.fromisoformat(str(s)[:10]) for s in sessions if s})
+    if not stamps:
+        return None
+    for index in range(len(dates) - 1, -1, -1):
+        if dates[index] <= stamps[-1]:
+            return index
+    return None
+
+
+def _current_weights(holdings: list, prices: dict, total_value: float) -> dict:
+    if total_value <= 0:
+        return {}
+    weights = {}
+    for holding in holdings or []:
+        symbol = str(holding.get("instrument_id", "")).upper()
+        price, quantity = prices.get(symbol), holding.get("quantity")
+        if price is None or isinstance(quantity, bool) or not isinstance(quantity, (int, float)):
+            continue
+        weights[symbol] = weights.get(symbol, 0.0) + float(quantity) * float(price) / total_value
+    return weights
+
+
+def _held_shares(holdings: list) -> dict:
+    held = {}
+    for holding in holdings or []:
+        symbol = str(holding.get("instrument_id", "")).upper()
+        quantity = holding.get("quantity")
+        if isinstance(quantity, bool) or not isinstance(quantity, (int, float)):
+            continue
+        held[symbol] = held.get(symbol, 0.0) + float(quantity)
+    return held
+
+
+def _absent_decision(snapshot: dict, symbol: str, reasons: list, version: str) -> dict:
+    """A blocked decision for a universe symbol the snapshot does not carry."""
+    return {
+        "schema_version": 1, "policy_version": POLICY_VERSION,
+        "snapshot_id": snapshot.get("snapshot_id"), "instrument_id": symbol,
+        "action": "data_insufficient", "requested_action": "hold",
+        "data_status": "blocked", "reasons": list(reasons), "conditions": [],
+        "risk_checks": {"data": {"status": "fail",
+                                 "detail": f"{symbol} is absent from the snapshot"}},
+        "evidence_ids": [], "claims": [],
+        "reasoning_verification": "instrument absent from the evaluated snapshot",
+        "portfolio_version": version, "mode": "accumulation", "horizon": "long_term",
+        "warnings": [f"{symbol} is in the adopted universe but not in this snapshot"],
+        "execution_scope": "research_only",
+    }
+
+
+def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None,
+                  investable_cash: float, brake: dict | None = None, now=None) -> dict:
+    """Compute orders from an adopted rule. The only producer of live numbers.
+
+    The engine feeds the evidence gate rather than bypassing it: it computes the
+    weights, the share deltas and the measured risk inputs, then runs one
+    proposal per symbol through assess_proposal with source="engine" and the
+    per-proposal context that gate requires -- snapshot_id plus this proposal's
+    own fingerprint plus the risk it measured for this trade. That is legitimate
+    for the engine and not for a model, because the engine computed the trade and
+    the risk from the same holdings and prices, so they genuinely correspond.
+
+    ADR-0007 clause 6: one blocked symbol pauses the whole evaluation. Weights
+    are computed across the universe, so one unreliable symbol makes every weight
+    unreliable, and a partial basket would be a policy nobody approved.
+    """
+    from . import brake as brake_module
+    from . import riskinputs, sizing
+    from .backtest.engine import CostModel
+    from .instruments import sector_of
+
+    if not isinstance(adoption, dict) or not adoption.get("rule_id"):
+        raise ValueError("adoption must be a stored adoption record with a rule_id")
+    if adoption.get("sleeve") != "etf":
+        raise ValueError(f"sleeve must be 'etf'; this adoption says "
+                         f"{adoption.get('sleeve')!r} and no other sleeve has an engine")
+    context = dict(context or {})
+    rule_id = str(adoption["rule_id"])
+    universe = tuple(str(s).upper() for s in adoption.get("universe") or [])
+    if not universe:
+        raise ValueError("adoption has an empty universe")
+
+    created = _time(now if now is not None else datetime.now(timezone.utc), "now")
+    valid_until = _time(snapshot.get("valid_until"), "snapshot.valid_until")
+    if created >= valid_until:
+        raise ValueError(f"snapshot {snapshot.get('snapshot_id')} expired at "
+                         f"{valid_until.isoformat()}; collect a fresh one before sizing")
+
+    brake_record = brake_module.record(
+        level=str((brake or {}).get("level", "none")),
+        reason=str((brake or {}).get("reason", "")),
+        evidence_ids=(brake or {}).get("evidence_ids") or [])
+
+    instruments = snapshot.get("instruments", {})
+    blocked = [s for s in universe
+               if s not in instruments or instruments[s].get("quality_status") != "pass"]
+    coverage_known = context.get("portfolio_complete") is True
+    version = str(context.get("portfolio_version") or "")
+    withhold = bool(blocked) or not coverage_known
+
+    plan, measured, rebalance_due = None, {}, None
+    if not withhold:
+        dates, closes, records = _bars_matrix(snapshot, universe)
+        rule = _build_rule(adoption)
+        if len(dates) <= rule.warmup_bars:
+            raise ValueError(f"{adoption['family']} needs more than {rule.warmup_bars} bars to "
+                             f"produce a signal; this snapshot shares {len(dates)}")
+        from .backtest.frame import build as build_frame
+        frame = build_frame(dates=dates, symbols=list(universe), closes=closes)
+        last_index = len(dates) - 1
+        prices = {s: instruments[s]["price"] for s in universe}
+        held = _held_shares(context.get("holdings"))
+        holdings_value = sum(held.get(s, 0.0) * prices[s] for s in held if s in prices)
+        total_value = holdings_value + float(investable_cash)
+        current = _current_weights(context.get("holdings"), prices, total_value)
+        rebalance_due = rule.should_rebalance(
+            frame, last_index, current, _last_rebalance_index(context, adoption, dates))
+        weights = rule.weights(frame, last_index)
+        # `held` is passed unconditionally, not
+        # `held if rebalance_due else weights and held` (a draft expression that
+        # was reaching for "pass held either way" and reduces to `held` in every
+        # case anyway, since `weights` is never empty for a real rule). The loop
+        # below zeroes every delta when a rebalance is not due, so plan_orders
+        # never needs to see a different holdings view to get that right.
+        plan = sizing.plan_orders(
+            weights=weights, prices=prices, held_shares=held,
+            investable_cash=float(investable_cash),
+            cash_floor_pct=float(adoption.get("cash_floor_pct", 0.0)),
+            cost_model=CostModel(**adoption["cost_model"]))
+        if not rebalance_due:
+            for order in plan["orders"]:
+                order.update(delta_shares=0, side="hold", notional=0.0, estimated_cost=0.0)
+        history = [float(r["portfolio_total_value"]) for r in (context.get("recommendations") or [])
+                   if isinstance(r.get("portfolio_total_value"), (int, float))]
+        history.append(plan["total_value"])
+        sector_values: dict[str, float] = {}
+        for order in plan["orders"]:
+            sector = sector_of(order["instrument_id"])
+            # "diversified" is instruments.py's label for "not a sector", used
+            # for every broad fund the static map does not name explicitly, and
+            # its own comment there says it "therefore never concentrates".
+            # Aggregating unrelated diversified funds into one shared bucket
+            # would contradict that and ADR-0007 clause 7's own worked example
+            # ("QQQ plus SPY at 25% each will pass"): two diversified ETFs at
+            # 25% each combined would read as 50% of one "sector" and fail a
+            # 25% sector cap that clause explicitly says should pass. A real
+            # sector (technology, financials, ...) still aggregates normally.
+            if sector == "diversified":
+                continue
+            sector_values[sector] = sector_values.get(sector, 0.0) + \
+                order["target_shares"] * order["limit_price"]
+        for order in plan["orders"]:
+            symbol = order["instrument_id"]
+            sector = sector_of(symbol)
+            own = order["target_shares"] * order["limit_price"]
+            other_sector_value = 0.0 if sector == "diversified" else sector_values.get(sector, 0.0) - own
+            measured[symbol] = riskinputs.compute(
+                symbol=symbol, target_shares=order["target_shares"],
+                price=order["limit_price"], total_value=plan["total_value"],
+                sector_values={sector: other_sector_value},
+                sector_of=sector,
+                average_dollar_volume=riskinputs.average_dollar_volume(
+                    _primary_evidence(snapshot, symbol)["bars"]),
+                value_history=history, delta_shares=order["delta_shares"])
+
+    sized = {o["instrument_id"]: o for o in (plan["orders"] if plan else [])}
+    orders = []
+    for symbol in universe:
+        if blocked:
+            reasons = [f"adopted rule {rule_id} paused: {', '.join(blocked)} has no "
+                       "validated market data in this snapshot"]
+        elif not coverage_known:
+            reasons = [f"adopted rule {rule_id} produced a research view only; holdings "
+                       "coverage has not been declared"]
+        elif rebalance_due is False:
+            reasons = [f"adopted rule {rule_id} is within its rebalance band; no trade is due"]
+        else:
+            reasons = [f"adopted rule {rule_id} produced this order"]
+        if symbol not in instruments:
+            orders.append({**_absent_decision(snapshot, symbol, reasons, version),
+                           "rule_id": rule_id, "brake": dict(brake_record)})
+            continue
+        order = sized.get(symbol)
+        applied = None
+        item = {"instrument_id": symbol, "action": "hold", "mode": "accumulation",
+                "horizon": "long_term", "reasons": reasons, "conditions": [],
+                "evidence_ids": [_primary_evidence(snapshot, symbol)["evidence_id"]]}
+        if order is not None and order["delta_shares"] != 0:
+            traded = abs(order["delta_shares"])
+            # The brake only ever reduces EXPOSURE. Halving a sell would leave
+            # more exposure than the rule asked for, so a sell is never braked.
+            if order["side"] == "buy":
+                applied = brake_module.applied(record=brake_record, quantity=traded)
+                traded = applied["post_brake_quantity"]
+            else:
+                applied = {**brake_module.applied(record=brake_record, quantity=traded),
+                           "post_brake_quantity": traded}
+            applied["applied_to_side"] = order["side"]
+            applied["changed"] = traded != abs(order["delta_shares"])
+            if traded > 0:
+                item["action"] = _order_action(order["side"], order["target_shares"])
+                item["quantity"] = traded
+                item["price"] = order["limit_price"]
+        proposal_context = {**context, "snapshot_id": snapshot["snapshot_id"],
+                            "risk_proposal_fingerprint": proposal_fingerprint(item),
+                            "verified_risk_inputs": measured.get(symbol, {})}
+        decision = assess_proposal(item, snapshot, proposal_context, now=now, source="engine")
+        decision["rule_id"] = rule_id
+        decision["brake"] = applied or dict(brake_record)
+        if order is not None and decision["data_status"] == "ready" and "quantity" in decision:
+            decision["limit_price"] = order["limit_price"]
+            decision["limit_price_basis"] = "split_adjusted_close"
+            decision["delta_shares"] = order["delta_shares"]
+            decision["target_shares"] = order["target_shares"]
+            decision["held_shares"] = order["held_shares"]
+            decision["estimated_cost"] = order["estimated_cost"]
+            decision["portfolio_total_value"] = plan["total_value"]
+            decision["admitted_metrics"] = dict(adoption.get("admission", {}).get("metrics", {}))
+        orders.append(decision)
+
+    actionable = (not withhold and bool(rebalance_due)
+                  and all(o.get("execution_scope") == "actionable" for o in orders))
+    result = {
+        "schema_version": 1, "rule_id": rule_id, "sleeve": "etf",
+        "snapshot_id": snapshot.get("snapshot_id"), "orders": orders,
+        "blocked_symbols": blocked, "coverage_known": coverage_known,
+        "rebalance_due": bool(rebalance_due),
+        "execution_scope": "actionable" if actionable else "research_only",
+        "brake": brake_record, "waived": bool(adoption.get("waived")),
+        "admitted_metrics": dict(adoption.get("admission", {}).get("metrics", {})),
+        "evaluation_session": (snapshot.get("instruments", {}).get(universe[0], {})
+                               .get("latest_session")),
+    }
+    if not withhold:
+        result["cash_plan"] = plan
+    result["evaluation_id"] = "eval-" + _digest(result)[:16]
+    return result
