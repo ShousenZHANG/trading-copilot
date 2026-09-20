@@ -47,6 +47,23 @@ def main() -> int:
     backup.add_argument("destination")
     show = sub.add_parser("config", help="print validated config/user.toml as JSON")
     show.add_argument("--path", default=None)
+    sub.add_parser("declare-coverage", help="record that recorded holdings are complete")
+    adopt_cmd = sub.add_parser(
+        "adopt",
+        help="print a stored adoption; read-only. Recording a NEW adoption is done by "
+             "`backtest_cli.py --universe ... --family ... --adopt`, not here -- only that "
+             "command holds the in-memory backtest Result the binding in ruleset.build_adoption "
+             "requires (result.rule_name/parameters/universe must match what is being adopted), "
+             "and a Result cannot survive a JSON round trip with that binding intact. A JSON "
+             "adoption payload accepted here would let a caller describe a backtest that never "
+             "ran, which is exactly what that binding exists to refuse.")
+    adopt_cmd.add_argument("rule_id")
+    evaluate_cmd = sub.add_parser("evaluate", help="run the adopted rule against a snapshot")
+    evaluate_cmd.add_argument("snapshot_id")
+    evaluate_cmd.add_argument("--brake-level", choices=("none", "reduce_50", "skip"),
+                              default="none")
+    evaluate_cmd.add_argument("--brake-reason", default="")
+    evaluate_cmd.add_argument("--brake-evidence-id", action="append", default=[])
     args = parser.parse_args()
     try:
         if args.command == "snapshot":
@@ -64,6 +81,15 @@ def main() -> int:
         elif args.command == "config":
             from copilot.config import as_dict, load_config
             result = as_dict(load_config(args.path))
+        elif args.command == "declare-coverage":
+            result = service.declare_coverage(db_path=args.db)
+        elif args.command == "adopt":
+            result = service.adoption(args.rule_id, db_path=args.db)
+        elif args.command == "evaluate":
+            result = service.evaluate(snapshot_id=args.snapshot_id, db_path=args.db,
+                                      brake={"level": args.brake_level,
+                                             "reason": args.brake_reason,
+                                             "evidence_ids": args.brake_evidence_id})
         else:
             from copilot.journal import backup
             result = backup(args.destination, db_path=service.database_path(args.db))

@@ -29,7 +29,8 @@ def generated_files() -> dict[Path, str]:
         lines += ["startup_timeout_sec = 120", "tool_timeout_sec = 180", ""]
         if name == "trading-copilot":
             tools = ["collect_market_snapshot", "get_evidence_snapshot", "get_investment_context",
-                     "assess_investment_proposal", "record_investment_operation", "get_data_capabilities"]
+                     "assess_investment_proposal", "record_investment_operation", "get_data_capabilities",
+                     "declare_holdings_coverage", "evaluate_adopted_rule"]
             # Only local evidence/accounting operations authorized by the project.
             for tool in tools:
                 lines += [f'[mcp_servers."trading-copilot".tools.{tool}]',

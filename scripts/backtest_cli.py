@@ -281,6 +281,29 @@ def self_test() -> int:
         assert payload["families"], "report has no families"
         assert payload["families"][0]["rule"] == "fixed_weight_bands"
 
+    # --adopt: a real end-to-end adoption, over four symbols so the equal-weight
+    # bands rule (25% each) clears the ETF sleeve's single-name limit at the
+    # default 15% cash floor (worst case 0.85 * 0.25 = 21.25%). Same synthetic,
+    # offline, deterministic series as the run above; only the flag differs.
+    import io
+    import re
+    from contextlib import redirect_stdout
+    with tempfile.TemporaryDirectory() as tmp:
+        db = str(Path(tmp) / "adopt-selftest.sqlite")
+        buffer = io.StringIO()
+        with mock.patch.object(sys.modules[__name__], "_fetch", side_effect=_synthetic_series):
+            with redirect_stdout(buffer):
+                code = main(["--universe", "SPY,QQQ,DIA,IVV", "--family", "bands",
+                            "--adopt", "--db", db])
+        assert code == 0, f"main() --adopt returned {code}, expected 0"
+        receipt = json.loads(buffer.getvalue())
+        assert re.match(r"^rule-[0-9a-f]{16}$", receipt.get("rule_id", "")), receipt
+        assert "config/user.toml" in receipt["next_step"], receipt
+        assert receipt["rule_id"] in receipt["next_step"], receipt
+        from copilot import journal
+        stored = journal.load_adoption(receipt["rule_id"], db_path=db)
+        assert stored["sleeve"] == "etf", stored
+
     print("backtest_cli self-test OK")
     return 0
 
@@ -309,6 +332,51 @@ def _parse_universe(raw: str, *, parser: argparse.ArgumentParser, allow_empty: b
     return symbols
 
 
+def _target_weights(family: str, symbols: tuple[str, ...]) -> dict[str, float] | None:
+    """The equal-weight targets build_rules would give this family, or None.
+
+    Mirrors build_rules' own `equal = {s: 1.0 / len(symbols) for s in symbols}`
+    so --adopt records exactly the targets the backtest actually ran with.
+    fixed_weight_bands is the only family with fixed targets; the other two
+    compute their weights at evaluation time and store no targets at all.
+    """
+    if family != "bands":
+        return None
+    return {s: 1.0 / len(symbols) for s in symbols}
+
+
+def adopt_rule(symbols: tuple[str, ...], family: str, *, start_cash: float,
+              cash_floor_pct: float, db_path=None) -> dict:
+    """Run one family for real and hand the in-memory Result to service.adopt.
+
+    This is the whole reason --adopt lives here rather than in copilot_cli.py:
+    ruleset.build_adoption binds result.rule_name/parameters/universe to the
+    family/parameters/universe being adopted, and that binding cannot survive a
+    JSON round trip -- a hand-written payload describing a backtest is exactly
+    the bypass Task 4 closes. Only the process that just ran engine.run() holds
+    a Result that still carries that guarantee.
+    """
+    from copilot import service
+
+    frame, alignment, caveats = load_universe(symbols)
+    rules_built = build_rules(symbols, family)
+    if len(rules_built) != 1:
+        raise SystemExit(f"--adopt requires exactly one rule family, not {len(rules_built)} "
+                         f"(got --family {family!r}); pass bands, invvol or momentum")
+    rule = rules_built[0]
+    result = engine.run(frame, rule=rule, start_cash=start_cash,
+                        cost_model=engine.CostModel(), cash_floor_pct=cash_floor_pct)
+    cost_model = {"per_share_usd": engine.CostModel().per_share_usd,
+                  "minimum_usd": engine.CostModel().minimum_usd,
+                  "max_pct_of_notional": engine.CostModel().max_pct_of_notional,
+                  "spread_bps": engine.CostModel().spread_bps}
+    adoption_inputs = dict(
+        sleeve="etf", family=rule.name, parameters=dict(result.parameters),
+        universe=tuple(symbols), targets=_target_weights(family, symbols), result=result,
+        cost_model=cost_model, cash_floor_pct=cash_floor_pct, integer_shares=True)
+    return service.adopt(adoption_inputs, db_path=db_path)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--universe", default="")
@@ -321,6 +389,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verify-universe", action="store_true")
     parser.add_argument("--verify-calendars", action="store_true")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--adopt", action="store_true",
+                        help="record this backtest as an adopted rule via service.adopt(), and "
+                             "print the receipt (rule_id and next_step). Requires a single "
+                             "--family (not 'all'): an adoption names exactly one rule. This is "
+                             "the only supported way to adopt a rule -- copilot_cli.py's own "
+                             "`adopt` subcommand is read-only (it prints back a stored adoption) "
+                             "because only this in-process Result satisfies the binding "
+                             "ruleset.build_adoption enforces; a JSON payload could describe a "
+                             "backtest that never ran.")
+    parser.add_argument("--db", help="isolated SQLite path for --adopt; default data/state/copilot.sqlite")
     args = parser.parse_args(argv)
 
     if args.self_test:
@@ -334,6 +412,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--universe is required unless a --verify-* or --self-test flag is given")
 
     symbols = _parse_universe(args.universe, parser=parser)
+
+    if args.adopt:
+        if args.family == "all":
+            parser.error("--adopt requires a single --family (not 'all'); an adoption names "
+                         "exactly one rule")
+        try:
+            receipt = adopt_rule(symbols, args.family, start_cash=args.start_cash,
+                                cash_floor_pct=args.cash_floor_pct, db_path=args.db)
+        except ValueError as exc:
+            raise SystemExit(f"cannot adopt this rule: {exc}") from exc
+        print(json.dumps(receipt, indent=2, ensure_ascii=False))
+        return 0
+
     frame, alignment, caveats = load_universe(symbols)
     payload = {"generated_at": datetime.now(timezone.utc).isoformat(),
                "universe": list(symbols), "alignment": alignment, "caveats": caveats,
