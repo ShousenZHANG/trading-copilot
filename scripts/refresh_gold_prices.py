@@ -28,8 +28,8 @@ source" applies: gold has ONE price source and the snapshot records it as such.
 Do not describe the agreement between them as corroboration.
 
 Usage:
-    uv run --no-project --quiet --script scripts/refresh_gold_history.py
-    uv run --no-project --quiet --script scripts/refresh_gold_history.py --check
+    uv run --no-project --quiet --script scripts/refresh_gold_prices.py
+    uv run --no-project --quiet --script scripts/refresh_gold_prices.py --check
 """
 from __future__ import annotations
 

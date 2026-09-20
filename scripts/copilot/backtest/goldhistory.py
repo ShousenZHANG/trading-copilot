@@ -1,7 +1,7 @@
 """Read the vendored SGE Au99.99 daily series. Stdlib only, no network.
 
 The file this reads is a CACHE of one upstream (sge.com.cn), refreshed by
-scripts/refresh_gold_history.py. It is not a second source and agreement
+scripts/refresh_gold_prices.py. It is not a second source and agreement
 between it and SGEProvider is not corroboration -- see that script's docstring
 and CLAUDE.md's "same upstream through two wrappers is one source".
 
@@ -35,7 +35,7 @@ def _lines(path: Path | None) -> list[str]:
     if not target.exists():
         raise FileNotFoundError(
             f"{target} is missing; regenerate it with "
-            "`uv run --no-project --quiet --script scripts/refresh_gold_history.py`")
+            "`uv run --no-project --quiet --script scripts/refresh_gold_prices.py`")
     return target.read_text(encoding="utf-8").splitlines()
 
 

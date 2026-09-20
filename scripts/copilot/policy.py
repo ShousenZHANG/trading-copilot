@@ -963,6 +963,7 @@ def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, br
     """
     from . import brake as brake_module
     from . import goldsizing
+    from .backtest import goldrules as goldrules_module
     from .backtest import goldrules
 
     rule_id = str(adoption["rule_id"])
@@ -1064,7 +1065,14 @@ def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, br
     decision["sleeve"] = "gold"
     decision["currency"] = "CNY"
     decision["brake"] = dict(brake_record)
-    decision["schedule_disclosure"] = adoption.get("schedule_disclosure")
+    # Falls back to the family constant rather than trusting the adoption to
+    # carry it. The disclosure is a property of scheduled_accumulation itself --
+    # engine.run cannot exercise a contribution schedule at any parameter value
+    # -- so an adoption that happens not to hold the string must not make the
+    # warning disappear from the number. Silence here would read as "this was
+    # backtested", which is the one thing it was written to deny.
+    decision["schedule_disclosure"] = (adoption.get("schedule_disclosure")
+                                       or goldrules_module.DISCLOSURE)
     if plan is not None:
         for field in ("amount_cny", "grams", "held_grams", "target_grams",
                       "ask_per_fine_gram", "refusals"):
@@ -1090,7 +1098,8 @@ def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, br
             # stopped emitting the key would fail closed.
             "execution_scope": decision.get("execution_scope", "research_only"),
             "brake": dict(brake_record), "waived": bool(adoption.get("waived")),
-            "schedule_disclosure": adoption.get("schedule_disclosure"),
+            "schedule_disclosure": (adoption.get("schedule_disclosure")
+                                    or goldrules_module.DISCLOSURE),
             "admitted_metrics": dict(adoption.get("admission", {}).get("metrics", {})),
             # service.evaluate stamps this onto every order before recording it,
             # so a gold result without it raises a KeyError out of the facade

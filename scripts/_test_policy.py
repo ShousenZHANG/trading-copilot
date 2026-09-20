@@ -1196,6 +1196,38 @@ class AGoldRuleProducesACnyContribution(unittest.TestCase):
         for field in ("amount_cny", "grams", "held_grams", "target_grams"):
             self.assertIsInstance(order[field], str, field)
 
+    def test_the_schedule_disclosure_survives_an_adoption_that_omits_it(self):
+        """The warning must not depend on the adoption remembering to carry it.
+
+        engine.run cannot exercise a contribution schedule at any parameter
+        value, so the disclosure is a property of the family, not of one
+        adoption. A hand-built or older adoption that lacks the string would
+        otherwise render a gram figure with no warning beside it -- and silence
+        reads as "this was backtested", the one thing it exists to deny.
+        """
+        from copilot.backtest import goldrules
+        from copilot.policy import evaluate_rule
+        adoption = self.gold_adoption()
+        adoption.pop("schedule_disclosure", None)
+        result = evaluate_rule(adoption=adoption, snapshot=gold_engine_fixture(with_quote=True),
+                               context=declared_context(base_currency="CNY"),
+                               investable_cash=50000.0, now=NOW)
+        self.assertEqual(result["schedule_disclosure"], goldrules.DISCLOSURE)
+        self.assertEqual(result["orders"][0]["schedule_disclosure"], goldrules.DISCLOSURE)
+
+    def test_the_rendered_gold_message_carries_the_disclosure(self):
+        # Behaviour, not structure: what the user actually reads.
+        from copilot.policy import evaluate_rule
+        from copilot.service import render_evaluation
+        adoption = self.gold_adoption()
+        adoption.pop("schedule_disclosure", None)
+        result = evaluate_rule(adoption=adoption, snapshot=gold_engine_fixture(with_quote=True),
+                               context=declared_context(base_currency="CNY"),
+                               investable_cash=50000.0, now=NOW)
+        message = render_evaluation(result, {})
+        self.assertIn("5.1948", message)
+        self.assertIn("未回测", message)
+
     def test_a_usd_coverage_declaration_does_not_fund_a_cny_sleeve(self):
         # CLAUDE.md forbids adding USD and CNY without dated FX.
         from copilot.policy import evaluate_rule
