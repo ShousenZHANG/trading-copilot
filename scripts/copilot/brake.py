@@ -25,12 +25,16 @@ a proposal while gating on the pre-brake one, so `skip` hit policy's
 positive-number check and raised out of an MCP tool with no try/except.
 
 BRAKE EVIDENCE IS NOT PROPOSAL EVIDENCE
-News records carry `critical_evidence_eligible: False` (research_data.py:97,351).
-Citing one in a proposal's `evidence_ids` makes policy emit
-"evidence {eid} cannot support a critical recommendation claim" and the whole
-decision becomes data_insufficient. Brake evidence travels in its own field and
-is never merged. `evaluate_rule` verifies each id against the snapshot; this
-module only enforces shape.
+News records carry `critical_evidence_eligible: False`: research_data's
+`company_news` passes `critical=False` into the record builder, which folds it
+into that field. Citing such a record in a proposal's `evidence_ids` makes
+policy emit "evidence {eid} cannot support a critical recommendation claim" and
+the whole decision becomes data_insufficient. Brake evidence therefore travels
+in its own field and is never merged. `evaluate_rule` verifies each id against
+the snapshot; this module only enforces shape.
+
+(Cited by function rather than line number on purpose: an earlier draft of this
+docstring pointed at line numbers that had already moved two commits later.)
 """
 from __future__ import annotations
 
