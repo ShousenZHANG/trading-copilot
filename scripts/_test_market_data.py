@@ -405,6 +405,60 @@ class ProviderContracts(unittest.TestCase):
         self.assertLessEqual(len(client.calls), 36)
 
 
+class ExchangeWhitelist(unittest.TestCase):
+    def test_nyse_arca_is_accepted(self):
+        # Probed live across all 39 registry symbols on 2026-09-19: Nasdaq
+        # reports exactly two labels, PSE (29) and NASDAQ-GM (9). PSE is the
+        # legacy Pacific Exchange code for NYSE Arca, the primary listing venue
+        # for most ETFs. Rejecting it left Yahoo as the only upstream, so
+        # cross-provider confirmation was impossible and 19 of the 22
+        # admissible ETFs returned data_insufficient.
+        from copilot.providers import SUPPORTED_US_EXCHANGE_PREFIXES, is_supported_us_exchange
+        self.assertTrue(is_supported_us_exchange("PSE"))
+        self.assertTrue(is_supported_us_exchange("NASDAQ-GM"))
+        self.assertTrue(is_supported_us_exchange("NYSE ARCA"))
+        self.assertIn("PSE", SUPPORTED_US_EXCHANGE_PREFIXES)
+
+    def test_an_unknown_venue_is_still_refused(self):
+        from copilot.providers import is_supported_us_exchange
+        for label in ("", "LSE", "TSX", "XETRA", "HKEX", "UNKNOWN"):
+            self.assertFalse(is_supported_us_exchange(label), label)
+
+    def test_the_refusal_names_the_label_it_saw(self):
+        from copilot.providers import unsupported_exchange_detail
+        self.assertIn("XETRA", unsupported_exchange_detail("XETRA"))
+
+    def test_the_provider_itself_accepts_a_pse_identity(self):
+        # The three tests above would pass if the helpers existed and
+        # providers.py:503 were never changed. This one drives the real code
+        # path with a mocked HTTP layer. NasdaqEquityProvider.fetch takes an
+        # instrument dict plus a decision_at datetime, not a bare symbol string
+        # (matched against the real signature, not the sketch this test started from).
+        class Client:
+            def get(self, url, provider, headers):
+                return {"body": json.dumps({"data": {
+                    "symbol": "SPY", "assetClass": "ETF", "exchange": "PSE",
+                    "primaryData": {"lastSalePrice": "$500.00"}}}),
+                        "source_url": url, "retrieved_at": iso(NOW)}
+        provider = NasdaqEquityProvider(Client())
+        # The identity gate must not be what stops us. Anything raised here must
+        # come from the later historical fetch, not from the exchange check.
+        with self.assertRaises(Exception) as caught:
+            provider.fetch(get_instrument("SPY"), "2026-08-28", "2026-09-04", NOW)
+        self.assertNotIn("supported US exchange", str(caught.exception))
+
+    def test_the_provider_still_refuses_a_foreign_identity(self):
+        class Client:
+            def get(self, url, provider, headers):
+                return {"body": json.dumps({"data": {
+                    "symbol": "SPY", "assetClass": "ETF", "exchange": "XETRA",
+                    "primaryData": {"lastSalePrice": "$500.00"}}}),
+                        "source_url": url, "retrieved_at": iso(NOW)}
+        with self.assertRaises(ProviderError) as caught:
+            NasdaqEquityProvider(Client()).fetch(get_instrument("SPY"), "2026-08-28", "2026-09-04", NOW)
+        self.assertIn("XETRA", str(caught.exception))
+
+
 class HttpContracts(unittest.TestCase):
     def test_slow_request_uses_remaining_budget_and_never_retries_after_deadline(self):
         elapsed, timeouts = [0.0], []
