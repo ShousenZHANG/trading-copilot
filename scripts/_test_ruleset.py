@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from copilot import brake
 from copilot import ruleset
 from copilot import sizing
 from copilot.backtest import engine as bt_engine
@@ -332,6 +333,82 @@ class OrderPlanning(unittest.TestCase):
         self.assertEqual(by_symbol["OLD"]["target_shares"], 0)
         self.assertEqual(by_symbol["OLD"]["delta_shares"], -300)
         self.assertEqual(by_symbol["OLD"]["side"], "sell")
+
+
+class NewsBrake(unittest.TestCase):
+    def test_levels_are_exactly_the_three_the_user_approved(self):
+        self.assertEqual(brake.LEVELS, ("none", "reduce_50", "skip"))
+
+    def test_apply_is_one_way_over_the_whole_level_set(self):
+        for level in brake.LEVELS:
+            for quantity in range(0, 101):
+                self.assertLessEqual(brake.apply(level=level, quantity=quantity), quantity)
+
+    def test_reduce_50_floors_and_zero_is_a_valid_result(self):
+        # Returning 0 is the contract, not an error: 1 share halved is 0 shares,
+        # and the caller turns that into a hold rather than an order.
+        self.assertEqual(brake.apply(level="reduce_50", quantity=17), 8)
+        self.assertEqual(brake.apply(level="reduce_50", quantity=3), 1)
+        self.assertEqual(brake.apply(level="reduce_50", quantity=1), 0)
+        self.assertEqual(brake.apply(level="skip", quantity=17), 0)
+        self.assertEqual(brake.apply(level="none", quantity=17), 17)
+
+    def test_rounding_is_down_not_nearest(self):
+        # round(q/2) would keep 2 of 3 -- 67% -- which is not a 50% reduction.
+        self.assertEqual(brake.apply(level="reduce_50", quantity=3), 1)
+        self.assertEqual(brake.apply(level="reduce_50", quantity=5), 2)
+        self.assertEqual(brake.apply(level="reduce_50", quantity=7), 3)
+
+    def test_a_negative_or_non_integer_quantity_raises(self):
+        for bad in (-7, -1, 1.5, True, "3", None):
+            with self.assertRaises((ValueError, TypeError)):
+                brake.apply(level="none", quantity=bad)
+
+    def test_an_unknown_level_raises(self):
+        for bad in ("increase", "reduce_25", "double", "", None):
+            with self.assertRaisesRegex(ValueError, "brake level"):
+                brake.apply(level=bad, quantity=10)
+
+    def test_a_non_none_level_requires_a_reason(self):
+        for blank in ("", "   ", None):
+            with self.assertRaisesRegex(ValueError, "reason"):
+                brake.record(level="skip", reason=blank, evidence_ids=["ev_1"])
+
+    def test_none_needs_no_reason_and_carries_no_evidence_requirement(self):
+        record = brake.record(level="none", reason="", evidence_ids=[])
+        self.assertEqual(record["level"], "none")
+        self.assertEqual(record["evidence_ids"], [])
+
+    def test_a_bare_string_of_evidence_ids_is_refused(self):
+        # [str(e) for e in "ev_news_1"] would store nine single characters, and
+        # this is the only evidence field in the system with no validation
+        # behind it -- its input comes from headlines the model read.
+        with self.assertRaisesRegex(ValueError, "evidence_ids"):
+            brake.record(level="skip", reason="halt", evidence_ids="ev_news_1")
+
+    def test_a_non_none_level_requires_at_least_one_evidence_id(self):
+        with self.assertRaisesRegex(ValueError, "evidence_ids"):
+            brake.record(level="reduce_50", reason="halt", evidence_ids=[])
+
+    def test_every_record_is_marked_unbacktested(self):
+        # ADR-0005 clause 1 requires this wherever the brake appears. Finnhub's
+        # company-news archive is one rolling year and returns HTTP 200 with an
+        # empty array beyond it, so a replay harness would look green while
+        # testing nothing.
+        for level in brake.LEVELS:
+            record = brake.record(level=level,
+                                  reason="" if level == "none" else "issuer halt",
+                                  evidence_ids=[] if level == "none" else ["ev_1"])
+            self.assertFalse(record["backtested"])
+            self.assertIn("未回测", record["disclosure"])
+
+    def test_applied_reports_both_quantities(self):
+        applied = brake.applied(
+            record=brake.record(level="reduce_50", reason="halt", evidence_ids=["ev_1"]),
+            quantity=17)
+        self.assertEqual(applied["pre_brake_quantity"], 17)
+        self.assertEqual(applied["post_brake_quantity"], 8)
+        self.assertFalse(applied["backtested"])
 
 
 if __name__ == "__main__":
