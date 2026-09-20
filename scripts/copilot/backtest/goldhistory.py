@@ -22,7 +22,8 @@ from .frame import PriceFrame, build
 SYMBOL = "GOLD.CNY"
 DATASET = Path(__file__).resolve().parent.parent.parent.parent / "reference" / "sge-au9999-daily.csv"
 
-#: Au99.99 traded roughly 230-1000 CNY/gram over the vendored window. These are
+#: Au99.99 traded 260.00 to 1243.02 CNY/gram over the vendored window (measured
+#: 2026-09-20 across all 2368 rows, low 2016-12-22, high 2026-01-29). These are
 #: unit-slip guards, not market forecasts: a per-ounce or per-kilo series would
 #: be off by 31x or 1000x and land far outside them.
 MIN_PLAUSIBLE_CNY_PER_GRAM = 100.0

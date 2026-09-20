@@ -35,7 +35,7 @@ class TheVendoredDatasetIsUsable(unittest.TestCase):
         self.assertGreaterEqual((last - first).days / 365.25, 9.0)
 
     def test_every_close_is_a_plausible_cny_per_gram_price(self):
-        # Au99.99 has traded roughly 230-1000 CNY/gram across this window. A
+        # Au99.99 has traded 260.00 to 1243.02 CNY/gram across this window. A
         # unit slip (per ounce, or per kilo) would blow straight through this.
         for row in goldhistory.rows():
             self.assertGreater(row["close"], 100.0, row)

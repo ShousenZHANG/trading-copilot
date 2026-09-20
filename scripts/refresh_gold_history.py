@@ -101,7 +101,13 @@ def main(argv: list[str] | None = None) -> int:
 
     refreshed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     DATASET.parent.mkdir(parents=True, exist_ok=True)
-    DATASET.write_text(render(rows, refreshed_at=refreshed_at), encoding="utf-8")
+    # newline="" disables universal-newline translation. Path.write_text on
+    # Windows would turn every "\n" from render() into "\r\n", so the file
+    # committed from a Windows machine and the file a Linux refresh produces
+    # would differ on all 2368 lines -- a whole-file diff carrying no price
+    # change at all. The repo has no .gitattributes to paper over that.
+    with DATASET.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(render(rows, refreshed_at=refreshed_at))
     print(f"wrote {DATASET} ({len(rows)} sessions, refreshed_at {refreshed_at})", file=sys.stderr)
     return 0
 
