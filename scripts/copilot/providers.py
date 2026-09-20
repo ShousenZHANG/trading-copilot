@@ -477,20 +477,27 @@ class NasdaqIndexProvider:
 #: Nasdaq does not know at all. PSE is the legacy Pacific Exchange code for
 #: NYSE Arca, a registered US national securities exchange and the primary
 #: listing venue for most ETFs; omitting it left Yahoo as the only upstream, so
-#: cross-provider confirmation was impossible for 29 of 39 symbols. "ARCA" and
-#: "NYSE ARCA" are here because Nasdaq could modernise the label. Nothing else
-#: speculative was added: a whitelist that guesses is not one.
-SUPPORTED_US_EXCHANGE_PREFIXES = ("NASDAQ", "NYSE", "AMEX", "ARCA", "PSE")
+#: cross-provider confirmation was impossible for 29 of 39 symbols.
+#:
+#: Matched EXACTLY, never as a prefix. A prefix match admits real, currently
+#: operating foreign venues that happen to start with an accepted label:
+#: "PSE.PHILIPPINES" (Philippine Stock Exchange), "NASDAQ DUBAI", and
+#: "NYSE EURONEXT PARIS" all satisfy startswith("PSE")/("NASDAQ")/("NYSE").
+#: "NASDAQ", "NYSE", "AMEX", "ARCA" and "NYSE ARCA" are kept as exact
+#: alternatives for plausible relabelling even though only "PSE" and
+#: "NASDAQ-GM" were ever observed; nothing else speculative was added — a
+#: whitelist that guesses is not one.
+SUPPORTED_US_EXCHANGES = frozenset({"NASDAQ", "NYSE", "AMEX", "ARCA", "NYSE ARCA", "PSE", "NASDAQ-GM"})
 
 
 def is_supported_us_exchange(label: str) -> bool:
-    return str(label or "").upper().startswith(SUPPORTED_US_EXCHANGE_PREFIXES)
+    return str(label or "").upper() in SUPPORTED_US_EXCHANGES
 
 
 def unsupported_exchange_detail(label: str) -> str:
     """Name the label so a future relabelling is diagnosable from the error alone."""
     return (f"Nasdaq reported exchange {label!r}, which is not one of the supported "
-            f"US venues {SUPPORTED_US_EXCHANGE_PREFIXES}")
+            f"US venues {sorted(SUPPORTED_US_EXCHANGES)}")
 
 
 class NasdaqEquityProvider:

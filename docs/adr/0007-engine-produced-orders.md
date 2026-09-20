@@ -11,17 +11,27 @@ engine can turn an adopted rule into an order.
    required the Nasdaq-reported exchange to start with `NASDAQ`, `NYSE` or
    `AMEX`. Probed live across all 39 registry symbols on 2026-09-19, Nasdaq
    reports exactly two labels: `PSE` for 29 symbols and `NASDAQ-GM` for 9,
-   plus SPLG, which Nasdaq does not recognise at all. `PSE` is the legacy
-   Pacific Exchange code for what is now NYSE Arca, a registered US national
-   securities exchange and the primary listing venue for most ETFs. Rejecting
-   it left Yahoo as the only upstream for 29 of 39 symbols, and
+   plus SPLG, which Nasdaq does not recognise at all (29 + 9 + 1 = 39). `PSE`
+   is the legacy Pacific Exchange code for what is now NYSE Arca, a registered
+   US national securities exchange and the primary listing venue for most
+   ETFs. Rejecting it left Yahoo as the only upstream for 29 of 39 symbols, and
    `market_data.py:352` requires `authoritative or (len(upstreams) >= 2 and
    any(c["status"] == "pass" for c in comparisons))` — `authoritative` is only
    ever true for SGE and the Nasdaq index publisher, never for a US ETF. The
-   item got `independent_price_confirmation_missing`, and of the 22
-   admissible equity ETFs, only QQQ, SMH and SOXX are Nasdaq-listed and could
-   pass. The other 19 returned `data_insufficient` — worse than the
-   `research_only` ADR-0004 anticipates.
+   item got `independent_price_confirmation_missing`.
+   **Denominator correction:** an earlier draft of this ADR reported this as
+   "19 of the 22 admissible equity ETFs," borrowing ADR-0006's *backtest*-
+   admissibility pool — 22 symbols selected by 2008 historical-bar
+   availability, which excludes VT, SPLG and six short-history funds for
+   reasons that have nothing to do with live price confirmation. Live price
+   confirmation and backtest admissibility are different pools, gated by
+   different concerns. The pool this defect actually affects is the registry's
+   33 non-defensive equity ETFs (39 minus the 6 defensive bond/gold ETFs,
+   which the ETF sleeve excludes by config regardless of data quality): of
+   those 33, 3 (QQQ, SMH, SOXX) were already Nasdaq-listed and passing, and
+   SPLG is unhelped because Nasdaq does not recognise it at all, leaving
+   **29 of 33** that returned `data_insufficient` before this fix and are
+   helped by it — worse than the `research_only` ADR-0004 anticipates.
 
 2. **ADR-0004 clause 2 is violated today.** `policy.py:190` validates four
    model-supplied numeric keys (`price`, `quantity`, `target_weight`,
@@ -70,12 +80,21 @@ engine can turn an adopted rule into an order.
 
 ## Decision
 
-1. **NYSE Arca is a supported venue.** The whitelist
-   (`SUPPORTED_US_EXCHANGE_PREFIXES` in `scripts/copilot/providers.py`) accepts
-   `PSE` and `ARCA` alongside `NASDAQ`, `NYSE` and `AMEX`. Only labels observed
-   across the whole registry were added; `NYSE ARCA` is included in case
-   Nasdaq modernises the label, but nothing else speculative was. The refusal
-   (`unsupported_exchange_detail`) names the label it saw, so a future
+1. **NYSE Arca is a supported venue.** The whitelist (`SUPPORTED_US_EXCHANGES`
+   in `scripts/copilot/providers.py`) accepts `PSE` alongside the pre-existing
+   `NASDAQ`, `NYSE` and `AMEX`, plus `ARCA` and `NYSE ARCA` in case Nasdaq
+   relabels. **Correction: only `PSE` and `NASDAQ-GM` were ever observed** —
+   `NASDAQ`, `NYSE` and `AMEX` predate this ADR's probe, and `ARCA`/`NYSE ARCA`
+   are speculative additions for a label Nasdaq could plausibly use but has
+   not. An earlier draft of this clause claimed "only labels observed across
+   the whole registry were added," which is false on its face for `ARCA` and
+   `NYSE ARCA`; the code comment above `SUPPORTED_US_EXCHANGES` already said
+   so, and this clause is corrected to match it. Matching is **exact, not a
+   prefix**: an initial prefix match (`label.startswith(...)`) let real,
+   currently-operating foreign venues collide by name — `PSE.PHILIPPINES`
+   (Philippine Stock Exchange), `NASDAQ DUBAI` and `NYSE EURONEXT PARIS` all
+   satisfy a prefix test against an accepted label without being one. The
+   refusal (`unsupported_exchange_detail`) names the label it saw, so a future
    relabelling is diagnosable from the error alone rather than requiring a
    re-probe.
 
@@ -148,8 +167,29 @@ engine can turn an adopted rule into an order.
 ## Consequences
 
 - The whitelist change moves a safety boundary deliberately: it was rejecting
-  the primary listing venue for most US ETFs, not a foreign or unverified one,
-  and the fix is scoped to exactly the labels observed across the registry.
+  the primary listing venue for most US ETFs, not a foreign or unverified one.
+  The fix is not scoped to only the labels observed across the registry —
+  `ARCA` and `NYSE ARCA` are speculative, kept for plausible relabelling — but
+  matching is exact rather than a prefix, so it cannot be widened by a foreign
+  venue whose name happens to start with an accepted label.
+- **The cross-provider comparison verifies parser and symbol integrity, not
+  source independence, and this is a narrower guarantee than the whitelist
+  relaxation is often described against.** Live-checked on SPY and QQQ: the
+  Yahoo/Nasdaq aligned-close relative differences were `3.2e-09` (SPY) and
+  `1.69e-08` (QQQ). One cent of real, independent disagreement on a $550
+  instrument would show up as a relative difference roughly 1,200-5,700x
+  larger than what was observed; float64 rounding noise on a single
+  arithmetic operation would be roughly 1e7x smaller than what was observed. Differences this size are consistent with two vendors
+  redistributing the *same* canonical closing print through a chained
+  adjustment-factor computation, not two observations formed independently of
+  each other. The repository has no field identifying an ultimate data
+  vendor — `upstream` is a self-reported HTTP endpoint label, supplied by the
+  provider's own code, not a verified vendor identity — so this cannot
+  currently be distinguished from genuine independence by inspecting a
+  snapshot. What the comparison does establish, and it is real: neither
+  provider's parser corrupted the value, and neither fetched the wrong
+  symbol. The whitelist relaxation in Decision clause 1 rests on that
+  narrower guarantee, not on "two independent sources agree."
 - 25% single-ETF exposure with no correlation check is a real concentration
   the user accepted with eyes open (Decision clause 7); this tool will not
   flag a QQQ-plus-SPY basket as concentrated even though it effectively is.
