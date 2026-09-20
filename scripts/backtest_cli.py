@@ -137,6 +137,20 @@ def verify_calendars() -> int:
         if observed != expected:
             problems += 1
         print(f"  {status} XNYS {year}: hardcoded {expected}, calendar {observed}")
+    # XSHG is the Shanghai Stock Exchange calendar. SGE is not XSHG -- the gold
+    # exchange runs its own schedule including a night session -- so this is a
+    # PROXY check, not an identity. It exists to catch an order-of-magnitude
+    # error in SGE_STRESS_SESSIONS, not to prove the counts exact. A difference
+    # of a few sessions is expected and is reported, not failed.
+    xshg = xcals.get_calendar("XSHG")
+    for year, expected in sorted(admission.SGE_STRESS_SESSIONS.items()):
+        if expected == 0:
+            print(f"  -- SGE {year}: no vendored history, waived by ADR-0008 clause 2")
+            continue
+        observed = len(xshg.sessions_in_range(f"{year}-01-01", f"{year}-12-31"))
+        drift = abs(observed - expected)
+        status = "ok" if drift <= 5 else "DRIFT"
+        print(f"  {status} SGE {year}: vendored {expected}, XSHG proxy {observed} (diff {drift})")
     return problems
 
 

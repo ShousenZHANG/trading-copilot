@@ -1548,5 +1548,92 @@ class CliContract(unittest.TestCase):
         self.assertEqual(found, [])
 
 
+def gold_frame(*, start=date(2016, 12, 19), bars=2360, start_price=262.76, step=0.29):
+    """A deterministic stand-in for the vendored SGE series.
+
+    Weekday-spaced and monotonically rising: the point is calendar coverage and
+    plumbing, not a realistic price path. A test that needs real prices should
+    read goldhistory.load() instead.
+    """
+    from copilot.backtest.frame import build
+    dates, closes, day, i = [], [], start, 0
+    while len(dates) < bars:
+        if day.weekday() < 5:
+            dates.append(day)
+            closes.append([start_price + i * step])
+            i += 1
+        day += timedelta(days=1)
+    return build(dates=dates, symbols=["GOLD.CNY"], closes=closes)
+
+
+def admitted_gold_result():
+    from copilot.backtest.engine import CostModel, run
+    from copilot.backtest.goldrules import ScheduledAccumulation
+    return run(gold_frame(), rule=ScheduledAccumulation(),
+               start_cash=100000.0,
+               cost_model=CostModel(per_share_usd=0.0, minimum_usd=0.0,
+                                    max_pct_of_notional=0.01, spread_bps=20.0),
+               cash_floor_pct=0.0, integer_shares=False)
+
+
+class StressYearsAreCountedOnTheRightCalendar(unittest.TestCase):
+    """A US session count cannot judge a Shanghai series.
+
+    STRESS_SESSIONS holds XNYS counts, and ruleset.py passed them for every
+    sleeve. SGE runs a different holiday schedule and a different number of
+    sessions per year, so a gold rule with complete 2020 coverage would still
+    be measured against 253 New York days and could fail a year it fully
+    covers -- or pass one it does not.
+    """
+
+    def test_the_two_tables_are_not_the_same_object(self):
+        from copilot.backtest import admission
+        self.assertIsNot(admission.SGE_STRESS_SESSIONS, admission.STRESS_SESSIONS)
+        self.assertNotEqual(admission.SGE_STRESS_SESSIONS, admission.STRESS_SESSIONS)
+
+    def test_sge_counts_are_plausible_trading_years(self):
+        from copilot.backtest import admission
+        for year, count in admission.SGE_STRESS_SESSIONS.items():
+            self.assertIn(year, (2008, 2020, 2022))
+            # A zero is the absence of a measurement, not an implausible
+            # trading year, and it is pinned by the test below instead. The
+            # vendored series starts 2016, so 2008 can only ever be 0 here.
+            if count == 0:
+                continue
+            self.assertGreater(count, 220, f"{year}: too few sessions to be a trading year")
+            self.assertLess(count, 260, f"{year}: more sessions than any exchange runs")
+
+    def test_2008_is_present_and_zero_rather_than_absent(self):
+        from copilot.backtest import admission
+        # The key must stay, and must stay 0. assess() skips the coverage ratio
+        # when expected is 0 but still fails the missing-month check, which is
+        # what raises the waivable `stress_2008` that ADR-0008 clause 2 grants.
+        # Deleting the key would skip the loop iteration entirely: no failure,
+        # no waiver, and a ten-year gap that no reader of the report can see.
+        self.assertIn(2008, admission.SGE_STRESS_SESSIONS)
+        self.assertEqual(admission.SGE_STRESS_SESSIONS[2008], 0)
+
+    def test_the_lookup_is_by_sleeve(self):
+        from copilot.backtest import admission
+        self.assertEqual(admission.stress_sessions_for("etf"), admission.STRESS_SESSIONS)
+        self.assertEqual(admission.stress_sessions_for("gold"), admission.SGE_STRESS_SESSIONS)
+
+    def test_an_unknown_sleeve_is_refused_rather_than_defaulted(self):
+        from copilot.backtest import admission
+        # Defaulting to the ETF table would silently judge a future sleeve on
+        # the New York calendar, which is the bug this task exists to remove.
+        with self.assertRaisesRegex(ValueError, "sleeve"):
+            admission.stress_sessions_for("crypto")
+
+    def test_a_gold_result_is_judged_on_sge_counts(self):
+        from copilot.backtest import admission
+        result = admitted_gold_result()
+        report = admission.assess(result, sessions_by_year=admission.SGE_STRESS_SESSIONS,
+                                  waivers={"span": "ADR-0008 clause 2",
+                                           "stress_2008": "ADR-0008 clause 2"})
+        self.assertNotIn("2020", " ".join(report.failures),
+                         "2020 is fully covered on the SGE calendar")
+
+
 if __name__ == "__main__":
     unittest.main()

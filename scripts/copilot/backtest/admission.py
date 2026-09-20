@@ -53,6 +53,37 @@ MIN_OUT_OF_SAMPLE_YEARS = 2.0
 #: against the library in the runtime job.
 STRESS_SESSIONS = {2008: 253, 2020: 253, 2022: 251}
 
+#: SGE trading sessions per stress year, observed from the vendored Au99.99
+#: series on 2026-09-20 (`collections.Counter(d.year for d in spot_hist_sge)`).
+#: SGE keeps a different holiday schedule from XNYS -- a week for Spring
+#: Festival, a week for National Day -- so judging a Shanghai series against
+#: the New York table would measure the wrong denominator in both directions.
+#:
+#: 2008 is 0 because the series begins 2016-12-19, not because the exchange was
+#: closed. A zero here is the ABSENCE of a measurement, and admission treats it
+#: as an uncovered year: gold therefore fails `stress_2008` and must carry the
+#: waiver ADR-0008 clause 2 grants. Do not "fix" this by deleting the key --
+#: that would make the gap invisible instead of waived, which is precisely the
+#: distinction admission.py's module docstring is about.
+SGE_STRESS_SESSIONS = {2008: 0, 2020: 242, 2022: 242}
+
+_STRESS_BY_SLEEVE = {"etf": STRESS_SESSIONS, "gold": SGE_STRESS_SESSIONS}
+
+
+def stress_sessions_for(sleeve: str) -> dict[int, int]:
+    """The stress-year session counts for a sleeve's own exchange calendar.
+
+    Unknown sleeves raise instead of defaulting. A default would silently judge
+    a new sleeve on the New York calendar, which is the bug this exists to
+    remove; a raise makes adding a sleeve a deliberate act with a test.
+    """
+    try:
+        return _STRESS_BY_SLEEVE[sleeve]
+    except KeyError:
+        raise ValueError(f"no stress-session table for sleeve {sleeve!r}; "
+                         f"known sleeves are {', '.join(sorted(_STRESS_BY_SLEEVE))}") from None
+
+
 #: A year counts as covered at 99% of its sessions. At 253 expected sessions
 #: that allows at most 2 missing, not the 12 a 95% threshold would allow --
 #: enough to drop the entire week of the Lehman collapse (2008-09-15..09-19)
