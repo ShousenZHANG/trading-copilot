@@ -5,12 +5,17 @@ schema_version = 1
 # 8-12 equity ETFs from the registry in scripts/copilot/instruments.py.
 # Bond and gold ETFs are rejected: the ETF sleeve holds equity ETFs and cash only.
 universe = ["SPY", "QQQ", "IWM", "VUG", "VTV", "VEA", "VWO", "XLK", "XLV", "XLF"]
-# Replaced by the IBKR Flex sync in a later task; until then set it by hand.
-investable_total_usd = 0
+# CASH you can deploy into this sleeve, not its market value. Same quantity the
+# backtest engine calls start_cash. Set it by hand; the IBKR Flex sync that
+# would maintain it is not built.
+investable_cash_usd = 0
 # Structural cash reserve and drawdown tolerance. Placeholders until a rule is adopted.
 min_cash_reserve_pct = 0.15
 max_drawdown_pct = 0.20
-# Set when you adopt a backtested rule set. Empty means nothing is adopted.
+# Points at a rule recorded by `copilot_cli.py adopt`, which prints the id.
+# Nothing writes this file: keeping the pointer manual is what makes adoption an
+# explicit act of yours rather than something a daily scan can do. Empty means
+# nothing is adopted and the engine produces no orders.
 adopted_rule_id = ""
 
 [gold]

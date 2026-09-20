@@ -20,12 +20,15 @@ SCHEMA_VERSION = 1
 MAX_UNIVERSE = 12
 _SECTIONS = ("etf", "gold", "notify")
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+_RULE_ID_RE = re.compile(r"^rule-[0-9a-f]{16}$")
 
 
 @dataclass(frozen=True)
 class EtfConfig:
     universe: tuple[str, ...] = ()
-    investable_total_usd: float = 0.0
+    # CASH available to deploy into this sleeve, not its market value -- the
+    # same quantity engine.run(start_cash=...) expects (ADR-0007 clause 3).
+    investable_cash_usd: float = 0.0
     min_cash_reserve_pct: float = 0.15
     max_drawdown_pct: float = 0.20
     adopted_rule_id: str = ""
@@ -97,12 +100,20 @@ def _etf(section: dict) -> EtfConfig:
         if symbol in DEFENSIVE_ETFS:
             raise ValueError(f"etf.universe: {symbol} is a defensive (bond/gold) ETF; "
                              f"the ETF sleeve holds equity ETFs and cash only")
+    if "investable_total_usd" in section:
+        raise ValueError("investable_total_usd was renamed investable_cash_usd: the value is "
+                         "investable CASH available to deploy, not the sleeve's market value "
+                         "(ADR-0007 clause 3)")
+    adopted = _string(section, "adopted_rule_id", "etf")
+    if adopted and not _RULE_ID_RE.match(adopted):
+        raise ValueError(f"etf.adopted_rule_id must be empty or look like "
+                         f"rule-<16 lowercase hex characters>, got {adopted!r}")
     return EtfConfig(
         universe=symbols,
-        investable_total_usd=_number(section, "investable_total_usd", "etf", low=0, high=1e9),
+        investable_cash_usd=_number(section, "investable_cash_usd", "etf", low=0, high=1e9),
         min_cash_reserve_pct=_number(section, "min_cash_reserve_pct", "etf", low=0, high=0.9),
         max_drawdown_pct=_number(section, "max_drawdown_pct", "etf", low=0.01, high=0.9),
-        adopted_rule_id=_string(section, "adopted_rule_id", "etf"),
+        adopted_rule_id=adopted,
     )
 
 

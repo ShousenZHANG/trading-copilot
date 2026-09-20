@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -418,6 +419,128 @@ class CoverageDeclarations(unittest.TestCase):
     def test_get_context_refuses_an_unsupported_sleeve(self):
         with self.assertRaisesRegex(ValueError, "sleeve"):
             journal.get_context(db_path=self.db, sleeve="crypto")
+
+
+class Adoptions(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.db = Path(self.directory.name) / "private" / "copilot.sqlite"
+        self.now = "2026-09-06T12:00:00Z"
+
+    def operation(self, **overrides):
+        result = {"statement": "我已经买了 10 股 QQQ，成交价 500 美元，9月4日成交。", "execution_status": "executed", "instrument_id": "QQQ", "side": "buy", "quantity": "10", "unit": "share", "price": "500", "currency": "USD", "occurred_at": "2026-09-04", "source_message_id": "thread-a-message-1", "account_id": "broker-a", "fees": None}
+        result.update(overrides)
+        return result
+
+    def adoption(self, **overrides):
+        base = {"schema_version": 1, "rule_id": "rule-0123456789abcdef", "sleeve": "etf",
+                "family": "momentum_top_n",
+                "parameters": {"top_n": 2.0, "lookback_days": 252.0, "skip_days": 21.0},
+                "universe": ["IWM", "QQQ", "SPY"], "targets": None,
+                "cost_model": {"per_share_usd": 0.0035, "minimum_usd": 1.0,
+                               "max_pct_of_notional": 0.01, "spread_bps": 2.0},
+                "cash_floor_pct": 0.15, "integer_shares": True,
+                "admission": {"admitted": True, "waived": False, "metrics": {"cagr": 0.08}},
+                "waived": False}
+        base.update(overrides)
+        return base
+
+    def test_record_and_load_round_trip(self):
+        receipt = journal.record_adoption(self.adoption(), db_path=self.db)
+        self.assertEqual(receipt["rule_id"], "rule-0123456789abcdef")
+        self.assertEqual(journal.load_adoption("rule-0123456789abcdef", db_path=self.db)["family"],
+                         "momentum_top_n")
+
+    def test_the_same_adoption_twice_is_a_replay(self):
+        journal.record_adoption(self.adoption(), db_path=self.db)
+        self.assertTrue(journal.record_adoption(self.adoption(), db_path=self.db)["replayed"])
+
+    def test_the_same_id_with_different_content_conflicts(self):
+        journal.record_adoption(self.adoption(), db_path=self.db)
+        with self.assertRaises(journal.JournalConflict):
+            journal.record_adoption(self.adoption(family="fixed_weight_bands"), db_path=self.db)
+
+    def test_an_adoption_is_immutable(self):
+        journal.record_adoption(self.adoption(), db_path=self.db)
+        with journal._connection(self.db) as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("UPDATE adopted_rules SET sleeve='gold'")
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("DELETE FROM adopted_rules")
+
+    def test_loading_an_unknown_rule_raises_keyerror(self):
+        with self.assertRaises(KeyError):
+            journal.load_adoption("rule-ffffffffffffffff", db_path=self.db)
+
+    def test_a_malformed_rule_id_is_refused(self):
+        for bad in ("momentum", "rule-XYZ", "rule-0123", "rule-0123456789ABCDEF"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "rule_id"):
+                journal.record_adoption(self.adoption(rule_id=bad), db_path=self.db)
+
+    def test_adding_the_table_is_safe_for_an_existing_database(self):
+        journal.record_operation(self.operation(), "key-1", db_path=self.db, now=self.now)
+        journal.record_adoption(self.adoption(), db_path=self.db)
+        self.assertEqual(journal.load_adoption("rule-0123456789abcdef", db_path=self.db)["sleeve"], "etf")
+
+
+class BoundedRecommendations(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.db = Path(self.directory.name) / "private" / "copilot.sqlite"
+
+    def store_recommendations(self, db, count, symbol="QQQ"):
+        """Save one snapshot and `count` recommendations for `symbol`.
+
+        Each row gets a distinct, strictly increasing recorded_at (record_
+        recommendation always stamps its own clock, so the timestamp is
+        injected via a patch) instead of trusting wall-clock resolution to
+        keep 25+ rows written in a tight loop from colliding. Returns the
+        decision ids in creation order, oldest first.
+        """
+        snapshot_id = f"snap-{symbol}"
+        journal.save_snapshot({"snapshot_id": snapshot_id, "instrument_id": symbol}, db_path=db)
+        portfolio_version = journal.get_context(db_path=db)["portfolio_version"]
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ids = []
+        for i in range(count):
+            decision = {"snapshot_id": snapshot_id, "portfolio_version": portfolio_version,
+                       "instrument_id": symbol, "action": "hold", "sequence": i}
+            timestamp = (base + timedelta(seconds=i)).isoformat(timespec="microseconds")
+            with patch.object(journal, "_stamp", return_value=timestamp):
+                receipt = journal.record_recommendation(decision, db_path=db)
+            ids.append(receipt["decision_id"])
+        return ids
+
+    def test_the_history_is_bounded_and_says_so(self):
+        # An evaluation over 12 symbols writes 12 rows. get_context parsed every
+        # row ever written on every call.
+        self.store_recommendations(self.db, count=25)
+        result = journal.get_context(db_path=self.db, recommendations_limit=10)
+        self.assertEqual(len(result["recommendations"]), 10)
+        self.assertTrue(result["recommendations_truncated"])
+
+    def test_a_short_history_is_not_marked_truncated(self):
+        self.store_recommendations(self.db, count=3)
+        result = journal.get_context(db_path=self.db, recommendations_limit=10)
+        self.assertEqual(len(result["recommendations"]), 3)
+        self.assertFalse(result["recommendations_truncated"])
+
+    def test_the_newest_rows_survive_truncation(self):
+        # An "oldest first" mutant must fail this. Assert the actual ids.
+        ids = self.store_recommendations(self.db, count=25)
+        result = journal.get_context(db_path=self.db, recommendations_limit=5)
+        returned = {item["decision_id"] for item in result["recommendations"]}
+        self.assertEqual(returned, set(ids[-5:]))
+
+    def test_filtering_by_instrument_is_not_starved_by_the_limit(self):
+        # The limit must be applied after the instrument filter, or asking for
+        # one symbol returns nothing while its rows sit in the table.
+        self.store_recommendations(self.db, count=30, symbol="SPY")
+        self.store_recommendations(self.db, count=2, symbol="QQQ")
+        result = journal.get_context(["QQQ"], db_path=self.db, recommendations_limit=5)
+        self.assertEqual(len(result["recommendations"]), 2)
 
 
 if __name__ == "__main__":

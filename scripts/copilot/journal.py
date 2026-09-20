@@ -127,6 +127,12 @@ CREATE TABLE IF NOT EXISTS coverage_declarations (
     portfolio_version TEXT NOT NULL,
     declared_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS adopted_rules (
+    rule_id TEXT PRIMARY KEY,
+    sleeve TEXT NOT NULL,
+    adopted_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON journal_events
 BEGIN SELECT RAISE(ABORT, 'journal events are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON journal_events
@@ -143,6 +149,10 @@ CREATE TRIGGER IF NOT EXISTS coverage_no_update BEFORE UPDATE ON coverage_declar
 BEGIN SELECT RAISE(ABORT, 'coverage declarations are immutable; declare again instead'); END;
 CREATE TRIGGER IF NOT EXISTS coverage_no_delete BEFORE DELETE ON coverage_declarations
 BEGIN SELECT RAISE(ABORT, 'coverage declarations are immutable; declare again instead'); END;
+CREATE TRIGGER IF NOT EXISTS adoptions_no_update BEFORE UPDATE ON adopted_rules
+BEGIN SELECT RAISE(ABORT, 'adoptions are immutable; adopt a new rule instead'); END;
+CREATE TRIGGER IF NOT EXISTS adoptions_no_delete BEFORE DELETE ON adopted_rules
+BEGIN SELECT RAISE(ABORT, 'adoptions are immutable; adopt a new rule instead'); END;
 """
 
 
@@ -467,7 +477,7 @@ def record_operation(operation: dict, idempotency_key: str, *, db_path: Any = No
 
 
 def get_context(instrument_ids: Any = None, as_of: Any = None, *, sleeve: str = "etf",
-                db_path: Any = None) -> dict:
+                recommendations_limit: int = 200, db_path: Any = None) -> dict:
     """Read holdings and audit context; as_of means information known by that UTC time.
 
     `sleeve` selects which sleeve's coverage declaration to read. Coverage
@@ -476,6 +486,14 @@ def get_context(instrument_ids: Any = None, as_of: Any = None, *, sleeve: str = 
     which sleeve it names, so a gold declaration could mark the etf sleeve
     (or any other) complete. Defaults to "etf" because that is the only
     sleeve with a coverage-declaring caller today (COVERAGE_SLEEVES).
+
+    `recommendations_limit` bounds how many recommendation rows are returned,
+    newest first; `recommendations_truncated` in the result says whether more
+    exist. This still reads every recommendation row from SQLite and filters
+    by instrument in Python before slicing to the limit -- a real cost at
+    scale -- because limiting in SQL first would return the newest rows
+    overall and then filter them away, so asking for one symbol could come
+    back empty while its rows sat in the table.
     """
     if sleeve not in COVERAGE_SLEEVES:
         raise ValueError(f"sleeve must be one of {COVERAGE_SLEEVES}, got {sleeve!r}")
@@ -487,14 +505,24 @@ def get_context(instrument_ids: Any = None, as_of: Any = None, *, sleeve: str = 
             portfolio_version = _portfolio_version(states)
             holdings = [item for item in _holdings(states) if not instruments or item["instrument_id"] in instruments]
             matching = [state for state in states if not instruments or state["operation"].get("instrument_id") in instruments]
+            # Newest first, and the LIMIT is applied AFTER the instrument filter:
+            # limiting in SQL first would return the newest rows overall and then
+            # filter them away, so asking for one symbol could come back empty
+            # while its rows sat in the table. An evaluation over a 12-symbol
+            # universe writes 12 rows, so an unbounded read grows fast.
             query = "SELECT payload FROM recommendations"
-            params = ()
+            params: tuple = ()
             if as_of is not None:
                 query += " WHERE recorded_at <= ?"
                 params = (_stamp(as_of, end_of_day=True),)
             query += " ORDER BY recorded_at DESC, decision_id"
-            decisions = [json.loads(row[0]) for row in connection.execute(query, params).fetchall()]
-            decisions = [dict(item, portfolio_current=item.get("portfolio_version") == portfolio_version) for item in decisions if not instruments or item.get("instrument_id") in instruments]
+            matched = [json.loads(row[0]) for row in connection.execute(query, params).fetchall()]
+            matched = [item for item in matched
+                       if not instruments or item.get("instrument_id") in instruments]
+            limit = max(1, int(recommendations_limit))
+            truncated = len(matched) > limit
+            decisions = [dict(item, portfolio_current=item.get("portfolio_version") == portfolio_version)
+                         for item in matched[:limit]]
             # Coverage is a user declaration bound to a portfolio_version. Any
             # executed trade changes that version, so a declaration made before
             # it is reported as stale rather than silently honoured.
@@ -508,7 +536,7 @@ def get_context(instrument_ids: Any = None, as_of: Any = None, *, sleeve: str = 
                 complete, completeness, base_currency = False, "stale_declaration", None
             else:
                 complete, completeness, base_currency = False, "unknown", None
-            result = {"portfolio_version": portfolio_version, "portfolio_complete": complete, "completeness": completeness, "base_currency": base_currency, "fx_status": "unknown", "portfolio_value": None, "holdings": holdings, "holdings_by_currency": {currency: [item for item in holdings if item["currency"] == currency] for currency in sorted({item["currency"] for item in holdings})}, "pending_operations": [state for state in matching if state["status"] in {"pending", "pending_duplicate"}], "intents": [state for state in matching if state["status"] == "intent"], "operations": matching, "recommendations": decisions, "as_of": _stamp(as_of, end_of_day=True) if as_of is not None else None}
+            result = {"portfolio_version": portfolio_version, "portfolio_complete": complete, "completeness": completeness, "base_currency": base_currency, "fx_status": "unknown", "portfolio_value": None, "holdings": holdings, "holdings_by_currency": {currency: [item for item in holdings if item["currency"] == currency] for currency in sorted({item["currency"] for item in holdings})}, "pending_operations": [state for state in matching if state["status"] in {"pending", "pending_duplicate"}], "intents": [state for state in matching if state["status"] == "intent"], "operations": matching, "recommendations": decisions, "recommendations_truncated": truncated, "as_of": _stamp(as_of, end_of_day=True) if as_of is not None else None}
             connection.execute("COMMIT")
             return result
         except BaseException:
@@ -621,6 +649,38 @@ def coverage_history(*, db_path: Any = None) -> list[dict]:
                  "current": row[3] == current} for row in rows]
 
 
+_RULE_ID = re.compile(r"^rule-[0-9a-f]{16}$")
+
+
+def record_adoption(adoption: dict, *, db_path: Any = None) -> dict:
+    """Store an immutable record of adopting a backtested rule.
+
+    Adoption is a historical fact, so the row cannot change: superseding a rule
+    means adopting a different one, which gets its own content-addressed id.
+    Which rule is CURRENTLY live is not stored here -- that is the pointer the
+    user edits by hand in config/user.toml (ADR-0007 clause 8), so nothing but an
+    explicit user action changes what the engine will trade.
+    """
+    if not isinstance(adoption, dict):
+        raise ValueError("adoption must be a dict")
+    rule_id = adoption.get("rule_id")
+    if not isinstance(rule_id, str) or not _RULE_ID.match(rule_id):
+        raise ValueError("rule_id must look like rule-<16 lowercase hex characters>")
+    sleeve = adoption.get("sleeve")
+    if not isinstance(sleeve, str) or not sleeve:
+        raise ValueError("adoption requires sleeve")
+    serialized = _json(dict(adoption))
+    with _connection(db_path) as connection:
+        with _transaction(connection):
+            previous = connection.execute(
+                "SELECT payload FROM adopted_rules WHERE rule_id=?", (rule_id,)).fetchone()
+            if previous and previous[0] != serialized:
+                raise JournalConflict("rule_id already records a different adoption")
+            connection.execute("INSERT OR IGNORE INTO adopted_rules VALUES (?,?,?,?)",
+                               (rule_id, sleeve, _stamp(), serialized))
+        return {"rule_id": rule_id, "recorded": True, "replayed": bool(previous)}
+
+
 def _load(table: str, key: str, value: str, db_path: Any) -> dict:
     with _connection(db_path) as connection:
         row = connection.execute(f"SELECT payload FROM {table} WHERE {key}=?", (value,)).fetchone()
@@ -635,6 +695,11 @@ def load_snapshot(snapshot_id: str, *, db_path: Any = None) -> dict:
 
 def load_decision(decision_id: str, *, db_path: Any = None) -> dict:
     return _load("recommendations", "decision_id", decision_id, db_path)
+
+
+def load_adoption(rule_id: str, *, db_path: Any = None) -> dict:
+    """Read a stored adoption. KeyError when the pointer does not resolve."""
+    return _load("adopted_rules", "rule_id", rule_id, db_path)
 
 
 def backup(destination: Any, *, db_path: Any = None) -> dict:
