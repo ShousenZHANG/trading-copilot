@@ -684,8 +684,24 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
         if not rebalance_due:
             for order in plan["orders"]:
                 order.update(delta_shares=0, side="hold", notional=0.0, estimated_cost=0.0)
-        history = [float(r["portfolio_total_value"]) for r in (context.get("recommendations") or [])
-                   if isinstance(r.get("portfolio_total_value"), (int, float))]
+        # journal.get_context returns recommendations NEWEST FIRST ("ORDER BY
+        # recorded_at DESC"), and riskinputs.portfolio_drawdown walks FORWARD
+        # from a running peak, so reading that list in place measured the curve
+        # backwards: 100 -> 90 -> 70 -> 50 came out as 0% rather than 50%, and
+        # the 15% limit passed a book that had halved. Drawdown is the only one
+        # of the five limits that measures the book LOSING money, so nothing
+        # else caught it.
+        #
+        # Reversing first puts rows that carry no usable timestamp back in
+        # chronological order; the stable sort then orders by each row's own
+        # created_at, but only when every row has one -- an empty-string key
+        # would otherwise drag untimestamped rows to the front of the series.
+        prior = [r for r in reversed(context.get("recommendations") or [])
+                 if isinstance(r.get("portfolio_total_value"), (int, float))
+                 and not isinstance(r.get("portfolio_total_value"), bool)]
+        if all(str(r.get("created_at") or "") for r in prior):
+            prior.sort(key=lambda r: str(r["created_at"]))
+        history = [float(r["portfolio_total_value"]) for r in prior]
         history.append(plan["total_value"])
         sector_values: dict[str, float] = {}
         for order in plan["orders"]:
@@ -735,6 +751,20 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
                            "rule_id": rule_id, "brake": dict(brake_record)})
             continue
         order = sized.get(symbol)
+        # A rotation's weights carry only the names it chose, and plan_orders
+        # covers `set(weights) | set(held)`, so a symbol it passed over and that
+        # is not held gets no order at all: no measured risk inputs, "unknown"
+        # on every limit, and a research_only decision that -- through the all()
+        # below -- dragged the whole basket down with it. That is every real
+        # rotation, since top_n < len(universe) is the point of one; correctly
+        # sized, actionable orders for the selected names were being withheld
+        # because of a symbol with nothing to do. A HELD name the rule dropped
+        # is a different thing: it IS in `held`, so sizing emits a sell, that
+        # sell must still be executed, and it still vetoes on failure.
+        idle = plan is not None and order is None
+        if idle:
+            reasons = [f"adopted rule {rule_id} did not select {symbol}（未选中）and no "
+                       "position is held, so there is nothing to do"]
         applied = None
         item = {"instrument_id": symbol, "action": "hold", "mode": "accumulation",
                 "horizon": "long_term", "reasons": reasons, "conditions": [],
@@ -761,6 +791,8 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
         decision = assess_proposal(item, snapshot, proposal_context, now=now, source="engine")
         decision["rule_id"] = rule_id
         decision["brake"] = applied or dict(brake_record)
+        if idle:
+            decision["no_action_required"] = True
         if order is not None and decision["data_status"] == "ready" and "quantity" in decision:
             decision["limit_price"] = order["limit_price"]
             decision["limit_price_basis"] = "split_adjusted_close"
@@ -772,8 +804,16 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
             decision["admitted_metrics"] = dict(adoption.get("admission", {}).get("metrics", {}))
         orders.append(decision)
 
-    actionable = (not withhold and bool(rebalance_due)
-                  and all(o.get("execution_scope") == "actionable" for o in orders))
+    # Only the orders that ask for something get a vote. The nonempty check is a
+    # deliberate guard against all([]) == True rather than a live case: a basket
+    # in which EVERY name is idle would need empty weights, and plan_orders
+    # rejects those outright ("weights must be a nonempty mapping"), so no rule
+    # family can reach it today. It is here so that one which can hold nothing
+    # does not read as "actionable" with no order under it. No test covers it,
+    # because no fixture can construct it.
+    requires_action = [o for o in orders if not o.get("no_action_required")]
+    actionable = (not withhold and bool(rebalance_due) and bool(requires_action)
+                  and all(o.get("execution_scope") == "actionable" for o in requires_action))
     result = {
         "schema_version": 1, "rule_id": rule_id, "sleeve": "etf",
         "snapshot_id": snapshot.get("snapshot_id"), "orders": orders,
