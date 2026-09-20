@@ -335,5 +335,109 @@ class EngineFacade(unittest.TestCase):
         self.assertEqual(len(matching), len(result["orders"]))
 
 
+def rendered(**result):
+    """render_evaluation over a minimal result. `stored` is unread by it."""
+    base = {"execution_scope": "actionable", "rebalance_due": True, "coverage_known": True,
+            "blocked_symbols": [], "orders": [], "brake": {"level": "none"}}
+    base.update(result)
+    return service.render_evaluation(base, {})
+
+
+def order(symbol, **fields):
+    base = {"instrument_id": symbol, "action": "buy", "execution_scope": "actionable",
+            "limit_price": 100.0, "brake": {"level": "none"}}
+    base.update(fields)
+    return base
+
+
+def braked(symbol, pre, post, level="skip"):
+    item = order(symbol, brake={"level": level, "pre_brake_quantity": pre,
+                                "post_brake_quantity": post, "applied_to_side": "buy",
+                                "changed": pre != post,
+                                "disclosure": "新闻刹车未回测：它只能减少或跳过，永远不能加仓"})
+    if post:
+        item["quantity"] = post
+    else:
+        item["action"] = "hold"
+        item["execution_scope"] = "research_only"
+    return item
+
+
+class TheRenderedMessageAccountsForEveryOrder(unittest.TestCase):
+    """What the user reads must not be missing an order the engine produced.
+
+    render_evaluation skipped any order without a `quantity`, which is exactly
+    what a brake that zeroes a buy produces: the model states a news reason, the
+    engine drops the size to nothing, and the line disappeared. The user saw a
+    shorter basket with no indication that a name had been suppressed, and if
+    the brake zeroed everything the message read "风险检查未全部通过" -- naming
+    the wrong cause entirely, since every risk check had passed.
+    """
+
+    def test_a_normal_basket_lists_each_priced_order(self):
+        message = rendered(orders=[order("SPY", quantity=8), order("QQQ", quantity=4)])
+        self.assertIn("SPY 买入 8 股，限价 100.0", message)
+        self.assertIn("QQQ 买入 4 股，限价 100.0", message)
+
+    def test_a_brake_zeroed_buy_is_still_reported(self):
+        message = rendered(orders=[order("SPY", quantity=8), braked("QQQ", 5, 0)],
+                           brake={"level": "skip", "disclosure": "刹车说明"})
+        self.assertIn("QQQ", message)
+        self.assertIn("5", message, "the suppressed size must be visible")
+
+    def test_a_halved_buy_reports_the_size_that_survived(self):
+        message = rendered(orders=[braked("SPY", 9, 4, level="reduce_50")],
+                           brake={"level": "reduce_50", "disclosure": "刹车说明"})
+        self.assertIn("SPY 买入 4 股", message)
+
+    def test_a_basket_the_brake_emptied_does_not_blame_the_risk_checks(self):
+        message = rendered(execution_scope="research_only",
+                           orders=[braked("SPY", 8, 0), braked("QQQ", 4, 0)],
+                           brake={"level": "skip", "disclosure": "刹车说明"})
+        self.assertNotIn("风险检查", message)
+        self.assertIn("SPY", message)
+        self.assertIn("QQQ", message)
+
+    def test_a_real_risk_failure_names_the_symbol_that_failed(self):
+        message = rendered(execution_scope="research_only",
+                           orders=[order("SPY", quantity=8),
+                                   order("QQQ", action="hold", execution_scope="research_only")])
+        self.assertIn("QQQ", message)
+        self.assertNotIn("SPY 买入", message)
+
+    def test_a_symbol_the_rule_did_not_select_is_not_called_a_risk_failure(self):
+        # Post-fix, an unselected-and-unheld symbol carries no_action_required
+        # and the basket stays actionable, so it must not be listed as a cause.
+        message = rendered(orders=[order("SPY", quantity=8),
+                                   order("VTV", action="hold", execution_scope="research_only",
+                                         no_action_required=True)])
+        self.assertIn("SPY 买入 8 股", message)
+        self.assertNotIn("VTV", message)
+
+    def test_no_heading_is_printed_with_nothing_under_it(self):
+        # A `skip` brake leaves every order without a quantity while the basket
+        # itself is still actionable, so the heading "按已采纳规则计算的委托："
+        # was printed over an empty list.
+        message = rendered(orders=[braked("SPY", 8, 0), braked("QQQ", 4, 0)],
+                           brake={"level": "skip", "disclosure": "刹车说明"})
+        self.assertNotIn("按已采纳规则计算的委托", message)
+        self.assertIn("SPY", message)
+
+    def test_a_limit_price_is_printed_as_a_number_a_broker_accepts(self):
+        # 153.92000000000002 is float error from the close, not a price; the
+        # user copies this line into an order ticket.
+        message = rendered(orders=[order("VTI", quantity=64, limit_price=153.92000000000002)])
+        self.assertIn("限价 153.92", message)
+        self.assertNotIn("153.92000000000002", message)
+
+    def test_the_existing_causes_still_win_over_the_new_ones(self):
+        self.assertIn("数据未通过校验：VWO", rendered(
+            execution_scope="research_only", blocked_symbols=["VWO"]))
+        self.assertIn("持仓覆盖未声明", rendered(
+            execution_scope="research_only", coverage_known=False))
+        self.assertIn("规则未触发再平衡", rendered(
+            execution_scope="research_only", rebalance_due=False))
+
+
 if __name__ == "__main__":
     unittest.main()

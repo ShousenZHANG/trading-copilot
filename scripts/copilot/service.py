@@ -258,29 +258,65 @@ def _verify_brake_evidence(stored: dict, brake: dict | None) -> None:
                              "reads news and market evidence belongs in evidence_ids")
 
 
+ORDER_LABELS = {"buy": "买入", "reduce": "减持", "sell": "清仓"}
+
+
+def _brake_zeroed(order: dict) -> bool:
+    """True when the brake took a real order down to nothing."""
+    applied = order.get("brake") or {}
+    return bool(applied.get("pre_brake_quantity")) and not applied.get("post_brake_quantity")
+
+
 def render_evaluation(result: dict, stored: dict) -> str:
-    """Render only what the engine produced. Never print a heading with nothing under it."""
+    """Render only what the engine produced. Never print a heading with nothing under it.
+
+    Everything the engine decided about a symbol must reach this message. An
+    earlier version skipped every order without a `quantity`, which is exactly
+    what a brake that zeroes a buy produces -- the line simply vanished, and if
+    the brake emptied the whole basket the message blamed "风险检查未全部通过"
+    when every risk check had in fact passed. A cause the user cannot act on is
+    worse than no cause.
+    """
     lines = []
+    orders = result.get("orders") or []
+    suppressed = [o for o in orders if _brake_zeroed(o)]
     if result.get("execution_scope") != "actionable":
         blocked = result.get("blocked_symbols") or []
+        # Named symbols before generic phrasing: "which one" is the only part
+        # the user can do anything about.
+        failed = [o["instrument_id"] for o in orders
+                  if o.get("execution_scope") != "actionable"
+                  and not o.get("no_action_required") and o not in suppressed]
         if blocked:
             reason = "数据未通过校验：" + "、".join(blocked)
         elif not result.get("coverage_known"):
             reason = "持仓覆盖未声明"
         elif not result.get("rebalance_due"):
             reason = "规则未触发再平衡"
+        elif failed:
+            reason = "风险检查未通过：" + "、".join(failed)
+        elif suppressed:
+            reason = "新闻刹车把本次所有买单归零"
         else:
-            reason = "风险检查未全部通过"
+            reason = "本次没有需要执行的委托"
         lines.append(f"研究观点，未给出具体仓位（{reason}）")
     else:
-        lines.append("按已采纳规则计算的委托：")
-        for order in result["orders"]:
-            if not order.get("quantity"):
-                continue
-            labels = {"buy": "买入", "reduce": "减持", "sell": "清仓"}
-            lines.append(f"  {order['instrument_id']} "
-                         f"{labels.get(order['action'], order['action'])} "
-                         f"{order['quantity']} 股，限价 {order['limit_price']}")
+        # The limit price is rounded for display only -- the journal keeps the
+        # engine's value. A close carried through a weight calculation lands on
+        # things like 153.92000000000002, and this line is what the user copies
+        # into an order ticket.
+        priced = [f"  {o['instrument_id']} "
+                  f"{ORDER_LABELS.get(o['action'], o['action'])} "
+                  f"{o['quantity']} 股，限价 {float(o['limit_price']):.2f}"
+                  for o in orders if o.get("quantity")]
+        # A `skip` brake empties this list while the basket itself stays
+        # actionable, so the heading must not be printed unconditionally.
+        lines.append("按已采纳规则计算的委托：" if priced else "本次没有需要下单的标的")
+        lines.extend(priced)
+    if suppressed:
+        lines.append("新闻刹车归零，本次不下单：" + "、".join(
+            f"{o['instrument_id']}（原计划 {o['brake']['pre_brake_quantity']} 股）"
+            for o in suppressed))
     unfunded = (result.get("cash_plan") or {}).get("unfunded") or []
     if unfunded:
         lines.append("现金不足未下单：" + "、".join(unfunded))
