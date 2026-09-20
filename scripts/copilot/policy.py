@@ -113,6 +113,7 @@ _SCALES = {"万亿": 1e12, "亿": 1e8, "万": 1e4, "千": 1e3, "百": 1e2,
            "trillion": 1e12, "billion": 1e9, "million": 1e6, "thousand": 1e3}
 _IDENTITY_OR_DATE = re.compile(
     r"(?<![A-Za-z])(?:RSI|SMA|EMA|ATR|MACD)\s*\d+(?!\d)|\b(?:snap_|ev_|research-|decision-)[A-Za-z0-9_-]+\b"
+    r"|\brule-[0-9a-f]{16}\b"
     r"|(?<!\d)(?:19|20)\d{2}(?:[-/]\d{1,2}){2}(?!\d)|(?:19|20)\d{2}年(?:\d{1,2}月(?:\d{1,2}日)?)?"
     r"|\b(?:19|20)\d{2}Q[1-4]\b|\b(?:Nasdaq[- ]?100|S&P\s*500)\b|纳斯达克\s*100"
     r"|\b(?:DFII10|DGS10|DGS2|T10YIE|10-K|10-Q|8-K|20-F|6-K)(?:/A)?\b"
