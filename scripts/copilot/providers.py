@@ -472,6 +472,27 @@ class NasdaqIndexProvider:
                 "currency_semantics": "USD-denominated index; value unit is index points, not a monetary trade quote"}
 
 
+#: Every exchange label Nasdaq reported across all 39 registry symbols when
+#: probed on 2026-09-19: PSE for 29, NASDAQ-GM for 9, and one symbol (SPLG)
+#: Nasdaq does not know at all. PSE is the legacy Pacific Exchange code for
+#: NYSE Arca, a registered US national securities exchange and the primary
+#: listing venue for most ETFs; omitting it left Yahoo as the only upstream, so
+#: cross-provider confirmation was impossible for 29 of 39 symbols. "ARCA" and
+#: "NYSE ARCA" are here because Nasdaq could modernise the label. Nothing else
+#: speculative was added: a whitelist that guesses is not one.
+SUPPORTED_US_EXCHANGE_PREFIXES = ("NASDAQ", "NYSE", "AMEX", "ARCA", "PSE")
+
+
+def is_supported_us_exchange(label: str) -> bool:
+    return str(label or "").upper().startswith(SUPPORTED_US_EXCHANGE_PREFIXES)
+
+
+def unsupported_exchange_detail(label: str) -> str:
+    """Name the label so a future relabelling is diagnosable from the error alone."""
+    return (f"Nasdaq reported exchange {label!r}, which is not one of the supported "
+            f"US venues {SUPPORTED_US_EXCHANGE_PREFIXES}")
+
+
 class NasdaqEquityProvider:
     """Corroborate only the latest completed US share close, without an API key.
 
@@ -500,8 +521,8 @@ class NasdaqEquityProvider:
             if identity.get("symbol") != symbol or identity.get("assetClass") not in {"ETF", "STOCKS"}:
                 raise ProviderError("malformed", "Nasdaq did not confirm equity identity")
             exchange = str(identity.get("exchange", "")).upper()
-            if not exchange.startswith(("NASDAQ", "NYSE", "AMEX")):
-                raise ProviderError("not_covered", "Nasdaq did not identify a supported US exchange")
+            if not is_supported_us_exchange(exchange):
+                raise ProviderError("not_covered", unsupported_exchange_detail(exchange))
             if not str((identity.get("primaryData") or {}).get("lastSalePrice", "")).startswith("$"):
                 raise ProviderError("malformed", "Nasdaq US equity quote lacks dollar denomination")
             # Info is used for instrument identity ONLY: its timestamp failed a
