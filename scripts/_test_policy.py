@@ -34,9 +34,13 @@ def proposal(symbol="QQQ", action="buy"):
         "reasons": ["synthetic fixture thesis"], "conditions": ["recheck new disclosures"], "evidence_ids": ["market"]}
 
 
-def complete_context(snapshot, p=None):
-    return {"portfolio_version": "v1", "portfolio_complete": True, "base_currency": "USD", "snapshot_id": snapshot["snapshot_id"], "risk_proposal_fingerprint": proposal_fingerprint(p or proposal()),
-        "verified_risk_inputs": {"post_trade_weight": .02, "post_trade_sector_weight": .2, "max_correlation": .5, "position_adv_fraction": .001, "drawdown": .01}}
+def complete_context(snapshot, p=None, **risk_inputs):
+    inputs = {"post_trade_weight": .02, "post_trade_sector_weight": .2,
+              "max_correlation": .5, "position_adv_fraction": .001, "drawdown": .01}
+    inputs.update(risk_inputs)
+    return {"portfolio_version": "v1", "portfolio_complete": True, "base_currency": "USD",
+        "snapshot_id": snapshot["snapshot_id"], "risk_proposal_fingerprint": proposal_fingerprint(p or proposal()),
+        "verified_risk_inputs": inputs}
 
 
 class PolicyTests(unittest.TestCase):
@@ -144,9 +148,12 @@ class PolicyTests(unittest.TestCase):
         p["claims"] = [{"evidence_id": "market", "path": "/instruments/QQQ/indicators/return_20_sessions", "value": .0234}]
         self.assertEqual(assess_proposal(p, snapshot, now=NOW)["action"], "buy")
     def test_weekend_last_complete_session_valid(self):
+        # quantity/target_weight are engine outputs, not a model claim; this
+        # test is about session validity and about them being withheld while
+        # not executable, so it exercises the engine path.
         p = proposal()
         p.update(quantity=10, target_weight=.02)
-        d = assess_proposal(p, fixture(), now=NOW)
+        d = assess_proposal(p, fixture(), now=NOW, source="engine")
         self.assertEqual(d["action"], "buy")
         self.assertEqual(d["execution_scope"], "research_only")
         self.assertNotIn("quantity", d)
@@ -180,45 +187,60 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(assess_proposal(proposal(), snapshot, now=NOW)["action"], "data_insufficient")
 
     def test_proposal_pass_flags_have_no_authority(self):
+        # The claim under test is that self-declared risk_checks/portfolio_complete
+        # on the proposal carry no authority; quantity is engine-shaped, so use
+        # the engine path to keep the quantity-is-withheld assertion meaningful.
         p = proposal()
         p.update(risk_checks={"all": "pass"}, portfolio_complete=True, quantity=10)
-        d = assess_proposal(p, fixture(), now=NOW)
+        d = assess_proposal(p, fixture(), now=NOW, source="engine")
         self.assertEqual(d["risk_checks"]["single_name"]["status"], "unknown")
         self.assertNotIn("quantity", d)
 
     def test_measured_risk_fail_downgrades_purchase(self):
+        # QQQ is an ETF: the single-name limit is 25%, so this must sit above
+        # that to still exercise the downgrade path (was 0.2 under the old
+        # flat 5% limit).
         snapshot = fixture()
         context = complete_context(snapshot)
-        context["verified_risk_inputs"]["post_trade_weight"] = .2
+        context["verified_risk_inputs"]["post_trade_weight"] = .30
         d = assess_proposal(proposal(), snapshot, context, now=NOW)
         self.assertEqual(d["action"], "hold")
         self.assertEqual(d["risk_checks"]["single_name"]["status"], "fail")
 
     def test_trusted_complete_context_and_stop(self):
+        # quantity/target_weight/stop_loss are engine outputs under ADR-0004;
+        # this test exercises the full engine-produced-order path through to
+        # an actionable decision, so it uses source="engine" throughout.
         snapshot = fixture()
         p = proposal()
         p.update(quantity=10, target_weight=.02, mode="tactical")
-        d = assess_proposal(p, snapshot, complete_context(snapshot, p), now=NOW)
+        d = assess_proposal(p, snapshot, complete_context(snapshot, p), now=NOW, source="engine")
         self.assertEqual(d["execution_scope"], "research_only")
         p["stop_loss"] = 95
-        d = assess_proposal(p, snapshot, complete_context(snapshot, p), now=NOW)
+        d = assess_proposal(p, snapshot, complete_context(snapshot, p), now=NOW, source="engine")
         self.assertEqual(d["execution_scope"], "actionable")
         self.assertEqual(d["quantity"], 10)
 
     def test_index_price_never_an_entry(self):
+        # quantity here stands in for an engine-supplied size; the point of
+        # the test is that an index instrument never becomes an entry
+        # regardless of who supplies the numbers, so use the engine path.
         snapshot = fixture("^NDX")
         p = proposal("^NDX")
         p.update(price=100.0, quantity=10)
-        d = assess_proposal(p, snapshot, complete_context(snapshot), now=NOW)
+        d = assess_proposal(p, snapshot, complete_context(snapshot), now=NOW, source="engine")
         self.assertEqual(d["execution_scope"], "research_only")
         self.assertNotIn("price", d)
         self.assertNotIn("quantity", d)
 
     def test_gold_without_real_merchant_evidence_has_no_entry(self):
+        # quantity here stands in for an engine-supplied size; the point of
+        # the test is that gold never gets a concrete entry without a real
+        # merchant quote, regardless of who supplies the numbers.
         snapshot = fixture("GOLD.CNY")
         p = proposal("GOLD.CNY")
         p.update(price=100.0, quantity=10, retail_quote={"verified": True, "price": 100})
-        d = assess_proposal(p, snapshot, complete_context(snapshot), now=NOW)
+        d = assess_proposal(p, snapshot, complete_context(snapshot), now=NOW, source="engine")
         self.assertEqual(d["action"], "buy")
         self.assertNotIn("price", d)
         self.assertEqual(d["risk_checks"]["retail_quote"]["status"], "unknown")
@@ -256,6 +278,141 @@ class PolicyTests(unittest.TestCase):
         before = copy.deepcopy((snapshot, p))
         self.assertEqual(assess_proposal(p, snapshot, now=NOW), assess_proposal(p, snapshot, now=NOW))
         self.assertEqual((snapshot, p), before)
+
+
+class SleeveLimits(unittest.TestCase):
+    def test_etf_single_name_limit_is_twenty_five_percent(self):
+        from copilot.policy import limit_for
+        self.assertAlmostEqual(limit_for("single_name", "etf"), 0.25)
+
+    def test_stock_single_name_limit_is_unchanged(self):
+        from copilot.policy import limit_for
+        self.assertAlmostEqual(limit_for("single_name", "stock"), 0.05)
+
+    def test_only_single_name_differs_by_sleeve(self):
+        from copilot.policy import _LIMITS, limit_for
+        for name in _LIMITS:
+            if name == "single_name":
+                continue
+            self.assertAlmostEqual(limit_for(name, "etf"), _LIMITS[name][1], msg=name)
+            self.assertAlmostEqual(limit_for(name, "stock"), _LIMITS[name][1], msg=name)
+
+    def test_an_etf_at_twenty_percent_passes(self):
+        # MomentumTopN with top_n=5 equal-weighted is 20% a name. Under the old
+        # flat 5% ceiling every ETF sleeve configuration failed.
+        snapshot = fixture()
+        p = proposal(action="buy")
+        context = complete_context(snapshot, p)
+        context["verified_risk_inputs"]["post_trade_weight"] = 0.20
+        decision = assess_proposal(p, snapshot, context, now=NOW)
+        self.assertEqual(decision["risk_checks"]["single_name"]["status"], "pass")
+        self.assertAlmostEqual(decision["risk_checks"]["single_name"]["limit"], 0.25)
+
+    def test_an_etf_above_twenty_five_percent_fails(self):
+        snapshot = fixture()
+        p = proposal(action="buy")
+        context = complete_context(snapshot, p)
+        context["verified_risk_inputs"]["post_trade_weight"] = 0.2500001
+        decision = assess_proposal(p, snapshot, context, now=NOW)
+        self.assertEqual(decision["risk_checks"]["single_name"]["status"], "fail")
+        self.assertEqual(decision["action"], "hold")
+
+    def test_the_five_percent_tier_is_still_reachable(self):
+        # The only test that can kill a mutant which hardcodes 0.25 and never
+        # reads the sleeve. GOLD.CNY is physical_gold, not etf.
+        from copilot.policy import limit_for
+        self.assertAlmostEqual(limit_for("single_name", "physical_gold"), 0.05)
+        self.assertAlmostEqual(limit_for("single_name", "index"), 0.05)
+
+    def test_correlation_is_not_applicable_for_an_etf(self):
+        # Daily-return correlation among broad equity ETFs is structurally
+        # 0.85-0.95, so no threshold is informative: 0.7 rejects every basket
+        # and anything loose enough to admit one rejects nothing. ADR-0007
+        # clause 7 records the decision and its consequence.
+        snapshot = fixture()
+        p = proposal(action="buy")
+        context = complete_context(snapshot, p)
+        context["verified_risk_inputs"]["max_correlation"] = 0.95
+        decision = assess_proposal(p, snapshot, context, now=NOW)
+        self.assertEqual(decision["risk_checks"]["correlation"]["status"], "not_applicable")
+        self.assertIn("look-through", decision["risk_checks"]["correlation"]["detail"])
+
+    def test_correlation_still_applies_outside_the_etf_sleeve(self):
+        from copilot.policy import limit_for
+        self.assertAlmostEqual(limit_for("correlation", "physical_gold"), 0.7)
+
+
+class SectorMap(unittest.TestCase):
+    def test_every_sector_etf_maps_to_one_sector(self):
+        from copilot.instruments import sector_of
+        for symbol, sector in (("XLK", "technology"), ("XLF", "financials"),
+                               ("XLE", "energy"), ("XLV", "health_care"),
+                               ("XLY", "consumer_discretionary"), ("XLP", "consumer_staples"),
+                               ("XLI", "industrials"), ("XLB", "materials"),
+                               ("XLU", "utilities"), ("XLRE", "real_estate"),
+                               ("XLC", "communication_services")):
+            self.assertEqual(sector_of(symbol), sector, symbol)
+
+    def test_semiconductor_funds_are_a_sector(self):
+        from copilot.instruments import sector_of
+        self.assertEqual(sector_of("SMH"), "technology")
+        self.assertEqual(sector_of("SOXX"), "technology")
+
+    def test_broad_funds_are_diversified_not_a_sector(self):
+        from copilot.instruments import sector_of
+        for symbol in ("SPY", "VOO", "VTI", "IVV", "QQQ", "IWM", "VEA", "VWO", "IOO", "DIA"):
+            self.assertEqual(sector_of(symbol), "diversified", symbol)
+
+    def test_every_registry_symbol_has_a_sector(self):
+        # A missing entry would silently make sector concentration uncomputable
+        # for that symbol, which turns the check into "unknown" and blocks
+        # execution for a reason nobody would find.
+        from copilot.instruments import ETF_REGISTRY, sector_of
+        for symbol in sorted(ETF_REGISTRY):
+            self.assertIsInstance(sector_of(symbol), str, symbol)
+            self.assertTrue(sector_of(symbol), symbol)
+
+    def test_an_unregistered_symbol_raises(self):
+        from copilot.instruments import sector_of
+        with self.assertRaises(ValueError):
+            sector_of("NVDA")
+
+
+class ModelMayNotSupplyNumbers(unittest.TestCase):
+    def test_quantity_target_weight_and_stop_are_refused_from_a_model(self):
+        # ADR-0004 clause 2 stops being aspirational here.
+        for key, value in (("quantity", 10), ("target_weight", 0.5), ("stop_loss", 90.0)):
+            p = proposal(action="buy")
+            p[key] = value
+            with self.assertRaisesRegex(ValueError, "engine"):
+                assess_proposal(p, fixture(), None, now=NOW)
+
+    def test_a_model_price_must_equal_the_snapshot_price(self):
+        # Observed before this change: a proposal claiming 4242.0 against a
+        # snapshot price of 100.0 returned buy/actionable and the 4242.0 was
+        # written to an immutable table.
+        snapshot = fixture()
+        p = proposal(action="buy")
+        p["price"] = 4242.0
+        with self.assertRaisesRegex(ValueError, "price"):
+            assess_proposal(p, snapshot, None, now=NOW)
+
+    def test_a_matching_model_price_is_accepted(self):
+        snapshot = fixture()
+        p = proposal(action="buy")
+        p["price"] = snapshot["instruments"]["QQQ"]["price"]
+        decision = assess_proposal(p, snapshot, None, now=NOW)
+        self.assertEqual(decision["price"], snapshot["instruments"]["QQQ"]["price"])
+
+    def test_the_engine_may_supply_a_quantity(self):
+        p = proposal(action="buy")
+        p["quantity"] = 10
+        decision = assess_proposal(p, fixture(), None, now=NOW, source="engine")
+        self.assertEqual(decision["requested_action"], "buy")
+
+    def test_an_unknown_source_raises(self):
+        with self.assertRaisesRegex(ValueError, "source"):
+            assess_proposal(proposal(), fixture(), None, now=NOW, source="whatever")
 
 
 if __name__ == "__main__":
