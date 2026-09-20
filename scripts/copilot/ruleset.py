@@ -50,13 +50,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping, Sequence
 
 SCHEMA_VERSION = 1
-#: Only the ETF sleeve exists. ADR-0005 clause 2 deferred gold, and a gold
-#: adoption would skip every universe check here while still being reachable
-#: through etf.adopted_rule_id, which is the only pointer that exists.
-SLEEVES = ("etf",)
+#: The sleeves that may be adopted. Each one brings its own universe check and
+#: its own exchange calendar; adding a name here without both is the bug the
+#: old "only the ETF sleeve exists" comment warned about, because a sleeve with
+#: neither would skip every universe check while remaining reachable through
+#: etf.adopted_rule_id. Gold's universe check is `_GOLD_UNIVERSE` below and its
+#: calendar is `_stress_table`.
+SLEEVES = ("etf", "gold")
 ID_PREFIX = "rule-"
 ID_HEX_LENGTH = 16
 
@@ -69,8 +73,29 @@ _FAMILY_PARAMETERS = {
     "fixed_weight_bands": ("relative_band", "absolute_band", "calendar_days"),
     "inverse_volatility": ("lookback_days", "rebalance_days"),
     "momentum_top_n": ("top_n", "lookback_days", "skip_days"),
+    "scheduled_accumulation": ("interval_days", "trend_days", "pause_below_trend"),
 }
 WEIGHT_TOLERANCE = 1e-6
+
+#: The gold sleeve's universe is fixed, not chosen. There is one instrument and
+#: `backtest.universe.classify` cannot tier it -- GOLD.CNY is not in
+#: ETF_REGISTRY and classify() raises for it -- so without this pin a gold
+#: adoption really would skip every universe check, which is precisely what the
+#: old SLEEVES comment warned about.
+_GOLD_UNIVERSE = ["GOLD.CNY"]
+
+
+def _stress_table(sleeve: str) -> dict[int, int]:
+    """The stress-session counts for this sleeve's own exchange calendar.
+
+    Before this existed, build_adoption passed admission's XNYS table
+    unconditionally, so a Shanghai series was judged against New York trading
+    days: SGE runs 242 sessions in 2020 against XNYS's 253, so eleven sessions
+    gold genuinely never had were counted against it in both directions.
+    """
+    from .backtest import admission as admission_gate
+
+    return admission_gate.stress_sessions_for(sleeve)
 
 
 def _canonical(value: Any) -> str:
@@ -80,7 +105,17 @@ def _canonical(value: Any) -> str:
 
 def _clean_cost_model(cost_model: Mapping[str, Any]) -> dict:
     if not isinstance(cost_model, Mapping):
-        raise ValueError("cost_model must be a mapping")
+        # engine.CostModel is a frozen dataclass carrying exactly _COST_FIELDS,
+        # and it is what every caller already holds: it built one, handed it to
+        # engine.run, and must now adopt that result under the same schedule.
+        # Forcing a hand-written dict at that point invited the drift this
+        # function exists to catch -- a fee schedule retyped beside the one the
+        # backtest actually charged. Anything else still raises, and a dataclass
+        # missing a field still fails the completeness check below.
+        if is_dataclass(cost_model) and not isinstance(cost_model, type):
+            cost_model = asdict(cost_model)
+        else:
+            raise ValueError("cost_model must be a mapping or a backtest CostModel")
     missing = [key for key in _COST_FIELDS if key not in cost_model]
     if missing:
         raise ValueError(f"cost_model is missing {', '.join(missing)}; an incomplete mapping "
@@ -181,6 +216,13 @@ def _largest_position_weight(family: str, parameters: Mapping[str, float],
     if family == "momentum_top_n":
         held = min(int(parameters["top_n"]), len(symbols))
         return 1.0 / held if held else None
+    if family == "scheduled_accumulation":
+        # One instrument at weight 1.0, and the gold sleeve has no single-name
+        # cap (policy._SLEEVE_EXEMPT). Applying the ETF check here would compare
+        # 1.0 against 0.25 and refuse every gold rule. Written out rather than
+        # left to the fall-through so a reader sees this was decided, not
+        # forgotten.
+        return None
     return None
 
 
@@ -215,10 +257,13 @@ def _refuse_an_unexecutable_rule(family: str, parameters: Mapping[str, float],
             f"{1.0 - limit / largest:.0%}, or widen the rule's concentration.")
 
 
-def build_adoption(*, sleeve: str, family: str, parameters: Mapping[str, float],
-                   universe: Sequence[str], targets: Mapping[str, float] | None,
-                   result, cost_model: Mapping[str, Any], cash_floor_pct: float,
-                   integer_shares: bool, waivers: Mapping[str, str] | None = None) -> dict:
+def build_adoption(*, sleeve: str, result, cost_model: Mapping[str, Any],
+                   cash_floor_pct: float, integer_shares: bool,
+                   family: str | None = None,
+                   parameters: Mapping[str, float] | None = None,
+                   universe: Sequence[str] | None = None,
+                   targets: Mapping[str, float] | None = None,
+                   waivers: Mapping[str, str] | None = None) -> dict:
     """Build the immutable record of adopting a rule. Raises rather than guesses.
 
     `result` is a backtest engine.Result. The admission verdict is computed here
@@ -226,18 +271,41 @@ def build_adoption(*, sleeve: str, family: str, parameters: Mapping[str, float],
     `result.rule_name`/`.parameters`/`.universe` are checked against the family/
     parameters/universe being adopted -- see the module docstring for exactly
     what that binding does and does not guarantee.
+
+    `family`, `parameters` and `universe` may be omitted, which means "adopt
+    exactly the backtest that ran" and reads them off `result`. That is not a
+    way around the binding check: the check defends against a real, admitted
+    Result being recorded under a configuration it never ran, and a caller who
+    states no second configuration has created no such mismatch. A caller
+    holding a configuration in hand should still pass it, so the disagreement
+    can be caught.
     """
     from .backtest import admission as admission_gate
+    from .backtest import goldrules as goldrules_module
     from .backtest import universe as universe_tiers
 
     if sleeve not in SLEEVES:
         raise ValueError(f"sleeve must be one of {SLEEVES}, got {sleeve!r}")
+    family = result.rule_name if family is None else family
+    parameters = dict(result.parameters) if parameters is None else parameters
+    universe = tuple(result.universe) if universe is None else universe
     symbols = _clean_universe(universe)
     cleaned_parameters = _clean_parameters(family, parameters)
-    for symbol in symbols:
-        classification = universe_tiers.classify(symbol)
-        if not classification.admissible:
-            raise ValueError(f"{symbol} is tier {classification.tier!r}: {classification.reason}")
+    if sleeve == "gold":
+        # Gold's universe is fixed, not chosen, and `universe_tiers.classify`
+        # cannot judge it: GOLD.CNY is not in ETF_REGISTRY, so classify() would
+        # raise "not in the ETF registry" for the only symbol this sleeve has.
+        # Pinning it here is the gold sleeve's universe check -- without one,
+        # a gold adoption would carry any basket a caller named.
+        if symbols != _GOLD_UNIVERSE:
+            raise ValueError(f"the gold sleeve trades exactly {_GOLD_UNIVERSE}, not "
+                             f"{symbols}; there is no other instrument in it")
+    else:
+        for symbol in symbols:
+            classification = universe_tiers.classify(symbol)
+            if not classification.admissible:
+                raise ValueError(f"{symbol} is tier {classification.tier!r}: "
+                                 f"{classification.reason}")
     cleaned_targets = None
     if family == "fixed_weight_bands":
         if not targets:
@@ -273,7 +341,7 @@ def build_adoption(*, sleeve: str, family: str, parameters: Mapping[str, float],
     _refuse_an_unexecutable_rule(family, cleaned_parameters, symbols, cleaned_targets,
                                  float(cash_floor_pct))
 
-    report = admission_gate.assess(result, sessions_by_year=admission_gate.STRESS_SESSIONS,
+    report = admission_gate.assess(result, sessions_by_year=_stress_table(sleeve),
                                    waivers=dict(waivers or {}))
     if not report.admitted:
         raise ValueError("this backtest was not admitted by the gate, so the rule cannot "
@@ -285,10 +353,26 @@ def build_adoption(*, sleeve: str, family: str, parameters: Mapping[str, float],
                        targets=cleaned_targets, cost_model=cost_model,
                        cash_floor_pct=cash_floor_pct, integer_shares=integer_shares,
                        admission=admission)
-    return {
+    adoption = {
         "schema_version": SCHEMA_VERSION, "rule_id": identity, "sleeve": sleeve,
         "family": str(family), "parameters": cleaned_parameters, "universe": symbols,
         "targets": cleaned_targets, "cost_model": _clean_cost_model(cost_model),
         "cash_floor_pct": float(cash_floor_pct), "integer_shares": bool(integer_shares),
         "admission": admission, "waived": bool(report.waived),
     }
+    if sleeve == "gold":
+        if float(result.parameters.get("pause_below_trend", 0.0)):
+            raise ValueError(
+                "pause_below_trend cannot be adopted: at a one-instrument universe "
+                "engine.run rebalances to weight 1.0, so every veto the filter raises "
+                "trades zero and the backtest cannot distinguish the filter from buy "
+                "and hold. Adopting it would route an untested signal into live order "
+                "sizing. Measured 2026-09-20: interval_days 21 and 252 differ by 3 CNY "
+                "in 360,000. Lift this by teaching engine.run periodic contributions, "
+                "in its own plan, with its own bt cross-check.")
+        # brake.DISCLOSURE's precedent: an unbacktested input says so where the
+        # number is read, not in a document the reader may never open. The
+        # schedule is such an input -- see goldrules.DISCLOSURE for the
+        # measurement -- so it travels on the adoption record itself.
+        adoption["schedule_disclosure"] = goldrules_module.DISCLOSURE
+    return adoption

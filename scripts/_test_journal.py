@@ -543,5 +543,52 @@ class BoundedRecommendations(unittest.TestCase):
         self.assertEqual(len(result["recommendations"]), 2)
 
 
+class GoldCoverageCanBeDeclared(unittest.TestCase):
+    @staticmethod
+    def declare(db, *, sleeve, base_currency):
+        # record_coverage_declaration binds every declaration to the
+        # portfolio_version current when it was made, so the version has to be
+        # read first. That is the whole point of the binding -- see
+        # test_recording_a_trade_invalidates_the_declaration.
+        return journal.record_coverage_declaration(
+            sleeve=sleeve, base_currency=base_currency,
+            portfolio_version=journal.get_context(sleeve=sleeve, db_path=db)["portfolio_version"],
+            db_path=db)
+
+    def test_both_sleeves_accept_a_coverage_declaration(self):
+        from copilot.journal import COVERAGE_SLEEVES
+        self.assertEqual(tuple(COVERAGE_SLEEVES), ("etf", "gold"))
+
+    def test_cny_is_a_declarable_base_currency(self):
+        from copilot.journal import COVERAGE_CURRENCIES
+        self.assertIn("CNY", COVERAGE_CURRENCIES)
+        self.assertIn("USD", COVERAGE_CURRENCIES)
+
+    def test_a_gold_declaration_round_trips(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / "copilot.sqlite"
+            self.declare(db, sleeve="gold", base_currency="CNY")
+            context = journal.get_context(sleeve="gold", db_path=db)
+            self.assertTrue(context["portfolio_complete"])
+            self.assertEqual(context["base_currency"], "CNY")
+
+    def test_an_etf_declaration_does_not_cover_gold(self):
+        # The two sleeves are separate books in separate currencies. CLAUDE.md
+        # forbids adding USD and CNY without dated FX, so a declaration in one
+        # must never satisfy the other.
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / "copilot.sqlite"
+            self.declare(db, sleeve="etf", base_currency="USD")
+            self.assertFalse(journal.get_context(sleeve="gold", db_path=db)["portfolio_complete"])
+
+    def test_a_gold_declaration_does_not_cover_etf(self):
+        # The same property in the other direction. Only this one can catch a
+        # lookup that ignores `sleeve` and returns the newest row of any sleeve.
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / "copilot.sqlite"
+            self.declare(db, sleeve="gold", base_currency="CNY")
+            self.assertFalse(journal.get_context(sleeve="etf", db_path=db)["portfolio_complete"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

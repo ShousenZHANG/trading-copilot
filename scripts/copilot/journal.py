@@ -484,8 +484,8 @@ def get_context(instrument_ids: Any = None, as_of: Any = None, *, sleeve: str = 
     declarations are per-sleeve rows in one shared table; a lookup with no
     WHERE on sleeve returns whichever declaration is newest regardless of
     which sleeve it names, so a gold declaration could mark the etf sleeve
-    (or any other) complete. Defaults to "etf" because that is the only
-    sleeve with a coverage-declaring caller today (COVERAGE_SLEEVES).
+    (or any other) complete. Defaults to "etf" because every caller that
+    predates the gold sleeve means the ETF book; a gold caller must say so.
 
     `recommendations_limit` bounds how many recommendation rows are returned,
     newest first; `recommendations_truncated` in the result says whether more
@@ -589,11 +589,14 @@ def record_recommendation(decision: dict, *, db_path: Any = None) -> dict:
         return {"decision_id": decision_id, "recorded": True, "replayed": bool(previous)}
 
 
-COVERAGE_SLEEVES = ("etf",)
-#: One currency per declaration. A mixed-currency sleeve has no single total to
-#: size against, and CLAUDE.md already forbids adding USD and CNY without dated
-#: FX and a declared base currency.
-COVERAGE_CURRENCIES = ("USD",)
+COVERAGE_SLEEVES = ("etf", "gold")
+#: One currency per declaration, and the sleeves never share one. A USD ETF
+#: book and a CNY gold book have no single total to size against, and CLAUDE.md
+#: forbids adding them without dated FX and a declared base currency. Coverage
+#: is therefore declared per sleeve and a declaration never crosses: this tuple
+#: widens which currency a declaration may name, never which sleeve a
+#: declaration satisfies. get_context filters by sleeve for exactly that reason.
+COVERAGE_CURRENCIES = ("USD", "CNY")
 
 
 def record_coverage_declaration(*, sleeve: str, base_currency: str,

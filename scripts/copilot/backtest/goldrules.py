@@ -87,3 +87,17 @@ class ScheduledAccumulation:
 
 
 FAMILIES: dict[str, type] = {"scheduled_accumulation": ScheduledAccumulation}
+
+#: The contribution schedule is NOT backtested, and cannot be by this engine:
+#: engine.run rebalances to a target weight, and at one instrument that weight
+#: is 1.0, so every scheduled contribution after the first trades zero. Measured
+#: 2026-09-20 over the vendored series, interval_days 21 and interval_days 252
+#: end 3 CNY apart in 360,000 -- the backtest cannot tell them apart, nor tell
+#: either from buy and hold. Carried on every adoption and every evaluation for
+#: the same reason brake.DISCLOSURE is: an unbacktested input has to say so
+#: where the number is read, not in a document the reader may never open.
+#:
+#: This is a disclosure, not an apology. A contribution schedule makes no alpha
+#: claim -- DCA is a cash-deployment policy. pause_below_trend DOES make one,
+#: which is why ruleset refuses to adopt it at all rather than disclosing it.
+DISCLOSURE = "定投节奏未回测：回测只证明这十年持有黄金的表现，不证明任何投入节奏更优"

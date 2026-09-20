@@ -859,5 +859,39 @@ class ARotationDoesNotBlockItsOwnBasket(unittest.TestCase):
                         idle["reasons"])
 
 
+class TheGoldSleeveHasItsOwnLimits(unittest.TestCase):
+    """Four of the five ETF limits cannot describe a one-instrument sleeve.
+
+    single_name at 0.25 would refuse every gold purchase: gold is always 100%
+    of a gold sleeve. sector and correlation need peers that do not exist.
+    liquidity divides by an average dollar volume no SGE collector produces.
+    Each must read not_applicable WITH A REASON -- never a silent default, and
+    never a limit of 1.0, which a reader would take as "measured and passed".
+    """
+
+    def test_gold_exempts_the_four_limits_that_cannot_apply(self):
+        from copilot.policy import _SLEEVE_EXEMPT
+        for name in ("single_name", "sector", "correlation", "liquidity"):
+            self.assertIn(name, _SLEEVE_EXEMPT["gold"], name)
+            self.assertTrue(_SLEEVE_EXEMPT["gold"][name].strip(),
+                            f"{name} is exempt with no stated reason")
+
+    def test_gold_does_not_exempt_drawdown(self):
+        from copilot.policy import _SLEEVE_EXEMPT
+        # Drawdown is the one limit that transfers unchanged: it measures the
+        # book losing money, which a single asset does just as well as a basket.
+        self.assertNotIn("drawdown", _SLEEVE_EXEMPT["gold"])
+
+    def test_no_gold_limit_is_set_to_one(self):
+        from copilot.policy import _SLEEVE_LIMITS
+        for name, limit in _SLEEVE_LIMITS.get("gold", {}).items():
+            self.assertLess(limit, 1.0, f"{name}=1.0 reads as checked-and-passed")
+
+    def test_the_etf_sleeve_is_unchanged(self):
+        from copilot.policy import _SLEEVE_LIMITS, limit_for
+        self.assertEqual(_SLEEVE_LIMITS["etf"]["single_name"], 0.25)
+        self.assertEqual(limit_for("single_name", "etf"), 0.25)
+
+
 if __name__ == "__main__":
     unittest.main()

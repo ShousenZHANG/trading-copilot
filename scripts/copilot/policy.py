@@ -30,6 +30,12 @@ _INDICATOR_SAMPLES = {"sma20": 20, "sma50": 50, "sma200": 200, "rsi14": 15, "atr
 #: for individual stocks makes any ETF sleeve unexecutable: 8-12 holdings is
 #: 8-12% each and a top-5 momentum rotation is 20%. 25% is conventional, not
 #: measured -- see ADR-0007 clause 2.
+#:
+#: Gold has no entry on purpose. Four of its five limits are exempt below and
+#: the one it keeps -- drawdown -- uses the shared default, so an entry here
+#: could only hold a number nobody measured. A limit of 1.0 in particular is
+#: forbidden: a reader takes any number in this table as a check that ran and
+#: passed, and 1.0 would be a check that cannot fail.
 _SLEEVE_LIMITS = {"etf": {"single_name": 0.25}}
 
 #: Checks that cannot be made informative for a sleeve, with the reason. This is
@@ -44,6 +50,20 @@ _SLEEVE_EXEMPT = {
                            "threshold separates a diversified basket from a concentrated "
                            "one; look-through holdings overlap is the informative measure "
                            "and no configured source provides fund constituents"},
+    # A one-instrument sleeve cannot be measured by any limit that compares a
+    # position to its peers. Each of these is not_applicable WITH A REASON --
+    # a silent default would look like an unmeasured check, and a limit of 1.0
+    # would look like a measured one that passed. drawdown is deliberately
+    # absent: it measures the book losing money, which one asset does as well
+    # as a basket, so it transfers unchanged at the shared 15%.
+    "gold": {
+        "single_name": "gold is the entire gold sleeve by construction; a single-name cap "
+                       "would refuse every purchase it is supposed to size",
+        "sector": "physical gold is not a member of any equity sector map",
+        "correlation": "a one-instrument sleeve has no second series to correlate against",
+        "liquidity": "no SGE volume series is collected, so position-versus-ADV cannot be "
+                     "computed; do not read this as ample liquidity",
+    },
 }
 
 

@@ -169,12 +169,15 @@ class AdoptionRecord(unittest.TestCase):
     def test_universe_is_stored_sorted(self):
         self.assertEqual(self.build()["universe"], ["IVV", "IWM", "QQQ", "SPY", "VTI"])
 
-    def test_only_the_etf_sleeve_exists(self):
-        # ADR-0005 clause 2 deferred the gold sleeve; a gold adoption would skip
-        # every universe check and could then be pointed at by etf.adopted_rule_id.
-        self.assertEqual(ruleset.SLEEVES, ("etf",))
+    def test_an_unknown_sleeve_is_refused(self):
+        # Was test_only_the_etf_sleeve_exists, which pinned SLEEVES == ("etf",)
+        # on ADR-0005 clause 2's deferral of gold. Gold is a real sleeve now
+        # (see GoldIsAnAdoptableSleeve below), so the pin moved to "a name
+        # nobody registered is still refused" -- the property that actually
+        # protects etf.adopted_rule_id from pointing at an unchecked universe.
+        self.assertEqual(ruleset.SLEEVES, ("etf", "gold"))
         with self.assertRaisesRegex(ValueError, "sleeve"):
-            self.build(sleeve="gold")
+            self.build(sleeve="crypto")
 
     def test_a_non_admissible_symbol_is_refused(self):
         # SCHD is registered but has zero 2008 bars, so it never passed Q29.
@@ -646,6 +649,135 @@ class AverageDollarVolume(unittest.TestCase):
 
     def test_an_empty_series_yields_none(self):
         self.assertIsNone(riskinputs.average_dollar_volume([], sessions=20))
+
+
+#: SGE bid/ask on Au99.99 is a few tenths of a percent; 20 bps is a
+#: conservative round-trip stand-in. No per-share fee exists for a metal bought
+#: by weight, so per_share_usd and minimum_usd are zero.
+GOLD_COSTS = bt_engine.CostModel(per_share_usd=0.0, minimum_usd=0.0,
+                                 max_pct_of_notional=0.01, spread_bps=20.0)
+
+
+def gold_result():
+    from copilot.backtest import goldhistory
+    from copilot.backtest.goldrules import ScheduledAccumulation
+    return bt_engine.run(goldhistory.load(), rule=ScheduledAccumulation(),
+                         start_cash=100000.0, cost_model=GOLD_COSTS,
+                         cash_floor_pct=0.0, integer_shares=False)
+
+
+class GoldIsAnAdoptableSleeve(unittest.TestCase):
+    def test_the_sleeve_list_carries_both(self):
+        from copilot.ruleset import SLEEVES
+        self.assertEqual(tuple(SLEEVES), ("etf", "gold"))
+
+    def test_a_gold_adoption_is_judged_on_the_sge_calendar(self):
+        # The bug this prevents: ruleset.py:276 hardcoded the XNYS table for
+        # every sleeve, so a gold rule with full 2020 coverage was measured
+        # against 253 New York sessions.
+        from copilot.backtest import admission
+        from copilot import ruleset
+        self.assertIs(ruleset._stress_table("gold"), admission.SGE_STRESS_SESSIONS)
+        self.assertIs(ruleset._stress_table("etf"), admission.STRESS_SESSIONS)
+
+    def test_a_gold_rule_needs_the_documented_waivers(self):
+        from copilot import ruleset
+        with self.assertRaisesRegex(ValueError, "span|stress_2008"):
+            ruleset.build_adoption(result=gold_result(), sleeve="gold",
+                                   cash_floor_pct=0.0, cost_model=GOLD_COSTS,
+                                   integer_shares=False, waivers={})
+
+    def test_a_gold_rule_with_the_waivers_is_admitted(self):
+        from copilot import ruleset
+        adoption = ruleset.build_adoption(
+            result=gold_result(), sleeve="gold", cash_floor_pct=0.0,
+            cost_model=GOLD_COSTS, integer_shares=False,
+            waivers={"span": "ADR-0008 clause 2: SGE Au99.99 history begins 2016-12-19",
+                     "stress_2008": "ADR-0008 clause 2: no Chinese gold series covers 2008"})
+        self.assertTrue(adoption["admission"]["admitted"])
+        self.assertTrue(adoption["admission"]["waived"])
+        self.assertEqual(adoption["sleeve"], "gold")
+
+    def test_the_waived_failures_are_still_recorded(self):
+        # admission.py's module docstring: a waiver does not delete a failure,
+        # it records a reason beside it. An adoption that dropped the failure
+        # list would read as a clean 15-year backtest over the GFC.
+        from copilot import ruleset
+        adoption = ruleset.build_adoption(
+            result=gold_result(), sleeve="gold", cash_floor_pct=0.0,
+            cost_model=GOLD_COSTS, integer_shares=False,
+            waivers={"span": "ADR-0008 clause 2", "stress_2008": "ADR-0008 clause 2"})
+        joined = " ".join(adoption["admission"]["failures"])
+        self.assertIn("span", joined)
+        self.assertIn("2008", joined)
+
+    def test_a_trend_filtered_gold_rule_cannot_be_adopted(self):
+        # pause_below_trend makes an alpha claim (a 200-day trend filter) that
+        # no backtest in this repo can test: at a one-instrument universe the
+        # engine rebalances to weight 1.0 and every veto trades zero, so the
+        # filter changes the curve only by moving the entry point. Adopting it
+        # would put an untested signal into live order sizing through Task 7.
+        from copilot import ruleset
+        from copilot.backtest.engine import run
+        from copilot.backtest.goldrules import ScheduledAccumulation
+        from copilot.backtest import goldhistory
+        filtered = run(goldhistory.load(), rule=ScheduledAccumulation(pause_below_trend=True),
+                       start_cash=100000.0, cost_model=GOLD_COSTS,
+                       cash_floor_pct=0.0, integer_shares=False)
+        with self.assertRaisesRegex(ValueError, "pause_below_trend"):
+            ruleset.build_adoption(result=filtered, sleeve="gold", cash_floor_pct=0.0,
+                                   cost_model=GOLD_COSTS, integer_shares=False,
+                                   waivers={"span": "ADR-0008 clause 2",
+                                            "stress_2008": "ADR-0008 clause 2"})
+
+    def test_the_schedule_disclosure_travels_on_every_gold_adoption(self):
+        # brake.DISCLOSURE's precedent: an input nothing backtested must say so
+        # everywhere it is reported, not in a document the reader may not open.
+        from copilot import ruleset
+        from copilot.backtest import goldrules
+        adoption = ruleset.build_adoption(
+            result=gold_result(), sleeve="gold", cash_floor_pct=0.0,
+            cost_model=GOLD_COSTS, integer_shares=False,
+            waivers={"span": "ADR-0008 clause 2", "stress_2008": "ADR-0008 clause 2"})
+        self.assertEqual(adoption["schedule_disclosure"], goldrules.DISCLOSURE)
+        self.assertIn("未回测", goldrules.DISCLOSURE)
+
+    def test_an_etf_adoption_carries_no_schedule_disclosure(self):
+        # The disclosure describes a contribution schedule. Attaching it to a
+        # rebalancing ETF rule would be a claim about something that rule does
+        # not have, and readers stop reading a notice that is always there.
+        frame, rule, result = admitted_result()
+        adoption = ruleset.build_adoption(
+            sleeve="etf", family=rule.name, parameters=dict(rule.parameters),
+            universe=tuple(frame.symbols), targets=None, result=result,
+            cost_model={"per_share_usd": 0.0035, "minimum_usd": 1.0,
+                        "max_pct_of_notional": 0.01, "spread_bps": 2.0},
+            cash_floor_pct=0.15, integer_shares=True)
+        self.assertNotIn("schedule_disclosure", adoption)
+
+    def test_a_gold_rule_is_never_refused_for_a_single_name_breach(self):
+        # _refuse_an_unexecutable_rule rejects an ETF rule whose largest weight
+        # exceeds the sleeve cap. Gold is always weight 1.0 and has no such cap,
+        # so applying the ETF check would make every gold rule unadoptable.
+        from copilot import ruleset
+        adoption = ruleset.build_adoption(
+            result=gold_result(), sleeve="gold", cash_floor_pct=0.0,
+            cost_model=GOLD_COSTS, integer_shares=False,
+            waivers={"span": "ADR-0008 clause 2", "stress_2008": "ADR-0008 clause 2"})
+        self.assertEqual(adoption["universe"], ["GOLD.CNY"])
+
+    def test_a_gold_adoption_cannot_smuggle_in_an_etf_universe(self):
+        # The comment that used to sit on SLEEVES warned that a gold adoption
+        # "would skip every universe check". It does skip the ETF tiering --
+        # GOLD.CNY is not in ETF_REGISTRY and classify() raises for it -- so
+        # the gold sleeve pins its own universe instead of having none.
+        from copilot import ruleset
+        with self.assertRaisesRegex(ValueError, "GOLD.CNY"):
+            ruleset.build_adoption(result=gold_result(), sleeve="gold",
+                                   universe=("QQQ",), cash_floor_pct=0.0,
+                                   cost_model=GOLD_COSTS, integer_shares=False,
+                                   waivers={"span": "ADR-0008 clause 2",
+                                            "stress_2008": "ADR-0008 clause 2"})
 
 
 if __name__ == "__main__":
