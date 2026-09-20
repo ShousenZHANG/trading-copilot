@@ -76,6 +76,19 @@ def normalize_instrument(value: str) -> str:
 #:
 #: Defensive ETFs are included because the map must cover the whole registry;
 #: the ETF sleeve itself still refuses them (config rejects DEFENSIVE_ETFS).
+#:
+#: "diversified" means "no single-sector attribution available for this fund",
+#: NOT "measured as diversified". QQQ, QQQM, JEPQ and QQQI all fall through to
+#: it and are treated identically to SPY/VOO/IVV, but the Nasdaq-100 is
+#: structurally concentrated in mega-cap technology and communications --
+#: nothing here says so. They are deliberately not relabelled "technology":
+#: QQQ genuinely is more diversified than XLK, so that label would overstate
+#: its concentration in the other direction, and the truthful measure is
+#: look-through holdings overlap, which no configured source provides here
+#: either -- the same root cause ADR-0007 clause 7 records for the disabled
+#: correlation check. Consequence: a QQQ-plus-XLK basket reports only XLK's
+#: technology weight against the sector limit, while the basket's true
+#: technology exposure is materially higher than that number shows.
 _SECTORS = {
     "XLK": "technology", "XLF": "financials", "XLE": "energy", "XLV": "health_care",
     "XLY": "consumer_discretionary", "XLP": "consumer_staples", "XLI": "industrials",

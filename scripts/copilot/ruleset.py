@@ -14,11 +14,32 @@ share granularity, and the admission verdict. The cost model and cash floor are
 part of identity on purpose -- a rule sized live under a different fee schedule
 or a different reserve has admitted metrics that no longer describe it.
 
-WHY THE VERDICT IS DERIVED, NOT SUPPLIED
-`build_adoption` takes a backtest `Result` and calls the admission gate itself.
-A caller cannot hand it `{"admitted": True}`: adoption is supposed to mean "this
-passed the gate", and a self-asserted boolean would make a hand-written JSON
-pipe enough to adopt a strategy that never ran.
+WHAT THIS DOES AND DOES NOT GUARANTEE
+`build_adoption` takes a backtest `Result` and calls the admission gate itself
+rather than accepting a caller's `{"admitted": True}` -- a self-asserted boolean
+would make a hand-written JSON pipe enough to adopt a strategy that never ran.
+It then checks that `result.rule_name`, `result.parameters` and
+`result.universe` match the family, parameters and universe being adopted, and
+refuses to proceed if any of the three disagree. That check guarantees the
+recorded identity and the attached admission metrics always describe the same
+backtest: a caller cannot pass a genuinely admitted Result for one
+configuration and have it recorded, with that Result's metrics, against a
+different one -- the mismatch that a security review demonstrated working
+against an earlier version of this module (a `top_n=2` three-symbol Result
+adopted, with its own `cagr`, under a recorded identity of `top_n=5` over a
+single symbol that never ran).
+
+It does NOT guarantee the Result itself is genuine. Anyone running code in
+this process can construct a fabricated `engine.Result` -- a made-up curve,
+an invented `total_costs`, whatever `rule_name` and `parameters` they choose
+-- and `admission.assess` cannot tell it apart from a real backtest, because
+nothing on `Result` carries proof of how it was produced. That is not a gap
+specific to this module: anyone who can construct a `Result` in this process
+can also write directly to the SQLite journal, so this was never a boundary
+`build_adoption` could defend, and claiming otherwise would be a guarantee the
+code cannot back. What the binding check above actually closes is the
+narrower, real gap: a real, admitted Result silently recorded under a
+configuration it never ran.
 
 FORMAT
 `rule-` plus 16 lowercase hex characters. The prefix is tokenised by
@@ -150,7 +171,10 @@ def build_adoption(*, sleeve: str, family: str, parameters: Mapping[str, float],
     """Build the immutable record of adopting a rule. Raises rather than guesses.
 
     `result` is a backtest engine.Result. The admission verdict is computed here
-    from it, never taken from a caller.
+    from it, never taken from a caller. Before that verdict is even asked for,
+    `result.rule_name`/`.parameters`/`.universe` are checked against the family/
+    parameters/universe being adopted -- see the module docstring for exactly
+    what that binding does and does not guarantee.
     """
     from .backtest import admission as admission_gate
     from .backtest import universe as universe_tiers
@@ -174,6 +198,26 @@ def build_adoption(*, sleeve: str, family: str, parameters: Mapping[str, float],
         total = sum(cleaned_targets.values())
         if abs(total - 1.0) > WEIGHT_TOLERANCE:
             raise ValueError(f"targets must sum to 1.0, got {total:.9f}")
+
+    # Bind the Result to the configuration being adopted, before it is ever
+    # handed to the admission gate. Without this, a genuinely admitted Result
+    # for one family/parameters/universe could be recorded -- with its own
+    # admitted metrics -- against a completely different one; a security
+    # review demonstrated exactly that against an earlier version of this
+    # function. See the module docstring for what this check does and does
+    # not guarantee.
+    if result.rule_name != family:
+        raise ValueError(f"result.rule_name {result.rule_name!r} does not match family "
+                         f"{family!r}; the admitted backtest must describe the strategy "
+                         "being adopted")
+    if result.parameters != cleaned_parameters:
+        raise ValueError(f"result.parameters {result.parameters!r} does not match the "
+                         f"adopted parameters {cleaned_parameters!r}; the admitted backtest "
+                         "must describe the strategy being adopted")
+    if sorted(result.universe) != symbols:
+        raise ValueError(f"result.universe {sorted(result.universe)!r} does not match the "
+                         f"adopted universe {symbols!r}; the admitted backtest must describe "
+                         "the strategy being adopted")
 
     report = admission_gate.assess(result, sessions_by_year=admission_gate.STRESS_SESSIONS,
                                    waivers=dict(waivers or {}))
