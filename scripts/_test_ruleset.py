@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from copilot import brake
+from copilot import riskinputs
 from copilot import ruleset
 from copilot import sizing
 from copilot.backtest import engine as bt_engine
@@ -409,6 +410,122 @@ class NewsBrake(unittest.TestCase):
         self.assertEqual(applied["pre_brake_quantity"], 17)
         self.assertEqual(applied["post_brake_quantity"], 8)
         self.assertFalse(applied["backtested"])
+
+
+class RiskInputs(unittest.TestCase):
+    def test_post_trade_weight_uses_the_post_trade_share_count(self):
+        # The gate's fingerprint binds these numbers to THIS trade, so they must
+        # describe the book after it, not before.
+        inputs = riskinputs.compute(
+            symbol="QQQ", target_shares=100, price=100.0, total_value=40000.0,
+            sector_values={"diversified": 10000.0}, sector_of="diversified",
+            average_dollar_volume=1e9, value_history=[40000.0])
+        self.assertAlmostEqual(inputs["post_trade_weight"], 0.25)
+
+    def test_sector_weight_counts_the_whole_sector_after_the_trade(self):
+        inputs = riskinputs.compute(
+            symbol="XLK", target_shares=50, price=200.0, total_value=100000.0,
+            sector_values={"technology": 5000.0}, sector_of="technology",
+            average_dollar_volume=1e9, value_history=[100000.0])
+        # 50 * 200 = 10000 for this holding, plus 5000 already in the sector
+        # from other holdings, over 100000.
+        self.assertAlmostEqual(inputs["post_trade_sector_weight"], 0.15)
+
+    def test_liquidity_is_order_notional_over_average_dollar_volume(self):
+        inputs = riskinputs.compute(
+            symbol="QQQ", target_shares=10, price=500.0, total_value=100000.0,
+            sector_values={}, sector_of="diversified",
+            average_dollar_volume=1_000_000.0, value_history=[100000.0],
+            delta_shares=10)
+        self.assertAlmostEqual(inputs["position_adv_fraction"], 0.005)
+
+    def test_liquidity_measures_the_traded_amount_not_the_held_amount(self):
+        # A hold trades nothing, so it consumes no liquidity.
+        inputs = riskinputs.compute(
+            symbol="QQQ", target_shares=1000, price=500.0, total_value=1e9,
+            sector_values={}, sector_of="diversified",
+            average_dollar_volume=1_000_000.0, value_history=[1e9], delta_shares=0)
+        self.assertEqual(inputs["position_adv_fraction"], 0.0)
+
+    def test_a_single_observation_has_zero_drawdown(self):
+        # Not a cheat: with one value the drawdown from peak genuinely is zero,
+        # and it becomes meaningful as history accumulates. The sample count is
+        # reported so a short history is visible rather than implied.
+        inputs = riskinputs.compute(
+            symbol="QQQ", target_shares=1, price=1.0, total_value=100.0,
+            sector_values={}, sector_of="diversified",
+            average_dollar_volume=1e9, value_history=[100.0])
+        self.assertEqual(inputs["drawdown"], 0.0)
+        self.assertEqual(inputs["drawdown_sample_count"], 1)
+
+    def test_drawdown_is_measured_from_the_peak(self):
+        inputs = riskinputs.compute(
+            symbol="QQQ", target_shares=1, price=1.0, total_value=80.0,
+            sector_values={}, sector_of="diversified",
+            average_dollar_volume=1e9, value_history=[100.0, 120.0, 90.0, 80.0])
+        self.assertAlmostEqual(inputs["drawdown"], (120.0 - 80.0) / 120.0)
+        self.assertEqual(inputs["drawdown_sample_count"], 4)
+
+    def test_no_correlation_key_is_produced(self):
+        # policy marks correlation not_applicable for the ETF sleeve, so
+        # supplying a value here would be a number nobody reads pretending to
+        # be a measurement.
+        inputs = riskinputs.compute(
+            symbol="QQQ", target_shares=1, price=1.0, total_value=100.0,
+            sector_values={}, sector_of="diversified",
+            average_dollar_volume=1e9, value_history=[100.0])
+        self.assertNotIn("max_correlation", inputs)
+
+    def test_every_produced_value_is_in_the_unit_interval(self):
+        # policy treats a value outside [0, 1] as "unknown", not "fail", so an
+        # out-of-range number would silently block execution instead of failing
+        # a limit.
+        inputs = riskinputs.compute(
+            symbol="QQQ", target_shares=1000, price=500.0, total_value=100000.0,
+            sector_values={"diversified": 400000.0}, sector_of="diversified",
+            average_dollar_volume=1000.0, value_history=[100000.0], delta_shares=1000)
+        for key in ("post_trade_weight", "post_trade_sector_weight",
+                    "position_adv_fraction", "drawdown"):
+            self.assertGreaterEqual(inputs[key], 0.0, key)
+            self.assertLessEqual(inputs[key], 1.0, key)
+
+    def test_a_zero_total_value_raises_rather_than_dividing(self):
+        with self.assertRaisesRegex(ValueError, "total_value"):
+            riskinputs.compute(
+                symbol="QQQ", target_shares=1, price=1.0, total_value=0.0,
+                sector_values={}, sector_of="diversified",
+                average_dollar_volume=1e9, value_history=[100.0])
+
+    def test_a_missing_volume_omits_the_liquidity_key(self):
+        # Absent, not zero: zero would read as "no liquidity risk measured as
+        # pass", and policy turns an absent key into "unknown", which blocks.
+        inputs = riskinputs.compute(
+            symbol="QQQ", target_shares=1, price=1.0, total_value=100.0,
+            sector_values={}, sector_of="diversified",
+            average_dollar_volume=None, value_history=[100.0])
+        self.assertNotIn("position_adv_fraction", inputs)
+
+
+class AverageDollarVolume(unittest.TestCase):
+    def test_it_averages_close_times_volume(self):
+        bars = [{"session": "2026-09-01", "close": 100.0, "volume": 1000},
+                {"session": "2026-09-02", "close": 110.0, "volume": 2000}]
+        self.assertAlmostEqual(riskinputs.average_dollar_volume(bars, sessions=2),
+                               (100.0 * 1000 + 110.0 * 2000) / 2)
+
+    def test_it_uses_only_the_most_recent_sessions(self):
+        bars = [{"session": f"2026-08-{d:02d}", "close": 1.0, "volume": 1} for d in range(1, 26)]
+        bars += [{"session": "2026-09-01", "close": 100.0, "volume": 100}]
+        self.assertAlmostEqual(riskinputs.average_dollar_volume(bars, sessions=1), 10000.0)
+
+    def test_bars_without_volume_yield_none(self):
+        # The Nasdaq equity record has no volume at all, so this must not be
+        # mistaken for zero volume.
+        bars = [{"session": "2026-09-01", "close": 100.0}]
+        self.assertIsNone(riskinputs.average_dollar_volume(bars, sessions=1))
+
+    def test_an_empty_series_yields_none(self):
+        self.assertIsNone(riskinputs.average_dollar_volume([], sessions=20))
 
 
 if __name__ == "__main__":
