@@ -30,7 +30,15 @@ dist/
 *.zip
 
 # Reference clones (cloned via git, no need to vendor)
-reference/
+# `reference/*` rather than `reference/`: git cannot re-include a file whose
+# parent directory is excluded, so the directory itself has to stay visible for
+# the negation below to be reachable at all.
+reference/*
+
+# The one vendored exception. The offline CI matrix installs zero third-party
+# packages and has no network, so the gold backtest can only run against a
+# series held in the tree — see scripts/refresh_gold_history.py.
+!reference/sge-au9999-daily.csv
 
 # Python (for any helper scripts)
 __pycache__/
