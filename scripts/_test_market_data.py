@@ -184,6 +184,29 @@ class SnapshotContracts(unittest.TestCase):
         self.assertEqual(item["quality_status"], "unknown")
         self.assertNotIn("sma200", item["indicators"])
 
+    def test_a_one_bar_record_cannot_win_primary_over_a_near_complete_history(self):
+        # missing_sessions walks from a source's own first bar to `expected`,
+        # so Nasdaq's single-bar equity record is trivially "complete" over its
+        # own one-day window regardless of real market continuity. Before the
+        # fix, a tuple max() on (not missing_sessions, ...) let that one bar
+        # outrank a ~280-bar Yahoo series merely missing one session elsewhere.
+        # Yahoo's own gap still makes its session-based indicators unusable
+        # (market_data.py's separate "consecutive exchange-session" guard), so
+        # this asserts on primary identity, price and sample size instead of
+        # individual sma/rsi values, which that guard deliberately blanks.
+        records = history()
+        del records[-10]
+        current = [{"session": records[-1]["session"], "close": 999.0}]
+        sources = [FixtureProvider(bars=records),
+                   FixtureProvider("nasdaq", "Nasdaq US market data", bars=current,
+                                   adjustment="unadjusted_latest_session", indicator_basis="single_current_session")]
+        result = snapshot(sources)
+        item = result["instruments"]["QQQ"]
+        self.assertEqual(item["verification"]["primary_provider"], "yahoo")
+        self.assertEqual(item["price"], records[-1]["close"])
+        self.assertNotEqual(item["price"], 999.0)
+        self.assertEqual(item["indicators"]["sample_count"], len(records))
+
     def test_insufficient_history_cannot_pass(self):
         result = snapshot([FixtureProvider(bars=history(50)), FixtureProvider("alpaca", "Alpaca SIP", bars=history(50))])
         item = result["instruments"]["QQQ"]
@@ -411,18 +434,32 @@ class ExchangeWhitelist(unittest.TestCase):
         # reports exactly two labels, PSE (29) and NASDAQ-GM (9). PSE is the
         # legacy Pacific Exchange code for NYSE Arca, the primary listing venue
         # for most ETFs. Rejecting it left Yahoo as the only upstream, so
-        # cross-provider confirmation was impossible and 19 of the 22
-        # admissible ETFs returned data_insufficient.
-        from copilot.providers import SUPPORTED_US_EXCHANGE_PREFIXES, is_supported_us_exchange
+        # cross-provider confirmation was impossible and 29 of 33 non-defensive
+        # equity ETFs (33 minus the 3 already Nasdaq-listed and minus SPLG,
+        # which Nasdaq does not recognise) returned data_insufficient.
+        from copilot.providers import SUPPORTED_US_EXCHANGES, is_supported_us_exchange
         self.assertTrue(is_supported_us_exchange("PSE"))
         self.assertTrue(is_supported_us_exchange("NASDAQ-GM"))
         self.assertTrue(is_supported_us_exchange("NYSE ARCA"))
-        self.assertIn("PSE", SUPPORTED_US_EXCHANGE_PREFIXES)
+        self.assertIn("PSE", SUPPORTED_US_EXCHANGES)
 
     def test_an_unknown_venue_is_still_refused(self):
         from copilot.providers import is_supported_us_exchange
         for label in ("", "LSE", "TSX", "XETRA", "HKEX", "UNKNOWN"):
             self.assertFalse(is_supported_us_exchange(label), label)
+
+    def test_a_real_foreign_venue_does_not_collide_by_prefix(self):
+        # A startswith match let real, currently-operating foreign exchanges
+        # collide by name with an accepted label: the Philippine Stock
+        # Exchange starts with "PSE", NASDAQ Dubai starts with "NASDAQ", and
+        # Euronext Paris's NYSE-branded label starts with "NYSE". None of
+        # these were ever observed for a registry symbol; matching must be
+        # exact, not a prefix.
+        from copilot.providers import is_supported_us_exchange
+        for label in ("PSE.PHILIPPINES", "NASDAQ DUBAI", "NYSE EURONEXT PARIS"):
+            self.assertFalse(is_supported_us_exchange(label), label)
+        for label in ("NASDAQ-GM", "PSE", "NYSE ARCA"):
+            self.assertTrue(is_supported_us_exchange(label), label)
 
     def test_the_refusal_names_the_label_it_saw(self):
         from copilot.providers import unsupported_exchange_detail
@@ -441,11 +478,17 @@ class ExchangeWhitelist(unittest.TestCase):
                     "primaryData": {"lastSalePrice": "$500.00"}}}),
                         "source_url": url, "retrieved_at": iso(NOW)}
         provider = NasdaqEquityProvider(Client())
-        # The identity gate must not be what stops us. Anything raised here must
-        # come from the later historical fetch, not from the exchange check.
-        with self.assertRaises(Exception) as caught:
+        # The identity gate must not be what stops us. Both the identity check
+        # and the historical fetch below can raise ProviderError("not_covered",
+        # ...), so the message text is what actually distinguishes them: assert
+        # the specific error the *historical* branch raises when this mocked
+        # Client echoes the identity payload back as the historical response,
+        # not the exchange check's wording (previously "...supported US
+        # exchange...", now "...supported US venues..." — asserting the old
+        # wording is vacuous against the current message either way).
+        with self.assertRaises(ProviderError) as caught:
             provider.fetch(get_instrument("SPY"), "2026-08-28", "2026-09-04", NOW)
-        self.assertNotIn("supported US exchange", str(caught.exception))
+        self.assertEqual(str(caught.exception), "Nasdaq did not return the requested equity")
 
     def test_the_provider_still_refuses_a_foreign_identity(self):
         class Client:

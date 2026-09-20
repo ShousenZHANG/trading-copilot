@@ -295,8 +295,15 @@ def collect_snapshot(instrument_ids: list[str], decision_at: str | None = None, 
             continue
         # Prefer a complete adjusted Yahoo series for indicators. No bar-level
         # merges across providers or refreshes: every revision gets a new hash.
-        primary = max(successes, key=lambda s: (not bool(s.get("missing_sessions")),
-                       len(s["bars"]) >= minimum_history, s.get("indicator_basis") == "total_return_adjusted", len(s["bars"])))
+        # `missing_sessions` walks from a source's own first bar to `expected`
+        # (_validate_source above), so a single-bar record such as Nasdaq's
+        # equity close is trivially "complete" over its own one-day window
+        # regardless of real market continuity. The bar-count check must
+        # therefore outrank the gap check, or a one-bar record can beat a
+        # ~600-bar series that is merely missing one session elsewhere.
+        primary = max(successes, key=lambda s: (len(s["bars"]) >= minimum_history,
+                       not bool(s.get("missing_sessions")),
+                       s.get("indicator_basis") == "total_return_adjusted", len(s["bars"])))
         item["price"] = primary["bars"][-1]["close"]
         item["latest_session"] = primary["latest_session"]
         item["asset_class"] = primary.get("asset_class", item["asset_class"])
