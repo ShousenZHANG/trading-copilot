@@ -94,9 +94,17 @@ def collect(instrument_ids: list[str], horizon: str = "daily", *, db_path=None,
     return snapshot
 
 
-def context(instrument_ids: list[str] | None = None, *, db_path=None, as_of=None) -> dict:
+def context(instrument_ids: list[str] | None = None, *, db_path=None, as_of=None,
+            sleeve: str = "etf") -> dict:
+    """Holdings and audit context. `sleeve` selects whose coverage declaration is read.
+
+    Defaulting to "etf" matches journal.get_context: a declaration is per
+    sleeve, and a lookup that ignored the sleeve would let a CNY gold
+    declaration mark the USD ETF book complete.
+    """
     from .journal import get_context
-    return get_context(instrument_ids, as_of=as_of, db_path=database_path(db_path))
+    return get_context(instrument_ids, as_of=as_of, sleeve=sleeve,
+                       db_path=database_path(db_path))
 
 
 def snapshot(snapshot_id: str, *, db_path=None) -> dict:
@@ -301,6 +309,29 @@ def render_evaluation(result: dict, stored: dict) -> str:
     worse than no cause.
     """
     lines = []
+    if result.get("sleeve") == "gold":
+        order = (result.get("orders") or [{}])[0]
+        if order.get("action") == "buy":
+            lines.append("按已采纳规则计算的黄金定投：")
+            lines.append(f"  {order['instrument_id']} 买入 {order['amount_cny']} 元，"
+                         f"约 {order['grams']} 克，按 {order['ask_per_fine_gram']} 元/克")
+            lines.append(f"  报价来源：{order['retail_quote']['merchant']}"
+                         f"{order['retail_quote']['product']}（你本人上报，系统只校验格式与时效）")
+        else:
+            lines.append("研究观点，未给出具体克数（" +
+                         "；".join(order.get("refusals") or order.get("reasons") or ["原因未记录"]) + "）")
+        if (result.get("brake") or {}).get("level", "none") != "none":
+            lines.append(result["brake"]["disclosure"])
+        # All three disclosures travel with the number, never in a document the
+        # reader may not open. The schedule one exists because engine.run
+        # cannot exercise a contribution schedule at all (see the measurement
+        # above Task 5); the waiver one because gold's evidence is ten years
+        # deep and misses 2008.
+        if result.get("schedule_disclosure"):
+            lines.append(result["schedule_disclosure"])
+        if result.get("waived"):
+            lines.append("该规则的准入门槛带有书面豁免，见 ADR-0008")
+        return "\n".join(lines)
     orders = result.get("orders") or []
     suppressed = [o for o in orders if _brake_zeroed(o)]
     if result.get("execution_scope") != "actionable":
@@ -350,9 +381,16 @@ def render_evaluation(result: dict, stored: dict) -> str:
     return "\n".join(lines)
 
 
-def evaluate(*, snapshot_id: str, config_path=None, db_path=None,
+def evaluate(*, snapshot_id: str, sleeve: str = "etf", config_path=None, db_path=None,
             brake: dict | None = None, now=None) -> dict:
     """Run the adopted rule against a stored snapshot and persist every order.
+
+    `sleeve` selects which pointer, which cash figure and whose coverage
+    declaration are read. The two sleeves never share any of the three: the ETF
+    book is USD and the gold book is CNY, and CLAUDE.md forbids adding them
+    without dated FX. A pointer that resolves to an adoption for the OTHER
+    sleeve is refused rather than run, because the only thing that would
+    otherwise catch it is the currency of the numbers it produced.
 
     All orders are validated before any is written. record_recommendation opens
     its own transaction per row, so writing as we go would leave half a basket in
@@ -368,19 +406,41 @@ def evaluate(*, snapshot_id: str, config_path=None, db_path=None,
     from .config import load_config
     from .journal import load_adoption, record_recommendation
     from .policy import evaluate_rule
+    from .journal import COVERAGE_SLEEVES
+    if sleeve not in COVERAGE_SLEEVES:
+        raise ValueError(f"sleeve must be one of {COVERAGE_SLEEVES}, got {sleeve!r}")
     settings = load_config(config_path)
-    pointer = settings.etf.adopted_rule_id
+    section = settings.gold if sleeve == "gold" else settings.etf
+    pointer = section.adopted_rule_id
+    investable = (settings.gold.investable_total_cny if sleeve == "gold"
+                  else settings.etf.investable_cash_usd)
     if not pointer:
-        raise ValueError("no rule is adopted; set etf.adopted_rule_id in config/user.toml to a "
-                         "rule id printed by `backtest_cli.py --adopt`")
+        raise ValueError(f"no rule is adopted; set {sleeve}.adopted_rule_id in config/user.toml "
+                         "to a rule id printed by `backtest_cli.py --adopt`")
     path = database_path(db_path)
     adoption_record = load_adoption(pointer, db_path=path)
+    if adoption_record.get("sleeve") != sleeve:
+        raise ValueError(f"{sleeve}.adopted_rule_id points at {pointer}, whose sleeve is "
+                         f"{adoption_record.get('sleeve')!r}; a pointer must name a rule for "
+                         "its own sleeve, because the two books are different currencies")
     stored = snapshot(snapshot_id, db_path=db_path)
     _verify_brake_evidence(stored, brake)
-    current = context(db_path=db_path)
+    current = context(db_path=db_path, sleeve=sleeve)
+    if sleeve == "gold":
+        # The [gold] account limits live in config, not in the adoption: they
+        # describe the merchant's product (Bank of China 积存金: 1200 CNY
+        # minimum, 200 CNY steps, 10 orders a day), not the backtested rule, and
+        # they change when the user changes banks rather than when the rule
+        # changes. A stored adoption that already carries its own block wins, so
+        # an explicitly-recorded contribution is never silently overwritten.
+        adoption_record = {**adoption_record,
+                           "gold": {"min_order_cny": settings.gold.min_order_cny,
+                                    "order_increment_cny": settings.gold.order_increment_cny,
+                                    "max_orders_per_day": settings.gold.max_orders_per_day,
+                                    "contribution_cny": settings.gold.contribution_cny,
+                                    **(adoption_record.get("gold") or {})}}
     result = evaluate_rule(adoption=adoption_record, snapshot=stored, context=current,
-                           investable_cash=settings.etf.investable_cash_usd,
-                           brake=brake, now=now)
+                           investable_cash=investable, brake=brake, now=now)
     prepared = []
     for order in result["orders"]:
         order["evaluation_id"] = result["evaluation_id"]

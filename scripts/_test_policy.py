@@ -1096,5 +1096,161 @@ class TheGoldSleeveHasItsOwnLimits(unittest.TestCase):
         self.assertEqual(limit_for("single_name", "etf"), 0.25)
 
 
+def gold_engine_fixture(with_quote=False, bars=300):
+    """A GOLD.CNY snapshot evaluate_rule can consume, optionally with a quote."""
+    from copilot.instruments import get_instrument
+    from copilot import retailquote
+    rows = bars_series(count=bars, start=900.0, step=0.15)
+    snapshot = {"schema_version": 1, "created_at": "2026-09-06T01:00:00+00:00",
+                "decision_at": "2026-09-06T01:00:00+00:00",
+                "valid_until": "2026-09-06T12:00:00+00:00", "status": "ready",
+                "instruments": {"GOLD.CNY": {
+                    **get_instrument("GOLD.CNY"), "quality_status": "pass",
+                    "latest_session": rows[-1]["session"],
+                    "expected_session": rows[-1]["session"],
+                    "price": rows[-1]["close"], "indicators": {"sample_count": bars},
+                    "evidence_ids": ["sge"], "issues": [], "sources": ["sge"]}},
+                "evidence": [{"evidence_id": "sge", "provider": "sge",
+                              "upstream": "Shanghai Gold Exchange",
+                              "source_url": "https://www.sge.com.cn/sjzx/quotation_daily_new",
+                              "observed_at": rows[-1]["session"] + "T07:30:00+00:00",
+                              "retrieved_at": "2026-09-06T00:59:00+00:00",
+                              "instrument_id": "GOLD.CNY", "asset_class": "physical_gold",
+                              "currency": "CNY", "unit": "gram",
+                              "price_kind": "sge_au9999_close",
+                              "indicator_basis": "unadjusted_benchmark", "bars": rows,
+                              "latest_session": rows[-1]["session"], "missing_sessions": [],
+                              "status": "ok"}],
+                "issues": []}
+    if not with_quote:
+        return seal(snapshot)
+    quote = retailquote.build(merchant="中国银行", product="积存金",
+                              ask_per_fine_gram=962.5,
+                              observed_at="2026-09-06T01:30:00+00:00")
+    return retailquote.attach(seal(snapshot), quote, now=NOW)
+
+
+class AGoldRuleProducesACnyContribution(unittest.TestCase):
+    """The gold path must never emit shares, and never emit a number the
+    merchant quote does not support."""
+
+    def gold_adoption(self, **overrides):
+        # A REAL rule id: "rule-" plus exactly 16 lowercase hex characters, the
+        # shape journal._RULE_ID and config._RULE_ID_RE both enforce. The plan
+        # drafted "rule-gold0123456789", which is neither 16 characters nor hex,
+        # so _IDENTITY_OR_DATE did not recognise it as an identifier and _claims
+        # read the trailing "0123456789" as an unsupported numerical fact in the
+        # reasons -- every gold order came back data_insufficient, blocked by
+        # its own rule id. Keep this valid.
+        base = {"schema_version": 1, "rule_id": "rule-901d0123456789ab", "sleeve": "gold",
+                "family": "scheduled_accumulation",
+                "parameters": {"interval_days": 21.0, "trend_days": 200.0,
+                               "pause_below_trend": 0.0},
+                "universe": ["GOLD.CNY"], "targets": None,
+                "cost_model": {"per_share_usd": 0.0, "minimum_usd": 0.0,
+                               "max_pct_of_notional": 0.01, "spread_bps": 20.0},
+                "cash_floor_pct": 0.0, "integer_shares": False,
+                "gold": {"min_order_cny": 1200, "order_increment_cny": 200,
+                         "max_orders_per_day": 10, "contribution_cny": 5000.0},
+                "admission": {"admitted": True, "waived": True, "metrics": {"cagr": 0.07}},
+                "waived": True}
+        base.update(overrides)
+        return base
+
+    def test_without_a_retail_quote_the_order_is_research_only(self):
+        from copilot.policy import evaluate_rule
+        result = evaluate_rule(adoption=self.gold_adoption(), snapshot=gold_engine_fixture(),
+                               context=declared_context(base_currency="CNY"),
+                               investable_cash=50000.0, now=NOW)
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertIn("报价", " ".join(result["orders"][0]["reasons"]) + " " +
+                      " ".join(result["orders"][0].get("warnings", [])))
+
+    def test_with_a_quote_it_produces_grams_not_shares(self):
+        from copilot.policy import evaluate_rule
+        result = evaluate_rule(adoption=self.gold_adoption(),
+                               snapshot=gold_engine_fixture(with_quote=True),
+                               context=declared_context(base_currency="CNY"),
+                               investable_cash=50000.0, now=NOW)
+        order = result["orders"][0]
+        self.assertIn("grams", order)
+        self.assertNotIn("quantity", order)
+        self.assertEqual(order["currency"], "CNY")
+
+    def test_the_amount_is_priced_at_the_merchant_ask_not_the_benchmark(self):
+        # The whole reason the gate exists: 947.09 is the SGE benchmark and
+        # 962.5 is what the user can actually buy at.
+        from copilot.policy import evaluate_rule
+        result = evaluate_rule(adoption=self.gold_adoption(),
+                               snapshot=gold_engine_fixture(with_quote=True),
+                               context=declared_context(base_currency="CNY"),
+                               investable_cash=50000.0, now=NOW)
+        self.assertEqual(float(result["orders"][0]["ask_per_fine_gram"]), 962.5)
+
+    def test_monetary_values_are_decimal_strings(self):
+        from copilot.policy import evaluate_rule
+        order = evaluate_rule(adoption=self.gold_adoption(),
+                              snapshot=gold_engine_fixture(with_quote=True),
+                              context=declared_context(base_currency="CNY"),
+                              investable_cash=50000.0, now=NOW)["orders"][0]
+        for field in ("amount_cny", "grams", "held_grams", "target_grams"):
+            self.assertIsInstance(order[field], str, field)
+
+    def test_a_usd_coverage_declaration_does_not_fund_a_cny_sleeve(self):
+        # CLAUDE.md forbids adding USD and CNY without dated FX.
+        from copilot.policy import evaluate_rule
+        result = evaluate_rule(adoption=self.gold_adoption(),
+                               snapshot=gold_engine_fixture(with_quote=True),
+                               context=declared_context(base_currency="USD"),
+                               investable_cash=50000.0, now=NOW)
+        self.assertEqual(result["execution_scope"], "research_only")
+
+    def braked(self, level):
+        from copilot.policy import evaluate_rule
+        return evaluate_rule(adoption=self.gold_adoption(),
+                             snapshot=gold_engine_fixture(with_quote=True),
+                             context=declared_context(base_currency="CNY"),
+                             investable_cash=50000.0, now=NOW,
+                             brake={"level": level, "reason": "issuer halt",
+                                    "evidence_ids": ["sge"]})
+
+    def test_the_brake_halves_the_money_and_re_applies_the_increment(self):
+        # 5000 halved is 2500, which is not a multiple of the 200 CNY step the
+        # merchant sells in. Scaling the RESULT would have produced an order of
+        # 2500 CNY (or 2.5974 g) that no bank accepts; re-planning floors it to
+        # 2400 and recomputes the grams from that.
+        order = self.braked("reduce_50")["orders"][0]
+        self.assertEqual(order["amount_cny"], "2400")
+        self.assertEqual(order["grams"], "2.4935")       # 2400 / 962.5, truncated
+
+    def test_a_skip_brake_leaves_no_gram_figure_at_all(self):
+        result = self.braked("skip")
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertEqual(result["orders"][0]["action"], "hold")
+        self.assertEqual(result["orders"][0]["amount_cny"], "0")
+
+    def test_an_unvalidated_price_pauses_the_sleeve_rather_than_sizing_it(self):
+        from copilot.policy import evaluate_rule
+        snapshot = gold_engine_fixture(with_quote=True)
+        snapshot["instruments"]["GOLD.CNY"]["quality_status"] = "unknown"
+        seal(snapshot)
+        result = evaluate_rule(adoption=self.gold_adoption(), snapshot=snapshot,
+                               context=declared_context(base_currency="CNY"),
+                               investable_cash=50000.0, now=NOW)
+        self.assertEqual(result["blocked_symbols"], ["GOLD.CNY"])
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertNotIn("grams", result["orders"][0])
+
+    def test_an_adoption_mislabelled_gold_is_refused_by_family(self):
+        # sleeve is only a string on a stored record. A basket rule carrying
+        # sleeve "gold" must not reach assess_proposal as a GOLD.CNY proposal.
+        from copilot.policy import evaluate_rule
+        with self.assertRaisesRegex(ValueError, "sleeve"):
+            evaluate_rule(adoption=self.gold_adoption(family="fixed_weight_bands"),
+                          snapshot=gold_engine_fixture(with_quote=True),
+                          context=declared_context(base_currency="CNY"),
+                          investable_cash=50000.0, now=NOW)
+
+
 if __name__ == "__main__":
     unittest.main()

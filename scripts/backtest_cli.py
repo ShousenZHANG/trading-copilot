@@ -28,9 +28,39 @@ force_utf8_stdio()
 
 from copilot.backtest import admission, bxn, engine, history, metrics, rules, universe  # noqa: E402
 from copilot.backtest import frame as frame_mod  # noqa: E402
+from copilot.backtest import goldhistory, goldrules  # noqa: E402
 
 DEFAULT_OUT_DIR = ROOT / "data" / "audit"
 SENSITIVITY_STEP = 0.10
+
+GOLD_FAMILY = "scheduled_accumulation"
+
+#: SGE bid/ask on Au99.99 is a few tenths of a percent; 20 bps is a
+#: conservative round-trip stand-in. No per-share fee exists for a metal bought
+#: by weight, so per_share_usd and minimum_usd are zero. Same figures
+#: _test_ruleset.py adopts a gold rule with, so the CLI and the tests measure
+#: the same strategy.
+GOLD_COST_MODEL = engine.CostModel(per_share_usd=0.0, minimum_usd=0.0,
+                                   max_pct_of_notional=0.01, spread_bps=20.0)
+
+#: The two failures ADR-0008 clause 2 grants a written waiver for. They are
+#: passed only on --adopt: a plain report shows them UNWAIVED, because the point
+#: of the report is to let the reader see what the waiver is covering before
+#: anyone signs it.
+GOLD_WAIVERS = {"span": "ADR-0008 clause 2: SGE Au99.99 history begins 2016-12-19",
+                "stress_2008": "ADR-0008 clause 2: no Chinese gold series covers 2008"}
+
+#: No sensitivity grid is reported for gold, and this says so where the empty
+#: list is read. Two independent reasons: ScheduledAccumulation has no
+#: `with_parameters`, which _evaluate_neighbour needs; and even if it did, the
+#: grid would be meaningless -- engine.run rebalances a one-instrument universe
+#: to weight 1.0, so interval_days 21 and 252 end 3 CNY apart in 360,000
+#: (measured 2026-09-20). A grid of indistinguishable neighbours reads as
+#: "robust across parameters" when the truth is "the engine cannot tell them
+#: apart at all".
+GOLD_SENSITIVITY_NOTE = ("No sensitivity grid: this engine cannot exercise a contribution "
+                         "schedule, so neighbouring intervals are indistinguishable from each "
+                         "other and from buy-and-hold. " + goldrules.DISCLOSURE)
 
 
 def sensitivity_grid(parameters: dict[str, float]) -> list[dict[str, float]]:
@@ -235,6 +265,80 @@ def run_family(frame, rule, *, start_cash: float, cash_floor_pct: float) -> dict
                            "note": SENSITIVITY_NOTE}}
 
 
+def gold_alignment() -> tuple[dict, list[str]]:
+    """The gold sleeve's stand-in for load_universe's alignment block.
+
+    One symbol means nothing can bind the common window or be lost against a
+    longer series, so those fields are the degenerate answers rather than
+    omitted -- a reader comparing two reports should not have to work out
+    whether a missing key means zero or means unmeasured.
+    """
+    meta = goldhistory.provenance()
+    alignment = {"common_first": meta["first_session"], "common_last": meta["last_session"],
+                 "common_bars": meta["row_count"],
+                 "binds_start": goldhistory.SYMBOL, "binds_end": goldhistory.SYMBOL,
+                 "bars_lost_vs_longest": 0}
+    caveats = [f"one vendored source: {meta['upstream']} ({meta['source_url']}), refreshed "
+               f"{meta['refreshed_at']}; akshare and SGEProvider read the same upstream, so "
+               "their agreement is not corroboration",
+               goldrules.DISCLOSURE]
+    return alignment, caveats
+
+
+def run_gold(*, start_cash: float, cash_floor_pct: float, waivers=None) -> dict:
+    """Backtest the gold family over the vendored SGE series.
+
+    Separate from run_family for three reasons, each of which would be a silent
+    wrong answer if the ETF path were reused: the stress table must be SGE's,
+    not XNYS's (admission.stress_sessions_for); shares must be fractional,
+    because gold is bought by weight; and the sensitivity grid cannot run -- see
+    GOLD_SENSITIVITY_NOTE.
+    """
+    frame = goldhistory.load()
+    rule = goldrules.FAMILIES[GOLD_FAMILY]()
+    result = engine.run(frame, rule=rule, start_cash=start_cash,
+                        cost_model=GOLD_COST_MODEL, cash_floor_pct=cash_floor_pct,
+                        integer_shares=False)
+    report = admission.assess(result, sessions_by_year=admission.stress_sessions_for("gold"),
+                              waivers=dict(waivers or {}))
+    return {"rule": rule.name, "parameters": result.parameters,
+            "caveats": [goldrules.DISCLOSURE],
+            "admitted": report.admitted, "waived": report.waived,
+            "waiver_reasons": list(report.waiver_reasons),
+            "failures": report.failures, "metrics": report.metrics,
+            "sensitivity": {"neighbours": [], "max_abs_cagr_delta": None,
+                            "note": GOLD_SENSITIVITY_NOTE}}
+
+
+def adopt_gold_rule(*, start_cash: float, cash_floor_pct: float, db_path=None) -> dict:
+    """Record the gold rule as adopted, carrying ADR-0008's written waivers.
+
+    Here rather than in copilot_cli.py for the reason adopt_rule states: only
+    the process that just ran engine.run holds a Result that still satisfies
+    ruleset.build_adoption's binding.
+    """
+    from copilot import service
+
+    frame = goldhistory.load()
+    rule = goldrules.FAMILIES[GOLD_FAMILY]()
+    result = engine.run(frame, rule=rule, start_cash=start_cash,
+                        cost_model=GOLD_COST_MODEL, cash_floor_pct=cash_floor_pct,
+                        integer_shares=False)
+    cost_model = {"per_share_usd": GOLD_COST_MODEL.per_share_usd,
+                  "minimum_usd": GOLD_COST_MODEL.minimum_usd,
+                  "max_pct_of_notional": GOLD_COST_MODEL.max_pct_of_notional,
+                  "spread_bps": GOLD_COST_MODEL.spread_bps}
+    adoption_inputs = dict(
+        sleeve="gold", family=rule.name, parameters=dict(result.parameters),
+        universe=(goldhistory.SYMBOL,), targets=None, result=result,
+        cost_model=cost_model, cash_floor_pct=cash_floor_pct, integer_shares=False,
+        waivers=GOLD_WAIVERS)
+    receipt = service.adopt(adoption_inputs, db_path=db_path)
+    receipt["next_step"] = (f'set gold.adopted_rule_id = "{receipt["adoption"]["rule_id"]}" in '
+                            "config/user.toml to make this rule live")
+    return receipt
+
+
 def run_income_proxy(*, start_cash: float, cash_floor_pct: float) -> dict:
     frame = bxn.fetch()
     rule = rules.FixedWeightBands({bxn.SYMBOL: 1.0})
@@ -394,7 +498,12 @@ def adopt_rule(symbols: tuple[str, ...], family: str, *, start_cash: float,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--universe", default="")
-    parser.add_argument("--family", default="all", choices=("all", "bands", "invvol", "momentum"))
+    parser.add_argument("--sleeve", choices=("etf", "gold"), default="etf",
+                        help="which sleeve to backtest. 'gold' fixes the universe to GOLD.CNY, "
+                             "reads the vendored SGE Au99.99 series, sizes in fractional grams "
+                             "and judges stress-year coverage on the SGE calendar.")
+    parser.add_argument("--family", default="all",
+                        choices=("all", "bands", "invvol", "momentum", GOLD_FAMILY))
     parser.add_argument("--start-cash", type=float, default=10000.0)
     parser.add_argument("--cash-floor-pct", type=float, default=0.15)
     parser.add_argument("--income-proxy", action="store_true",
@@ -422,6 +531,39 @@ def main(argv: list[str] | None = None) -> int:
     if args.verify_universe:
         override = _parse_universe(args.universe, parser=parser, allow_empty=True)
         return 1 if verify_universe(override or None) else 0
+
+    if args.sleeve == "gold":
+        # Every refusal here is a combination that would otherwise produce a
+        # quietly wrong report rather than an error: an ETF family over a
+        # single metal, a caller-supplied basket for a sleeve whose universe is
+        # fixed by ruleset.build_adoption, or the BXN income proxy (an equity
+        # diagnostic) stapled onto a gold run.
+        if args.family not in ("all", GOLD_FAMILY):
+            parser.error(f"--sleeve gold runs only --family {GOLD_FAMILY} (or 'all'); "
+                         f"{args.family!r} divides a book across N names and gold is one "
+                         "instrument")
+        if args.universe:
+            parser.error("--sleeve gold has a fixed universe (GOLD.CNY); drop --universe")
+        if args.income_proxy:
+            parser.error("--income-proxy is an ETF-sleeve diagnostic and has no gold meaning")
+        if args.adopt:
+            try:
+                receipt = adopt_gold_rule(start_cash=args.start_cash,
+                                          cash_floor_pct=args.cash_floor_pct, db_path=args.db)
+            except ValueError as exc:
+                raise SystemExit(f"cannot adopt this rule: {exc}") from exc
+            print(json.dumps(receipt, indent=2, ensure_ascii=False))
+            return 0
+        alignment, caveats = gold_alignment()
+        payload = {"generated_at": datetime.now(timezone.utc).isoformat(),
+                   "universe": [goldhistory.SYMBOL], "alignment": alignment,
+                   "caveats": caveats,
+                   "families": [run_gold(start_cash=args.start_cash,
+                                         cash_floor_pct=args.cash_floor_pct)]}
+        return _write_report(payload, alignment, caveats, out_dir=Path(args.out_dir))
+
+    if args.family == GOLD_FAMILY:
+        parser.error(f"--family {GOLD_FAMILY} belongs to the gold sleeve; pass --sleeve gold")
     if not args.universe:
         parser.error("--universe is required unless a --verify-* or --self-test flag is given")
 
@@ -449,8 +591,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.income_proxy:
         payload["income_proxy"] = run_income_proxy(start_cash=args.start_cash,
                                                    cash_floor_pct=args.cash_floor_pct)
+    return _write_report(payload, alignment, caveats, out_dir=Path(args.out_dir))
 
-    out_dir = Path(args.out_dir)
+
+def _write_report(payload: dict, alignment: dict, caveats: list, *, out_dir: Path) -> int:
+    """Write the JSON report and print the human summary. Shared by both sleeves.
+
+    Extracted so the gold path prints the same verdict line, the same failure
+    list and the same caveats as the ETF path. A second copy of this would be a
+    second place for a failure to go unprinted.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"backtest-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.json"
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")

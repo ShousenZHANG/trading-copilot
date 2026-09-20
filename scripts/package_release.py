@@ -11,7 +11,10 @@ WHAT IT NEVER SHIPS (security)
 - `.env` (real API keys) — only `.env.example`
 - `data/positions.md`, `data/memory/trading_memory.md`, `data/runs/`,
   `data/decisions/` — personal trading state of the author's instance
-- `.git/`, `reference/` (vendored upstream), build caches, editor configs
+- `.git/`, `reference/` (vendored upstream checkouts), build caches, editor
+  configs — with ONE named exception, `reference/sge-au9999-daily.csv`, the
+  gold sleeve's own price history, which is listed file-by-file in the
+  allow-list below and without which a released install cannot backtest gold
 - `.claude/settings.local.json`, credentials
 
 The allow-list below is explicit: if a path is not listed, it is NOT shipped.
@@ -73,6 +76,13 @@ INCLUDE_PATHS = [
     "evals",
     "data/watchlist.md",
     "data/memory/README.md",
+    # The one file under reference/ that ships. reference/ is otherwise
+    # excluded and must stay excluded -- it holds vendored third-party
+    # checkouts. This CSV is the gold sleeve's price history, and without it
+    # a released install cannot backtest gold at all (goldhistory._lines
+    # raises FileNotFoundError). Named individually so widening the allow-list
+    # to the whole directory stays a deliberate act.
+    "reference/sge-au9999-daily.csv",
     "README.md",
     "README_zh.md",
     "LICENSE",

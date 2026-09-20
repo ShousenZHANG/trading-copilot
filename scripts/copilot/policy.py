@@ -11,6 +11,7 @@ import json
 import math
 import re
 from datetime import date, datetime, timezone
+from decimal import Decimal
 
 POLICY_VERSION = "1.0"
 ACTIONS = {"buy", "hold", "reduce", "sell", "avoid"}
@@ -726,9 +727,10 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
 
     if not isinstance(adoption, dict) or not adoption.get("rule_id"):
         raise ValueError("adoption must be a stored adoption record with a rule_id")
-    if adoption.get("sleeve") != "etf":
-        raise ValueError(f"sleeve must be 'etf'; this adoption says "
-                         f"{adoption.get('sleeve')!r} and no other sleeve has an engine")
+    sleeve = adoption.get("sleeve")
+    if sleeve not in ("etf", "gold"):
+        raise ValueError(f"sleeve must be 'etf' or 'gold'; this adoption says "
+                         f"{sleeve!r} and no other sleeve has an engine")
     context = dict(context or {})
     rule_id = str(adoption["rule_id"])
     universe = tuple(str(s).upper() for s in adoption.get("universe") or [])
@@ -745,6 +747,18 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
         level=str((brake or {}).get("level", "none")),
         reason=str((brake or {}).get("reason", "")),
         evidence_ids=(brake or {}).get("evidence_ids") or [])
+
+    # Placed AFTER the checks above, not at the very top: the adoption shape,
+    # the universe, the snapshot expiry and the brake record are all validated
+    # the same way for both sleeves, and a gold branch jumped to before them
+    # would be the one order path that skips the expiry check. `brake_record`
+    # in particular has to exist first -- _evaluate_gold_rule takes it, and
+    # brake_module.record() is where a non-"none" brake with no reason or no
+    # evidence id is refused.
+    if sleeve == "gold":
+        return _evaluate_gold_rule(adoption=adoption, snapshot=snapshot, context=context,
+                                   investable_cash=investable_cash, now=now,
+                                   brake_record=brake_record)
 
     instruments = snapshot.get("instruments", {})
     blocked = [s for s in universe
@@ -930,3 +944,191 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
         result["cash_plan"] = plan
     result["evaluation_id"] = "eval-" + _digest(result)[:16]
     return result
+
+
+def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, brake_record):
+    """The gold sleeve's own evaluation. Money in CNY, position in grams.
+
+    It does NOT call sizing.plan_orders: that requires weights summing to 1.0
+    across a multi-symbol universe, computes whole shares, and has no concept
+    of an order increment or a daily cap. See goldsizing's docstring.
+
+    It DOES call assess_proposal, exactly as the ETF path does. An earlier
+    draft computed `execution_scope` itself, which was a quiet violation of
+    CLAUDE.md's "every recommendation ... passes assess_investment_proposal" --
+    the gold sleeve would have been the one order path in the system that never
+    met the evidence gate. It only became possible to call it once commit
+    6332799 let a reported merchant quote be cited; before that the gate was a
+    catch-22 and gold was permanently data_insufficient.
+    """
+    from . import brake as brake_module
+    from . import goldsizing
+    from .backtest import goldrules
+
+    rule_id = str(adoption["rule_id"])
+    # An adoption may carry sleeve "gold" and still describe something else:
+    # journal.record_adoption stores whatever build_adoption produced, and
+    # nothing downstream re-reads the family. Without these two refusals a
+    # fixed_weight_bands adoption mislabelled "gold" would reach
+    # assess_proposal as a GOLD.CNY proposal against a snapshot that has no
+    # such instrument, and surface as "instrument is absent from snapshot" --
+    # a message about the snapshot for a fault in the adoption.
+    family = str(adoption.get("family"))
+    if family not in goldrules.FAMILIES:
+        raise ValueError(f"the gold sleeve has no engine for rule family {family!r}; only "
+                         f"{sorted(goldrules.FAMILIES)} accumulate a single metal position")
+    universe = [str(s).upper() for s in adoption.get("universe") or []]
+    if universe != [goldsizing.SYMBOL]:
+        raise ValueError(f"the gold sleeve trades exactly [{goldsizing.SYMBOL!r}], and this "
+                         f"adoption names {universe}")
+
+    instrument = snapshot.get("instruments", {}).get(goldsizing.SYMBOL)
+    settings = dict(adoption.get("gold") or {})
+    blocked = [] if instrument and instrument.get("quality_status") == "pass" else [goldsizing.SYMBOL]
+
+    # A CNY sleeve needs a CNY declaration. CLAUDE.md forbids adding USD and
+    # CNY without dated FX, so a USD declaration cannot fund this book even
+    # though it is "complete".
+    coverage_known = (context.get("portfolio_complete") is True
+                      and str(context.get("base_currency")) == "CNY")
+
+    quote_record = next((e for e in snapshot.get("evidence", [])
+                         if e.get("retail_quote")
+                         and e.get("instrument_id") == goldsizing.SYMBOL), None)
+
+    item = {"instrument_id": goldsizing.SYMBOL, "action": "hold", "mode": "accumulation",
+            "horizon": "long_term", "conditions": [],
+            # The quote record is deliberately NOT cited here. retailquote.attach
+            # keeps it out of instrument["evidence_ids"] (see its comment), so it
+            # is not market evidence; it is added below only on a real buy, which
+            # is the one case the retail gate needs it cited for.
+            "evidence_ids": [e["evidence_id"] for e in snapshot.get("evidence", [])
+                             if e.get("instrument_id") == goldsizing.SYMBOL
+                             and not e.get("retail_quote")]}
+    plan = None
+
+    if blocked:
+        item["reasons"] = [f"adopted rule {rule_id} paused: GOLD.CNY has no validated price"]
+    elif not coverage_known:
+        item["reasons"] = [f"adopted rule {rule_id} produced a research view only; a CNY "
+                           "holdings coverage declaration is required to size a gold order"]
+    elif quote_record is None:
+        item["reasons"] = [f"adopted rule {rule_id} produced a research view only; "
+                           "缺少商家报价（上金所基准价不是可成交价）"]
+    else:
+        quote = quote_record["retail_quote"]
+        held_grams = sum(float(h.get("quantity", 0.0)) for h in (context.get("holdings") or [])
+                         if h.get("instrument_id") == goldsizing.SYMBOL)
+        sized = dict(ask_per_fine_gram=float(quote["ask_per_fine_gram"]),
+                     investable_total_cny=float(investable_cash), held_grams=held_grams,
+                     min_order_cny=int(settings.get("min_order_cny", 1200)),
+                     order_increment_cny=int(settings.get("order_increment_cny", 200)),
+                     orders_today=int(context.get("gold_orders_today", 0)),
+                     max_orders_per_day=int(settings.get("max_orders_per_day", 10)))
+        plan = goldsizing.plan_contribution(
+            **sized, contribution_cny=float(settings.get("contribution_cny", 0.0)))
+
+        # The brake only ever reduces, and it halves the MONEY rather than the
+        # grams: an increment-respecting half of the contribution is still a
+        # buyable order, whereas half the grams is not a figure the merchant
+        # sells in. Re-planning rather than scaling the result keeps the
+        # minimum and the increment enforced on the braked amount too.
+        if plan["action"] == "buy" and brake_record.get("level", "none") != "none":
+            halved = brake_module.apply(level=brake_record["level"],
+                                        quantity=int(Decimal(plan["amount_cny"])))
+            plan = goldsizing.plan_contribution(**sized, contribution_cny=float(halved))
+
+        # plan["reasons"] and plan["refusals"] are deliberately NOT folded into
+        # item["reasons"]. _claims re-reads every number appearing in a
+        # proposal's reasons and demands a matching verified claim for it, and
+        # the sizing prose is made of numbers ("5000 CNY at 962.5 CNY per fine
+        # gram"). No such claim can exist: the engine computed the 5000, and the
+        # 962.5 comes from a reported merchant quote _claims refuses outright
+        # ("citable, never claimable" -- see its own comment). Folding them in
+        # made EVERY gold order data_insufficient, blocked by its own
+        # explanation. They reach the reader on the decision instead, as
+        # sizing_reasons and refusals, which the gold render block prints.
+        if plan["action"] == "buy":
+            item["reasons"] = [f"adopted rule {rule_id} produced this contribution"]
+            item.update(action="buy", price=float(quote["ask_per_fine_gram"]),
+                        retail_quote=quote)
+            item["evidence_ids"] = item["evidence_ids"] + [quote_record["evidence_id"]]
+        else:
+            item["reasons"] = [f"adopted rule {rule_id} sized no contribution this cycle"]
+
+    proposal_context = {**context, "snapshot_id": snapshot["snapshot_id"],
+                        "risk_proposal_fingerprint": proposal_fingerprint(item),
+                        "verified_risk_inputs": _gold_risk_inputs(context, plan)}
+    decision = assess_proposal(item, snapshot, proposal_context, now=now, source="engine")
+    decision["rule_id"] = rule_id
+    decision["sleeve"] = "gold"
+    decision["currency"] = "CNY"
+    decision["brake"] = dict(brake_record)
+    decision["schedule_disclosure"] = adoption.get("schedule_disclosure")
+    if plan is not None:
+        for field in ("amount_cny", "grams", "held_grams", "target_grams",
+                      "ask_per_fine_gram", "refusals"):
+            decision[field] = plan[field]
+        decision["sizing_reasons"] = list(plan["reasons"])
+    # The merchant and product the rendered message names come from here.
+    # assess_proposal VALIDATES `retail_quote` on the proposal but copies only
+    # price/quantity/target_weight/stop_loss onto the decision, so without this
+    # the renderer raised KeyError on the single field that distinguishes a
+    # merchant's ask from the exchange benchmark. Gated on the ASSESSED action,
+    # not the plan's: a decision the gate downgraded must not carry a quote it
+    # was not allowed to act on.
+    if decision["action"] == "buy" and item.get("retail_quote"):
+        decision["retail_quote"] = item["retail_quote"]
+
+    return {"schema_version": 1, "rule_id": rule_id, "sleeve": "gold",
+            "snapshot_id": snapshot.get("snapshot_id"), "orders": [decision],
+            "blocked_symbols": blocked, "coverage_known": coverage_known,
+            "rebalance_due": bool(plan and plan["action"] == "buy"),
+            # Read off the decision rather than recomputed. assess_proposal is
+            # the only thing entitled to say a gold order is actionable, and
+            # `.get` defaults to research_only so a future assess_proposal that
+            # stopped emitting the key would fail closed.
+            "execution_scope": decision.get("execution_scope", "research_only"),
+            "brake": dict(brake_record), "waived": bool(adoption.get("waived")),
+            "schedule_disclosure": adoption.get("schedule_disclosure"),
+            "admitted_metrics": dict(adoption.get("admission", {}).get("metrics", {})),
+            # service.evaluate stamps this onto every order before recording it,
+            # so a gold result without it raises a KeyError out of the facade
+            # rather than the engine -- far from the omission.
+            "evaluation_session": (instrument or {}).get("latest_session"),
+            "evaluation_id": "eval-" + _digest({"rule_id": rule_id, "plan": plan,
+                                                "snapshot_id": snapshot.get("snapshot_id")})[:16]}
+
+
+def _gold_risk_inputs(context, plan) -> dict:
+    """Only drawdown is measurable for a one-instrument sleeve.
+
+    The other four limits are exempt for gold (policy._SLEEVE_EXEMPT keyed
+    "physical_gold"), so supplying figures for them would be inventing numbers
+    nothing measured. Drawdown comes from the same recommendation history the
+    ETF path uses, read forwards -- see the comment above `prior` in
+    evaluate_rule for why the ordering is load-bearing.
+    """
+    from . import riskinputs
+
+    prior = [r for r in reversed(context.get("recommendations") or [])
+             if isinstance(r.get("portfolio_total_value"), (int, float))
+             and not isinstance(r.get("portfolio_total_value"), bool)]
+    if all(str(r.get("created_at") or "") for r in prior):
+        prior.sort(key=lambda r: str(r["created_at"]))
+    history = [float(r["portfolio_total_value"]) for r in prior]
+    if plan is not None:
+        history.append(float(Decimal(plan["held_grams"]) * Decimal(plan["ask_per_fine_gram"])
+                             + Decimal(plan["amount_cny"])))
+    # portfolio_drawdown drops non-positive observations itself and then RAISES
+    # if nothing positive is left -- rightly, since a book worth 0 has no peak
+    # to have fallen from. A refused contribution on an empty position values
+    # this book at exactly 0, so the plan's `if not history` guard was not
+    # enough: every refusal (below the minimum, daily cap reached, out of
+    # budget) with no prior recommendations crashed the whole evaluation out of
+    # the facade. Returning {} instead leaves drawdown "unknown", which is what
+    # it is, and unknown already forecloses an actionable order.
+    if not any(math.isfinite(v) and v > 0 for v in history):
+        return {}
+    drawdown, samples = riskinputs.portfolio_drawdown(history)
+    return {"drawdown": drawdown, "drawdown_sample_count": samples}

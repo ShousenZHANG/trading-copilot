@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from copilot import journal, service
-from _test_policy import NOW, bands_adoption, engine_fixture, fixture, proposal, seal
+from _test_policy import (NOW, bands_adoption, engine_fixture, fixture, gold_engine_fixture,
+                          proposal, seal)
 from _test_ruleset import admitted_result
 
 class ServiceTests(unittest.TestCase):
@@ -449,6 +450,151 @@ class TheRenderedMessageAccountsForEveryOrder(unittest.TestCase):
             execution_scope="research_only", coverage_known=False))
         self.assertIn("规则未触发再平衡", rendered(
             execution_scope="research_only", rebalance_due=False))
+
+
+GOLD_RULE_ID = "rule-901d0123456789ab"
+
+GOLD_ADOPTION = {
+    "schema_version": 1, "rule_id": GOLD_RULE_ID, "sleeve": "gold",
+    "family": "scheduled_accumulation",
+    "parameters": {"interval_days": 21.0, "trend_days": 200.0, "pause_below_trend": 0.0},
+    "universe": ["GOLD.CNY"], "targets": None,
+    "cost_model": {"per_share_usd": 0.0, "minimum_usd": 0.0,
+                   "max_pct_of_notional": 0.01, "spread_bps": 20.0},
+    "cash_floor_pct": 0.0, "integer_shares": False,
+    "admission": {"admitted": True, "waived": True, "metrics": {"cagr": 0.07}},
+    "waived": True,
+    "schedule_disclosure": "定投节奏未回测：回测只证明这十年持有黄金的表现，不证明任何投入节奏更优",
+}
+
+
+class TheGoldSleeveIsReachableFromTheSharedFacade(unittest.TestCase):
+    """service.evaluate(sleeve="gold"), end to end, through the real journal.
+
+    Every assertion reads what the facade RETURNED. The lesson these exist for:
+    a previous task shipped four risk exemptions that did nothing for a week
+    because its tests inspected the table instead of running a proposal through
+    it. Nothing here looks at a dict the test itself built.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.db = Path(self.temp.name) / "copilot.sqlite"
+        self.snapshot = gold_engine_fixture()
+        journal.save_snapshot(self.snapshot, db_path=self.db)
+        journal.record_adoption(GOLD_ADOPTION, db_path=self.db)
+
+    def config(self, *, gold_pointer=GOLD_RULE_ID, contribution=5000, etf_pointer=""):
+        text = ("schema_version = 1\n\n"
+                "[etf]\n"
+                f'adopted_rule_id = "{etf_pointer}"\n'
+                "investable_cash_usd = 20000.0\n"
+                "min_cash_reserve_pct = 0.6\n"
+                "max_drawdown_pct = 0.2\n\n"
+                "[gold]\n"
+                "investable_total_cny = 50000\n"
+                "min_order_cny = 1200\n"
+                "order_increment_cny = 200\n"
+                "max_orders_per_day = 10\n"
+                f"contribution_cny = {contribution}\n"
+                f'adopted_rule_id = "{gold_pointer}"\n\n'
+                "[notify]\n"
+                'email_to = ""\n'
+                'timezone = "UTC"\n'
+                'scan_time_local = "07:00"\n'
+                'language = "zh"\n')
+        path = Path(self.temp.name) / f"gold-config-{abs(hash((gold_pointer, contribution, etf_pointer)))}.toml"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def declare(self, *, sleeve="gold", currency="CNY"):
+        version = service.context(db_path=self.db, sleeve=sleeve)["portfolio_version"]
+        journal.record_coverage_declaration(sleeve=sleeve, base_currency=currency,
+                                            portfolio_version=version, db_path=self.db)
+
+    def quoted_snapshot(self):
+        captured = service.capture_retail_quote(
+            snapshot_id=self.snapshot["snapshot_id"], merchant="中国银行", product="积存金",
+            ask_per_fine_gram=962.5, observed_at="2026-09-06T01:30:00+00:00",
+            db_path=self.db, now=NOW)
+        return captured["snapshot_id"]
+
+    def evaluate(self, snapshot_id, **overrides):
+        return service.evaluate(snapshot_id=snapshot_id, sleeve="gold",
+                                config_path=self.config(**overrides), db_path=self.db,
+                                now=NOW)
+
+    def test_a_declared_cny_book_and_a_quote_produce_a_gram_figure(self):
+        self.declare()
+        result = self.evaluate(self.quoted_snapshot())
+        self.assertEqual(result["execution_scope"], "actionable")
+        order = result["orders"][0]
+        self.assertEqual(order["amount_cny"], "5000")
+        self.assertEqual(order["grams"], "5.1948")      # 5000 / 962.5, truncated
+        self.assertNotIn("quantity", order)
+
+    def test_the_rendered_message_carries_the_merchant_and_both_disclosures(self):
+        self.declare()
+        message = self.evaluate(self.quoted_snapshot())["message"]
+        self.assertIn("5.1948", message)
+        self.assertIn("中国银行", message)
+        self.assertIn("你本人上报", message)
+        self.assertIn("未回测", message)                 # the schedule disclosure
+        self.assertIn("ADR-0008", message)              # the admission waiver
+
+    def test_every_gold_order_is_persisted_under_its_evaluation_id(self):
+        self.declare()
+        result = self.evaluate(self.quoted_snapshot())
+        stored = service.context(db_path=self.db, sleeve="gold")["recommendations"]
+        matching = [r for r in stored if r.get("evaluation_id") == result["evaluation_id"]]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["instrument_id"], "GOLD.CNY")
+
+    def test_without_a_quote_the_facade_returns_a_research_view(self):
+        self.declare()
+        result = self.evaluate(self.snapshot["snapshot_id"])
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertIn("报价", result["message"])
+        self.assertNotIn("grams", result["orders"][0])
+
+    def test_a_usd_declaration_does_not_fund_the_cny_sleeve(self):
+        # The etf sleeve is declared complete in USD and gold is not declared at
+        # all. CLAUDE.md forbids adding USD and CNY without dated FX, so the
+        # gold book stays unfunded however complete the ETF book is.
+        self.declare(sleeve="etf", currency="USD")
+        result = self.evaluate(self.quoted_snapshot())
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertFalse(result["coverage_known"])
+
+    def test_a_gold_declaration_in_usd_still_does_not_fund_it(self):
+        # journal.record_coverage_declaration accepts any (sleeve, currency)
+        # pair from its two tuples, so this row is storable. The refusal has to
+        # come from the engine reading base_currency, and this is what proves
+        # it does.
+        self.declare(sleeve="gold", currency="USD")
+        result = self.evaluate(self.quoted_snapshot())
+        self.assertEqual(result["execution_scope"], "research_only")
+
+    def test_a_contribution_below_the_minimum_is_a_refusal_not_an_error(self):
+        self.declare()
+        result = self.evaluate(self.quoted_snapshot(), contribution=800)
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertEqual(result["orders"][0]["action"], "hold")
+        self.assertTrue(result["orders"][0]["refusals"])
+        self.assertIn("min_order_cny", " ".join(result["orders"][0]["refusals"]))
+
+    def test_the_gold_pointer_may_not_name_an_etf_rule(self):
+        # The two books are different currencies, so a crossed pointer would
+        # size a USD basket against investable_total_cny with nothing saying so.
+        journal.record_adoption(bands_adoption(rule_id="rule-00000000000000ff"), db_path=self.db)
+        self.declare()
+        with self.assertRaisesRegex(ValueError, "sleeve"):
+            self.evaluate(self.quoted_snapshot(), gold_pointer="rule-00000000000000ff")
+
+    def test_an_unadopted_gold_sleeve_names_its_own_pointer(self):
+        with self.assertRaisesRegex(ValueError, "gold.adopted_rule_id"):
+            self.evaluate(self.snapshot["snapshot_id"], gold_pointer="")
 
 
 if __name__ == "__main__":

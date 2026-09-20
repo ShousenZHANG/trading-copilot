@@ -72,18 +72,37 @@ def get_data_capabilities() -> dict:
 
 
 @mcp.tool()
-def declare_holdings_coverage(base_currency: str = "USD") -> dict:
+def declare_holdings_coverage(base_currency: str = "USD", sleeve: str = "etf") -> dict:
     """Record that the user has confirmed their recorded holdings are complete.
 
     Call this only when the user has explicitly said so. It is their assertion,
     not an inference from what happens to be recorded. Any later trade
     invalidates it and it must be made again.
+
+    A declaration covers ONE sleeve in ONE currency and never crosses: "etf" is
+    the USD book, "gold" the CNY book. Declaring USD coverage does not let a
+    gold order be sized, and declaring gold coverage says nothing about the ETFs.
     """
-    return service.declare_coverage(base_currency=base_currency)
+    return service.declare_coverage(sleeve=sleeve, base_currency=base_currency)
 
 
 @mcp.tool()
-def evaluate_adopted_rule(snapshot_id: str, brake_level: str = "none",
+def record_retail_gold_quote(snapshot_id: str, merchant: str, product: str,
+                             ask_per_fine_gram: float, observed_at: str) -> dict:
+    """Attach a merchant gold ask YOU observed to a stored snapshot.
+
+    The Shanghai Gold Exchange benchmark is not a price anyone can buy at, so a
+    gold order cannot be sized without this. The system validates the shape and
+    the freshness of what you report; it does not and cannot verify the price.
+    `observed_at` must be ISO-8601 with a timezone offset and within 24 hours.
+    """
+    return service.capture_retail_quote(
+        snapshot_id=snapshot_id, merchant=merchant, product=product,
+        ask_per_fine_gram=ask_per_fine_gram, observed_at=observed_at)
+
+
+@mcp.tool()
+def evaluate_adopted_rule(snapshot_id: str, sleeve: str = "etf", brake_level: str = "none",
                           brake_reason: str = "",
                           brake_evidence_ids: list[str] | None = None) -> dict:
     """Run the adopted rule against a stored snapshot. The engine computes every number.
@@ -94,8 +113,13 @@ def evaluate_adopted_rule(snapshot_id: str, brake_level: str = "none",
     a stated reason and at least one news evidence id from the snapshot, and is
     reported as not backtested. Report the engine's orders, never your own
     figures.
+
+    `sleeve` picks which adopted rule runs: "etf" (USD, whole shares) or "gold"
+    (CNY, grams of Au99.99). A gold evaluation additionally needs a CNY coverage
+    declaration and a merchant quote recorded by record_retail_gold_quote;
+    without either it returns a research view with no gram figure.
     """
-    return service.evaluate(snapshot_id=snapshot_id,
+    return service.evaluate(snapshot_id=snapshot_id, sleeve=sleeve,
                             brake={"level": brake_level, "reason": brake_reason,
                                    "evidence_ids": brake_evidence_ids or []})
 

@@ -47,7 +47,18 @@ def main() -> int:
     backup.add_argument("destination")
     show = sub.add_parser("config", help="print validated config/user.toml as JSON")
     show.add_argument("--path", default=None)
-    sub.add_parser("declare-coverage", help="record that recorded holdings are complete")
+    coverage_cmd = sub.add_parser("declare-coverage",
+                                  help="record that recorded holdings are complete")
+    coverage_cmd.add_argument("--sleeve", choices=("etf", "gold"), default="etf",
+                              help="which book this declaration covers; the base currency "
+                                   "follows from it (etf USD, gold CNY) and never crosses")
+    quote_cmd = sub.add_parser("record-quote", help="attach a merchant gold quote you observed")
+    quote_cmd.add_argument("snapshot_id")
+    quote_cmd.add_argument("--merchant", required=True)
+    quote_cmd.add_argument("--product", required=True)
+    quote_cmd.add_argument("--ask-per-fine-gram", type=float, required=True)
+    quote_cmd.add_argument("--observed-at", required=True,
+                           help="ISO-8601 with a timezone offset, e.g. 2026-09-20T10:15:00+08:00")
     adopt_cmd = sub.add_parser(
         "adopt",
         help="print a stored adoption; read-only. Recording a NEW adoption is done by "
@@ -60,6 +71,9 @@ def main() -> int:
     adopt_cmd.add_argument("rule_id")
     evaluate_cmd = sub.add_parser("evaluate", help="run the adopted rule against a snapshot")
     evaluate_cmd.add_argument("snapshot_id")
+    evaluate_cmd.add_argument("--sleeve", choices=("etf", "gold"), default="etf",
+                              help="which sleeve's adopted_rule_id to run: etf (USD, whole "
+                                   "shares) or gold (CNY, grams of Au99.99)")
     evaluate_cmd.add_argument("--brake-level", choices=("none", "reduce_50", "skip"),
                               default="none")
     evaluate_cmd.add_argument("--brake-reason", default="")
@@ -82,11 +96,24 @@ def main() -> int:
             from copilot.config import as_dict, load_config
             result = as_dict(load_config(args.path))
         elif args.command == "declare-coverage":
-            result = service.declare_coverage(db_path=args.db)
+            # The currency follows from the sleeve rather than being a second
+            # flag. There is exactly one currency per book -- the ETF sleeve is
+            # USD and the gold sleeve is CNY -- and a declaration naming the
+            # other one would be recorded happily by the journal and then fail
+            # to fund anything, with nothing saying why.
+            result = service.declare_coverage(
+                sleeve=args.sleeve, base_currency={"etf": "USD", "gold": "CNY"}[args.sleeve],
+                db_path=args.db)
+        elif args.command == "record-quote":
+            result = service.capture_retail_quote(
+                snapshot_id=args.snapshot_id, merchant=args.merchant, product=args.product,
+                ask_per_fine_gram=args.ask_per_fine_gram, observed_at=args.observed_at,
+                db_path=args.db)
         elif args.command == "adopt":
             result = service.adoption(args.rule_id, db_path=args.db)
         elif args.command == "evaluate":
-            result = service.evaluate(snapshot_id=args.snapshot_id, db_path=args.db,
+            result = service.evaluate(snapshot_id=args.snapshot_id, sleeve=args.sleeve,
+                                      db_path=args.db,
                                       brake={"level": args.brake_level,
                                              "reason": args.brake_reason,
                                              "evidence_ids": args.brake_evidence_id})

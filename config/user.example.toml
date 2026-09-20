@@ -26,6 +26,15 @@ investable_total_cny = 0
 min_order_cny = 1200
 order_increment_cny = 200
 max_orders_per_day = 10
+# What one scheduled contribution spends, in CNY. The adopted rule decides WHEN
+# to add; how much is yours, because no backtest here can exercise a
+# contribution schedule (see docs/adr/0008). 0 means nothing is sized.
+contribution_cny = 0
+# The gold sleeve's own pointer, read by `copilot_cli.py evaluate --sleeve gold`.
+# Recorded by `backtest_cli.py --sleeve gold --family scheduled_accumulation --adopt`.
+# Separate from etf.adopted_rule_id on purpose: the two books are different
+# currencies and a pointer must never cross between them.
+adopted_rule_id = ""
 
 [notify]
 email_to = ""

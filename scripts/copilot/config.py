@@ -40,6 +40,18 @@ class GoldConfig:
     min_order_cny: int = 1200
     order_increment_cny: int = 200
     max_orders_per_day: int = 10
+    # What one scheduled contribution spends. The rule decides WHEN to add; the
+    # engine cannot decide how much, because a contribution schedule is not
+    # something engine.run can exercise (see the measurement above Task 5 of the
+    # gold-sleeve plan), so this is the user's figure, set by hand like
+    # etf.investable_cash_usd. 0 means "size nothing", which goldsizing reports
+    # as an ordinary refusal rather than an error.
+    contribution_cny: float = 0.0
+    # The gold sleeve's own pointer, mirroring etf.adopted_rule_id. Without it
+    # `--sleeve gold` had no rule to run and the flag would have been a facade
+    # over nothing; pointing the ETF pointer at a gold adoption is refused in
+    # service.evaluate, because the two books are separate currencies.
+    adopted_rule_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -118,11 +130,24 @@ def _etf(section: dict) -> EtfConfig:
 
 
 def _gold(section: dict) -> GoldConfig:
+    # The two keys below are read with a default rather than demanded, because
+    # every config/user.toml written before the gold sleeve existed has a
+    # [gold] section without them. Requiring them would turn a routine upgrade
+    # into "missing gold.contribution_cny" on the next command.
+    adopted = section.get("adopted_rule_id", "")
+    if not isinstance(adopted, str):
+        raise ValueError("gold.adopted_rule_id must be a string")
+    if adopted and not _RULE_ID_RE.match(adopted):
+        raise ValueError(f"gold.adopted_rule_id must be empty or look like "
+                         f"rule-<16 lowercase hex characters>, got {adopted!r}")
     return GoldConfig(
         investable_total_cny=_number(section, "investable_total_cny", "gold", low=0, high=1e9),
         min_order_cny=_number(section, "min_order_cny", "gold", low=1, high=1e7, integer=True),
         order_increment_cny=_number(section, "order_increment_cny", "gold", low=1, high=1e6, integer=True),
         max_orders_per_day=_number(section, "max_orders_per_day", "gold", low=1, high=100, integer=True),
+        contribution_cny=_number({**section, "contribution_cny": section.get("contribution_cny", 0)},
+                                 "contribution_cny", "gold", low=0, high=1e7),
+        adopted_rule_id=adopted,
     )
 
 
