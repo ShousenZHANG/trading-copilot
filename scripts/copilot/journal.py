@@ -120,6 +120,13 @@ CREATE TABLE IF NOT EXISTS recommendations (
     recorded_at TEXT NOT NULL,
     payload TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS coverage_declarations (
+    declaration_id TEXT PRIMARY KEY,
+    sleeve TEXT NOT NULL,
+    base_currency TEXT NOT NULL,
+    portfolio_version TEXT NOT NULL,
+    declared_at TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON journal_events
 BEGIN SELECT RAISE(ABORT, 'journal events are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON journal_events
@@ -132,6 +139,10 @@ CREATE TRIGGER IF NOT EXISTS recommendations_no_update BEFORE UPDATE ON recommen
 BEGIN SELECT RAISE(ABORT, 'recommendations are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS recommendations_no_delete BEFORE DELETE ON recommendations
 BEGIN SELECT RAISE(ABORT, 'recommendations are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_no_update BEFORE UPDATE ON coverage_declarations
+BEGIN SELECT RAISE(ABORT, 'coverage declarations are immutable; declare again instead'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_no_delete BEFORE DELETE ON coverage_declarations
+BEGIN SELECT RAISE(ABORT, 'coverage declarations are immutable; declare again instead'); END;
 """
 
 
@@ -473,7 +484,19 @@ def get_context(instrument_ids: Any = None, as_of: Any = None, *, db_path: Any =
             query += " ORDER BY recorded_at DESC, decision_id"
             decisions = [json.loads(row[0]) for row in connection.execute(query, params).fetchall()]
             decisions = [dict(item, portfolio_current=item.get("portfolio_version") == portfolio_version) for item in decisions if not instruments or item.get("instrument_id") in instruments]
-            result = {"portfolio_version": portfolio_version, "portfolio_complete": False, "completeness": "unknown", "base_currency": None, "fx_status": "unknown", "portfolio_value": None, "holdings": holdings, "holdings_by_currency": {currency: [item for item in holdings if item["currency"] == currency] for currency in sorted({item["currency"] for item in holdings})}, "pending_operations": [state for state in matching if state["status"] in {"pending", "pending_duplicate"}], "intents": [state for state in matching if state["status"] == "intent"], "operations": matching, "recommendations": decisions, "as_of": _stamp(as_of, end_of_day=True) if as_of is not None else None}
+            # Coverage is a user declaration bound to a portfolio_version. Any
+            # executed trade changes that version, so a declaration made before
+            # it is reported as stale rather than silently honoured.
+            declared = connection.execute(
+                "SELECT base_currency, portfolio_version FROM coverage_declarations "
+                "ORDER BY declared_at DESC, declaration_id LIMIT 1").fetchone()
+            if declared and declared[1] == portfolio_version:
+                complete, completeness, base_currency = True, "declared", declared[0]
+            elif declared:
+                complete, completeness, base_currency = False, "stale_declaration", None
+            else:
+                complete, completeness, base_currency = False, "unknown", None
+            result = {"portfolio_version": portfolio_version, "portfolio_complete": complete, "completeness": completeness, "base_currency": base_currency, "fx_status": "unknown", "portfolio_value": None, "holdings": holdings, "holdings_by_currency": {currency: [item for item in holdings if item["currency"] == currency] for currency in sorted({item["currency"] for item in holdings})}, "pending_operations": [state for state in matching if state["status"] in {"pending", "pending_duplicate"}], "intents": [state for state in matching if state["status"] == "intent"], "operations": matching, "recommendations": decisions, "as_of": _stamp(as_of, end_of_day=True) if as_of is not None else None}
             connection.execute("COMMIT")
             return result
         except BaseException:
@@ -524,6 +547,66 @@ def record_recommendation(decision: dict, *, db_path: Any = None) -> dict:
                 raise ValueError("save the referenced evidence snapshot before recording a recommendation")
             connection.execute("INSERT OR IGNORE INTO recommendations VALUES (?,?,?,?)", (decision_id, payload["snapshot_id"], _stamp(), serialized))
         return {"decision_id": decision_id, "recorded": True, "replayed": bool(previous)}
+
+
+COVERAGE_SLEEVES = ("etf",)
+#: One currency per declaration. A mixed-currency sleeve has no single total to
+#: size against, and CLAUDE.md already forbids adding USD and CNY without dated
+#: FX and a declared base currency.
+COVERAGE_CURRENCIES = ("USD",)
+
+
+def record_coverage_declaration(*, sleeve: str, base_currency: str,
+                                portfolio_version: str, db_path: Any = None) -> dict:
+    """Record the user's assertion that a sleeve's holdings are fully recorded.
+
+    This does not change holdings, so it is not an operation: it states that
+    what has already been recorded is everything. It is bound to the
+    portfolio_version current at declaration time, and _portfolio_version hashes
+    the executed operations, so recording any trade afterwards makes the
+    declaration no longer current. A declaration therefore cannot go stale
+    silently -- the failure mode is "coverage unknown again", not "sized against
+    a book that moved".
+
+    A declaration that does not match the current version is refused rather
+    than stored, so the table never holds a claim that was wrong when made.
+    """
+    if sleeve not in COVERAGE_SLEEVES:
+        raise ValueError(f"sleeve must be one of {COVERAGE_SLEEVES}, got {sleeve!r}")
+    if base_currency not in COVERAGE_CURRENCIES:
+        raise ValueError(f"base_currency must be one of {COVERAGE_CURRENCIES}, "
+                         f"got {base_currency!r}")
+    if not isinstance(portfolio_version, str) or not portfolio_version:
+        raise ValueError("portfolio_version must be a nonempty string")
+    with _connection(db_path) as connection:
+        with _transaction(connection):
+            current = _portfolio_version(_states(connection))
+            if portfolio_version != current:
+                raise JournalConflict(
+                    "portfolio_version does not match the current holdings; read the "
+                    "current context and declare against that version")
+            declared_at = _stamp()
+            declaration_id = "coverage-" + _hash(
+                {"sleeve": sleeve, "base_currency": base_currency,
+                 "portfolio_version": portfolio_version, "declared_at": declared_at})
+            connection.execute("INSERT OR IGNORE INTO coverage_declarations VALUES (?,?,?,?,?)",
+                               (declaration_id, sleeve, base_currency, portfolio_version,
+                                declared_at))
+        return {"declaration_id": declaration_id, "sleeve": sleeve,
+                "base_currency": base_currency, "portfolio_version": portfolio_version,
+                "declared_at": declared_at, "recorded": True}
+
+
+def coverage_history(*, db_path: Any = None) -> list[dict]:
+    """Every declaration, newest first, each flagged with whether it is current."""
+    with _connection(db_path) as connection:
+        current = _portfolio_version(_states(connection))
+        rows = connection.execute(
+            "SELECT declaration_id, sleeve, base_currency, portfolio_version, declared_at "
+            "FROM coverage_declarations ORDER BY declared_at DESC, declaration_id").fetchall()
+        return [{"declaration_id": row[0], "sleeve": row[1], "base_currency": row[2],
+                 "portfolio_version": row[3], "declared_at": row[4],
+                 "current": row[3] == current} for row in rows]
 
 
 def _load(table: str, key: str, value: str, db_path: Any) -> dict:
