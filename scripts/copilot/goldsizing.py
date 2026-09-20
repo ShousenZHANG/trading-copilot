@@ -70,7 +70,16 @@ def plan_contribution(*, ask_per_fine_gram: float, investable_total_cny: float,
     refusals: list[str] = []
     reasons: list[str] = []
 
-    held_value = (held * ask).quantize(CNY_PLACES, rounding=ROUND_DOWN)
+    # held_value is NOT quantized. Flooring it understates what is already in
+    # metal, which raises `remaining` by up to a yuan -- and that fraction is
+    # enough to clear a whole 200-CNY step, so the contribution came out one
+    # increment LARGER than exact arithmetic allows and the total crept past
+    # the budget. Measured: 42.1053 g at 950 is 40,000.035, floored to 40,000,
+    # leaving "10,000" of a 50,000 budget instead of 9,999.965 -- a 10,000 CNY
+    # order against a true headroom of 9,800, and 50,000.035 committed in all.
+    # Trivial in money, but it made this module's own "nothing here ever rounds
+    # up" false, and a nearly-true invariant is the kind that bites later.
+    held_value = held * ask
     remaining = budget - held_value
     if remaining < 0:
         remaining = Decimal(0)
@@ -78,12 +87,20 @@ def plan_contribution(*, ask_per_fine_gram: float, investable_total_cny: float,
     amount = wanted
     if amount > remaining:
         amount = remaining
-        reasons.append(f"trimmed to the remaining budget {remaining} CNY "
-                       f"(investable_total_cny {budget} less {held_value} already in metal)")
+        reasons.append(f"trimmed to the remaining budget "
+                       f"{remaining.quantize(CNY_PLACES, rounding=ROUND_DOWN)} CNY "
+                       f"(investable_total_cny {budget} less "
+                       f"{held_value.quantize(CNY_PLACES, rounding=ROUND_DOWN)} already in metal)")
 
-    amount = (amount // increment) * increment
-    if amount != wanted and amount > 0 and not reasons:
+    floored = (amount // increment) * increment
+    # No `not reasons` guard. A budget trim followed by an increment floor is
+    # TWO reductions, and reporting only the first left the second silent: a
+    # 5,160 headroom became a 5,000 order with nothing saying where the 160
+    # went. `amount` here is the post-trim figure, so this compares the floor
+    # against what actually reached it rather than against the original ask.
+    if floored != amount and floored > 0:
         reasons.append(f"floored to a multiple of order_increment_cny {increment}")
+    amount = floored
 
     if int(orders_today) >= int(max_orders_per_day):
         refusals.append(f"max_orders_per_day {max_orders_per_day} already reached "

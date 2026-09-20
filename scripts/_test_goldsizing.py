@@ -82,10 +82,50 @@ class TheInvestableTotalIsACeiling(unittest.TestCase):
         self.assertIn("investable_total_cny", " ".join(result["refusals"]))
 
     def test_a_partial_budget_trims_to_what_remains(self):
-        # 40,000 held at 950 -> 42.1053 g. Remaining 10,000 - trim 12,000 to 10,000.
+        # 42.1053 g at 950 is 40,000.035 held, so 9,999.965 remains of the
+        # 50,000 budget, which floors to 9,800 at a 200 step -- NOT 10,000.
+        # An earlier version quantized the held value down to 40,000 first,
+        # which raised the headroom by 0.035 and let it clear one more whole
+        # step: a 10,000 order against 9,999.965 of room, committing
+        # 50,000.035 in all.
         result = plan(held_grams=42.1053, contribution_cny=12000.0)
         self.assertEqual(result["action"], "buy")
-        self.assertEqual(result["amount_cny"], "10000")
+        self.assertEqual(result["amount_cny"], "9800")
+
+    def test_the_budget_is_never_exceeded_by_even_a_fraction(self):
+        # The module's own claim is that nothing it does ever rounds up. This
+        # sweeps holdings that land on awkward fractions of a yuan, which is
+        # where that claim actually gets tested.
+        for held in (42.1053, 42.1052, 10.0001, 3.3333, 51.5789):
+            result = plan(held_grams=held, contribution_cny=50000.0)
+            committed = Decimal(str(held)) * Decimal("950.0") + Decimal(result["amount_cny"])
+            self.assertLessEqual(committed, Decimal("50000"),
+                                 f"held {held} g committed {committed} against a 50000 budget")
+
+
+class EveryReductionIsStated(unittest.TestCase):
+    """Two reductions in one plan must both be reported, not just the first.
+
+    A budget trim followed by an increment floor used to report only the trim,
+    so a 5,160 headroom silently became a 5,000 order and the missing 160 CNY
+    appeared nowhere a reader could see it.
+    """
+
+    def test_a_trim_and_a_floor_are_both_reported(self):
+        result = plan(held_grams=47.2, contribution_cny=12000.0)
+        joined = " ".join(result["reasons"])
+        self.assertIn("remaining budget", joined)
+        self.assertIn("order_increment_cny", joined)
+        self.assertEqual(result["amount_cny"], "5000")
+
+    def test_a_trim_that_needs_no_floor_reports_only_the_trim(self):
+        # 40.0 g at 950 = 38,000 held, leaving exactly 12,000 -- already on a
+        # 200 step, so there is no second reduction to report.
+        result = plan(held_grams=40.0, contribution_cny=20000.0)
+        joined = " ".join(result["reasons"])
+        self.assertIn("remaining budget", joined)
+        self.assertNotIn("order_increment_cny", joined)
+        self.assertEqual(result["amount_cny"], "12000")
 
     def test_a_zero_budget_refuses_and_says_so(self):
         result = plan(investable_total_cny=0.0)
