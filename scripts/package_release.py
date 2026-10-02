@@ -103,6 +103,7 @@ INCLUDE_PATHS = [
 REQUIRED_ARTIFACT_FILES = [
     "scripts/mcp_env.py",
     "scripts/self_tests.py",
+    "scripts/copilot/backtest/execution_sensitivity.py",
     ".claude-plugin/plugin.json",
     ".codex-plugin/plugin.json",
     ".codex/config.toml",

@@ -3,8 +3,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import ast
+import copy
+import json
+import subprocess
+import sys
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from copilot import journal, retailquote, service
 from copilot.policy import assess_proposal
@@ -12,6 +18,7 @@ from _test_policy import NOW, seal
 from copilot.instruments import get_instrument
 
 OBSERVED = "2026-09-06T01:30:00+00:00"
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def quote(**overrides):
@@ -47,6 +54,14 @@ class TheQuoteIsShapeValidated(unittest.TestCase):
         self.assertEqual(result["currency"], "CNY")
         self.assertEqual(result["unit"], "gram")
         self.assertEqual(result["ask_per_fine_gram"], 962.5)
+
+    def test_account_identity_is_optional_and_only_stored_when_supplied(self):
+        self.assertNotIn("account_id", quote())
+        self.assertNotIn("account_id", quote(account_id=None))
+        self.assertEqual(quote(account_id=" fixture-account ")["account_id"], "fixture-account")
+        for invalid in ("", "   ", 12, False):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "account_id"):
+                quote(account_id=invalid)
 
     def test_a_blank_merchant_is_refused(self):
         with self.assertRaisesRegex(ValueError, "merchant"):
@@ -213,6 +228,91 @@ class AttachingItMakesTheGateReachable(unittest.TestCase):
         self.assertEqual(assess_proposal(proposal, attached, now=NOW)
                          ["risk_checks"]["retail_quote"]["status"], "unknown")
 
+
+class SelectingTheReportedQuote(unittest.TestCase):
+    def two_quotes(self):
+        first = retailquote.attach(gold_snapshot(), quote(), now=NOW)
+        second = retailquote.attach(first, quote(ask_per_fine_gram=1100,
+                                    observed_at="2026-09-06T01:45:00+00:00"), now=NOW)
+        return first, second
+
+    def legacy(self, snapshot):
+        snapshot = copy.deepcopy(snapshot)
+        snapshot["instruments"]["GOLD.CNY"].pop("active_retail_quote_evidence_id", None)
+        return snapshot
+
+    def test_a_new_report_selects_the_new_quote_and_preserves_the_old_snapshot(self):
+        first, second = self.two_quotes()
+        selected = retailquote.select_quote(second)
+        self.assertEqual(selected["retail_quote"]["ask_per_fine_gram"], 1100)
+        self.assertEqual(second["instruments"]["GOLD.CNY"]["active_retail_quote_evidence_id"],
+                         selected["evidence_id"])
+        self.assertEqual(retailquote.select_quote(first)["retail_quote"]["ask_per_fine_gram"], 962.5)
+        self.assertEqual(len([e for e in second["evidence"] if e.get("retail_quote")]), 2)
+
+    def test_an_explicitly_selected_quote_does_not_guess_from_timestamp_order(self):
+        first = retailquote.attach(gold_snapshot(), quote(), now=NOW)
+        second = retailquote.attach(first, quote(merchant="another fixture bank",
+                                    observed_at="2026-09-06T01:00:00+00:00"), now=NOW)
+        self.assertEqual(retailquote.select_quote(second)["retail_quote"]["merchant"],
+                         "another fixture bank")
+
+    def test_legacy_snapshots_choose_the_latest_observation_across_timezones(self):
+        first = retailquote.attach(gold_snapshot(), quote(), now=NOW)
+        second = retailquote.attach(first, quote(ask_per_fine_gram=1100,
+                                    observed_at="2026-09-06T09:45:00+08:00"), now=NOW)
+        self.assertEqual(retailquote.select_quote(self.legacy(second))["retail_quote"]
+                         ["ask_per_fine_gram"], 1100)
+
+    def test_a_missing_or_malformed_pointer_is_refused_without_fallback(self):
+        _, second = self.two_quotes()
+        for pointer in ("missing", "", 42, "sge"):
+            snapshot = copy.deepcopy(second)
+            snapshot["instruments"]["GOLD.CNY"]["active_retail_quote_evidence_id"] = pointer
+            with self.subTest(pointer=pointer), self.assertRaisesRegex(ValueError, "active retail quote"):
+                retailquote.select_quote(snapshot)
+
+    def test_a_corrupt_latest_legacy_quote_cannot_reactivate_an_older_price(self):
+        _, second = self.two_quotes()
+        snapshot = self.legacy(second)
+        snapshot["evidence"][-1]["retail_quote"]["ask_per_fine_gram"] = -1
+        with self.assertRaisesRegex(ValueError, "retail quote"):
+            retailquote.select_quote(snapshot)
+
+    def test_a_bad_legacy_observation_time_cannot_be_skipped(self):
+        _, second = self.two_quotes()
+        snapshot = self.legacy(second)
+        snapshot["evidence"][-1]["retail_quote"]["observed_at"] = "unknown"
+        with self.assertRaisesRegex(ValueError, "retail quote"):
+            retailquote.select_quote(snapshot)
+
+    def test_legacy_quotes_with_equal_latest_times_are_ambiguous(self):
+        first = retailquote.attach(gold_snapshot(), quote(), now=NOW)
+        second = retailquote.attach(first, quote(ask_per_fine_gram=1100), now=NOW)
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            retailquote.select_quote(self.legacy(second))
+
+    def test_duplicate_active_ids_and_payload_mismatch_are_refused(self):
+        _, second = self.two_quotes()
+        duplicate = copy.deepcopy(second)
+        duplicate["evidence"].append(copy.deepcopy(duplicate["evidence"][-1]))
+        with self.assertRaisesRegex(ValueError, "active retail quote"):
+            retailquote.select_quote(duplicate)
+        second["evidence"][-1]["retail_quote"]["evidence_id"] = "not-the-record"
+        with self.assertRaisesRegex(ValueError, "retail quote"):
+            retailquote.select_quote(second)
+
+    def test_no_reported_quote_returns_none(self):
+        self.assertIsNone(retailquote.select_quote(gold_snapshot()))
+
+    def test_account_identity_changes_the_bound_quote_evidence(self):
+        first = retailquote.attach(gold_snapshot(), quote(account_id="fixture-A"), now=NOW)
+        second = retailquote.attach(first, quote(account_id="fixture-B"), now=NOW)
+        selected = retailquote.select_quote(second)
+        self.assertEqual(selected["retail_quote"]["account_id"], "fixture-B")
+        self.assertNotEqual(first["instruments"]["GOLD.CNY"]["active_retail_quote_evidence_id"],
+                            selected["evidence_id"])
+
     def test_a_tampered_proposal_quote_does_not_pass(self):
         # The gate demands rec["retail_quote"] == quote exactly. A proposal that
         # cites the record but states a better price must not pass.
@@ -282,6 +382,43 @@ class CapturingItWritesANewSnapshot(unittest.TestCase):
         stored = gold_snapshot()
         journal.save_snapshot(stored, db_path=self.db)
         self.assertIn("不核实价格", self.capture(stored)["disclosure"])
+
+    def test_an_explicit_account_is_bound_into_the_selected_stored_quote(self):
+        stored = gold_snapshot()
+        journal.save_snapshot(stored, db_path=self.db)
+        captured = self.capture(stored, account_id="fixture-account-A")
+        selected = retailquote.select_quote(service.snapshot(captured["snapshot_id"], db_path=self.db))
+        self.assertEqual(selected["retail_quote"]["account_id"], "fixture-account-A")
+
+    def test_cli_passes_the_optional_account_to_the_same_capture_service(self):
+        stored = gold_snapshot()
+        journal.save_snapshot(stored, db_path=self.db)
+        completed = subprocess.run(
+            [sys.executable, "-S", "-B", str(ROOT / "scripts/copilot_cli.py"), "--db", str(self.db),
+             "record-quote", stored["snapshot_id"], "--merchant", "fixture-bank",
+             "--product", "fixture-gold", "--ask-per-fine-gram", "1100",
+             "--observed-at", OBSERVED, "--account-id", "fixture-account-A"],
+            capture_output=True, text=True, encoding="utf-8", check=True)
+        receipt = json.loads(completed.stdout)
+        selected = retailquote.select_quote(service.snapshot(receipt["snapshot_id"], db_path=self.db))
+        self.assertEqual(selected["retail_quote"]["account_id"], "fixture-account-A")
+
+    def test_mcp_passes_the_optional_account_without_loading_the_sdk(self):
+        stored = gold_snapshot()
+        journal.save_snapshot(stored, db_path=self.db)
+        tree = ast.parse((ROOT / "mcps/copilot_mcp.py").read_text(encoding="utf-8"))
+        function = copy.deepcopy(next(node for node in tree.body
+                                      if isinstance(node, ast.FunctionDef)
+                                      and node.name == "record_retail_gold_quote"))
+        function.decorator_list = []
+        namespace = {"service": SimpleNamespace(capture_retail_quote=lambda **kwargs:
+                         service.capture_retail_quote(db_path=self.db, now=NOW, **kwargs))}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "mcp-quote-fixture", "exec"), namespace)
+        receipt = namespace["record_retail_gold_quote"](
+            stored["snapshot_id"], "fixture-bank", "fixture-gold", 1100, OBSERVED,
+            account_id="fixture-account-A")
+        selected = retailquote.select_quote(service.snapshot(receipt["snapshot_id"], db_path=self.db))
+        self.assertEqual(selected["retail_quote"]["account_id"], "fixture-account-A")
 
 
 if __name__ == "__main__":

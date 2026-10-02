@@ -620,6 +620,71 @@ class EngineProducedOrders(unittest.TestCase):
             self.assertEqual(after["quantity"], before["quantity"] // 2)
             self.assertFalse(after["brake"]["backtested"])
 
+    def test_braked_quantities_cash_and_measured_risk_describe_the_same_execution(self):
+        from copilot.backtest.engine import CostModel
+        result = self.run_rule(brake={"level": "reduce_50", "reason": "issuer halt",
+                                      "evidence_ids": ["news_QQQ"]})
+        costs = CostModel(**bands_adoption()["cost_model"])
+        remaining = result["cash_plan"]["investable_cash"]
+        for order in result["orders"]:
+            quantity, price = order["quantity"], order["limit_price"]
+            self.assertEqual(order["delta_shares"], quantity)
+            self.assertEqual(order["target_shares"], order["held_shares"] + quantity)
+            notional = quantity * price
+            fee = costs.total(shares=quantity, notional=notional)
+            self.assertEqual(order["estimated_cost"], round(fee, 2))
+            remaining -= notional + fee
+            self.assertAlmostEqual(order["risk_checks"]["single_name"]["value"],
+                                   order["target_shares"] * price / result["cash_plan"]["total_value"])
+            planned = next(p for p in result["cash_plan"]["orders"]
+                           if p["instrument_id"] == order["instrument_id"])
+            self.assertEqual(planned["delta_shares"], quantity)
+            self.assertEqual(planned["notional"], round(notional, 2))
+        self.assertEqual(result["cash_plan"]["cash_remaining"], round(remaining, 2))
+
+    def test_skipping_all_buys_leaves_no_fill_and_the_initial_cash(self):
+        result = self.run_rule(brake={"level": "skip", "reason": "halt",
+                                      "evidence_ids": ["news_QQQ"]})
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertEqual(result["cash_plan"]["cash_remaining"], 20000.0)
+        for order in result["cash_plan"]["orders"]:
+            self.assertEqual(order["delta_shares"], 0)
+            self.assertEqual(order["estimated_cost"], 0)
+
+    def blocked_liquidity_basket(self):
+        snapshot = engine_fixture()
+        for record in snapshot["evidence"]:
+            if record.get("instrument_id") == "QQQ":
+                for bar in record["bars"]:
+                    bar["volume"] = 1000
+        context = declared_context(holdings=[
+            {"instrument_id": "QQQ", "quantity": 400, "currency": "USD"}])
+        return self.run_rule(snapshot=seal(snapshot), context=context, investable_cash=0)
+
+    def test_one_failed_trade_withholds_every_basket_instruction(self):
+        result = self.blocked_liquidity_basket()
+        self.assertEqual(result["execution_scope"], "research_only")
+        qqq = next(o for o in result["orders"] if o["instrument_id"] == "QQQ")
+        self.assertEqual(qqq["risk_checks"]["liquidity"]["status"], "fail")
+        for order in result["orders"]:
+            self.assertEqual(order["basket_execution_scope"], "research_only")
+            self.assertEqual(order["execution_scope"], "research_only")
+            self.assertEqual(order["action"], "hold")
+            self.assertNotIn("quantity", order)
+            self.assertNotIn("delta_shares", order)
+            self.assertNotIn("limit_price", order)
+            self.assertEqual(order["proposed_order"]["execution_scope"], "research_only")
+
+    def test_a_rejected_sell_cannot_fund_the_cash_plan(self):
+        result = self.blocked_liquidity_basket()
+        self.assertEqual(result["cash_plan"]["cash_remaining"], 0)
+        for order in result["cash_plan"]["orders"]:
+            self.assertEqual(order["delta_shares"], 0)
+            self.assertEqual(order["target_shares"], order["held_shares"])
+        self.assertEqual(result["proposed_cash_plan"]["execution_scope"], "research_only")
+        self.assertTrue(any(o["delta_shares"] > 0
+                            for o in result["proposed_cash_plan"]["orders"]))
+
     def test_skip_returns_a_decision_rather_than_raising(self):
         # The first draft wrote the post-brake quantity into a proposal while
         # gating on the pre-brake one, so skip hit policy's positive-number
@@ -1283,6 +1348,81 @@ class AGoldRuleProducesACnyContribution(unittest.TestCase):
                           snapshot=gold_engine_fixture(with_quote=True),
                           context=declared_context(base_currency="CNY"),
                           investable_cash=50000.0, now=NOW)
+
+
+class GoldQuoteJournalContracts(unittest.TestCase):
+    def setUp(self):
+        from _test_copilot_service import TheGoldSleeveIsReachableFromTheSharedFacade
+        self.fixture = TheGoldSleeveIsReachableFromTheSharedFacade()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def capture(self, snapshot_id, *, price, account, observed="2026-09-06T01:30:00+00:00"):
+        from copilot import service
+        return service.capture_retail_quote(
+            snapshot_id=snapshot_id, merchant="中国银行", product="积存金",
+            ask_per_fine_gram=price, account_id=account, observed_at=observed,
+            db_path=self.fixture.db, now=NOW)["snapshot_id"]
+
+    def test_a_real_journal_prices_the_new_quote_and_its_account(self):
+        from copilot import journal, service
+        self.fixture.declare()
+        first = self.capture(self.fixture.snapshot["snapshot_id"], price=900, account="account-a")
+        self.assertEqual(self.fixture.evaluate(first)["orders"][0]["grams"], "5.5555")
+        second = self.capture(first, price=1100, account="account-b",
+                              observed="2026-09-06T01:45:00+00:00")
+        order = self.fixture.evaluate(second)["orders"][0]
+        self.assertEqual(float(order["ask_per_fine_gram"]), 1100)
+        self.assertEqual(order["grams"], "4.5454")
+        self.assertEqual(order["retail_quote"]["account_id"], "account-b")
+        # Older stored snapshots without the active pointer still choose the
+        # newest observation, without relying on evidence insertion order.
+        legacy = service.snapshot(second, db_path=self.fixture.db)
+        legacy["instruments"]["GOLD.CNY"].pop("active_retail_quote_evidence_id")
+        seal(legacy)
+        journal.save_snapshot(legacy, db_path=self.fixture.db)
+        self.assertEqual(self.fixture.evaluate(legacy["snapshot_id"])["orders"][0]["grams"], "4.5454")
+
+    def test_quote_account_switch_uses_that_accounts_completed_daily_count(self):
+        from copilot import service
+        # An old buy followed by ten current sales leaves an empty declared
+        # book: no invented valuation history can obscure the daily quota.
+        for index in range(11):
+            side = "buy" if index == 0 else "sell"
+            quantity = "10" if index == 0 else "1"
+            occurred = ("2020-01-02" if index == 0 else
+                        f"2026-09-06T00:{index:02d}:00+00:00")
+            operation = {"statement": f"I already {'bought' if side == 'buy' else 'sold'} {quantity} grams of gold.",
+                         "source_message_id": f"quota-{index}", "external_trade_id": f"quota-{index}",
+                         "execution_status": "executed", "instrument_id": "GOLD.CNY",
+                         "side": side, "quantity": quantity, "unit": "gram", "price": "900",
+                         "currency": "CNY", "occurred_at": occurred, "fees": "0",
+                         "account_id": "account-a", "merchant": "中国银行", "purity": "0.9999"}
+            receipt = service.record(operation, f"quota-{index}", db_path=self.fixture.db, now=NOW)
+            self.assertEqual(receipt["status"], "executed")
+        self.fixture.declare()
+        capped = self.capture(self.fixture.snapshot["snapshot_id"], price=900, account="account-a")
+        capped_order = self.fixture.evaluate(capped)["orders"][0]
+        self.assertEqual(capped_order["amount_cny"], "0")
+        self.assertTrue(any("max_orders_per_day" in reason for reason in capped_order["refusals"]))
+        other = self.capture(capped, price=1100, account="account-b",
+                             observed="2026-09-06T01:45:00+00:00")
+        other_order = self.fixture.evaluate(other)["orders"][0]
+        self.assertEqual(other_order["action"], "buy")
+        self.assertEqual(other_order["amount_cny"], "5000")
+        self.assertEqual(other_order["retail_quote"]["account_id"], "account-b")
+
+    def test_bad_active_quote_pointer_refuses_without_journal_advice(self):
+        from copilot import journal, service
+        self.fixture.declare()
+        quoted = self.capture(self.fixture.snapshot["snapshot_id"], price=900, account="account-a")
+        invalid = service.snapshot(quoted, db_path=self.fixture.db)
+        invalid["instruments"]["GOLD.CNY"]["active_retail_quote_evidence_id"] = "missing-retail-evidence"
+        seal(invalid)
+        journal.save_snapshot(invalid, db_path=self.fixture.db)
+        with self.assertRaisesRegex(ValueError, "quote|pointer"):
+            self.fixture.evaluate(invalid["snapshot_id"])
+        self.assertEqual(service.context(db_path=self.fixture.db, sleeve="gold")["recommendations"], [])
 
 
 class RealJournalPolicyContracts(unittest.TestCase):

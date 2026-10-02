@@ -249,7 +249,10 @@ def _evaluate_neighbour(frame, base_rule, neighbour_params: dict[str, float], *,
         return {"parameters": neighbour_params, "error": str(exc)}
 
 
-def run_family(frame, rule, *, start_cash: float, cash_floor_pct: float) -> dict:
+def run_family(frame, rule, *, start_cash: float, cash_floor_pct: float,
+               execution_sensitivity: str | None = None) -> dict:
+    if execution_sensitivity not in (None, "next-session-close"):
+        raise ValueError("unsupported execution sensitivity")
     result = engine.run(frame, rule=rule, start_cash=start_cash,
                         cost_model=engine.CostModel(), cash_floor_pct=cash_floor_pct)
     report = admission.assess(result, sessions_by_year=admission.STRESS_SESSIONS)
@@ -258,12 +261,18 @@ def run_family(frame, rule, *, start_cash: float, cash_floor_pct: float) -> dict
                                       cash_floor_pct=cash_floor_pct)
                  for neighbour in sensitivity_grid(result.parameters)]
     deltas = [abs(n["cagr"] - base_cagr) for n in neighbours if "cagr" in n]
-    return {"rule": rule.name, "parameters": result.parameters, "caveats": list(rule.caveats),
+    family = {"rule": rule.name, "parameters": result.parameters, "caveats": list(rule.caveats),
             "execution_assumptions": result.execution_assumptions,
             "admitted": report.admitted, "failures": report.failures, "metrics": report.metrics,
             "sensitivity": {"neighbours": neighbours,
                            "max_abs_cagr_delta": round(max(deltas), 6) if deltas else None,
                            "note": SENSITIVITY_NOTE}}
+    if execution_sensitivity:
+        from copilot.backtest.execution_sensitivity import compare_execution_timing
+        family["execution_sensitivity"] = compare_execution_timing(
+            frame, rule=rule, start_cash=start_cash, cost_model=engine.CostModel(),
+            cash_floor_pct=cash_floor_pct)
+    return family
 
 
 def gold_alignment() -> tuple[dict, list[str]]:
@@ -511,6 +520,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cash-floor-pct", type=float, default=0.15)
     parser.add_argument("--income-proxy", action="store_true",
                         help="also run the BXN index proxy for QQQI/JEPQ/JEPI")
+    parser.add_argument("--execution-sensitivity", choices=("next-session-close",),
+                        help="add a research-only ETF timing comparison: prior-session targets "
+                             "executed at the next published close, not next open; cannot be adopted")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--verify-universe", action="store_true")
     parser.add_argument("--verify-calendars", action="store_true")
@@ -526,6 +538,10 @@ def main(argv: list[str] | None = None) -> int:
                              "backtest that never ran.")
     parser.add_argument("--db", help="isolated SQLite path for --adopt; default data/state/copilot.sqlite")
     args = parser.parse_args(argv)
+    if args.execution_sensitivity and args.adopt:
+        parser.error("--execution-sensitivity cannot be combined with --adopt; timing experiments are research-only")
+    if args.execution_sensitivity and (args.sleeve != "etf" or args.income_proxy):
+        parser.error("--execution-sensitivity supports ETF rule reports only; gold accumulation and income proxies are not modeled")
 
     if args.self_test:
         return self_test()
@@ -590,7 +606,8 @@ def main(argv: list[str] | None = None) -> int:
                "families": []}
     for rule in build_rules(symbols, args.family):
         payload["families"].append(run_family(frame, rule, start_cash=args.start_cash,
-                                              cash_floor_pct=args.cash_floor_pct))
+                                              cash_floor_pct=args.cash_floor_pct,
+                                              execution_sensitivity=args.execution_sensitivity))
     if args.income_proxy:
         payload["income_proxy"] = run_income_proxy(start_cash=args.start_cash,
                                                    cash_floor_pct=args.cash_floor_pct)
@@ -619,6 +636,18 @@ def _write_report(payload: dict, alignment: dict, caveats: list, *, out_dir: Pat
             print(f"            caveat: {caveat}")
         for note in family.get("execution_assumptions", {}).get("disclosures", []):
             print(f"            execution assumption: {note}")
+        comparison = family.get("execution_sensitivity")
+        if comparison:
+            delayed = comparison["next_session_close"]
+            tail_count = int(comparison["unexecuted_tail_signal"] is not None)
+            if "net_return" in delayed:
+                print(f"            RESEARCH next-session close: net return {delayed['net_return']:+.2%}, "
+                      f"delta {comparison['next_minus_same']['net_return']:+.2%}; "
+                      f"unexecuted tail signals {tail_count}; cannot adopt")
+            else:
+                print("            RESEARCH next-session close: insufficient published sessions; cannot adopt")
+            for note in comparison["execution_assumptions"]["disclosures"]:
+                print(f"            timing assumption: {note}")
     print(f"\n  common history: {alignment['common_first']} .. {alignment['common_last']} "
           f"({alignment['common_bars']} bars); start bound by {alignment['binds_start']}, "
           f"end bound by {alignment['binds_end']}, {alignment['bars_lost_vs_longest']} bars "

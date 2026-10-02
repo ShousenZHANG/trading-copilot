@@ -65,7 +65,7 @@ def _observed(value) -> str:
 
 
 def build(*, merchant: str, product: str, ask_per_fine_gram: float, observed_at: str,
-          purity: str = "0.9999", note: str = "") -> dict:
+          purity: str = "0.9999", note: str = "", account_id: str | None = None) -> dict:
     """Validate a reported merchant quote. Shape and freshness only."""
     price = float(ask_per_fine_gram)
     if not price > 0:
@@ -81,9 +81,75 @@ def build(*, merchant: str, product: str, ask_per_fine_gram: float, observed_at:
              "purity": str(purity),
              "observed_at": _observed(observed_at),
              "verification": "self_reported"}
+    if account_id is not None:
+        if not isinstance(account_id, str) or not account_id.strip():
+            raise ValueError("account_id must be a non-empty user-confirmed account identifier")
+        quote["account_id"] = account_id.strip()
     if note:
         quote["note"] = str(note)
     return quote
+
+
+def _selected_record(record: dict) -> dict:
+    """Validate the selected record; an invalid new report cannot revive an old ask."""
+    payload = record.get("retail_quote")
+    if (record.get("instrument_id") != SYMBOL or record.get("status") != "ok"
+            or record.get("price_kind") != "merchant_retail_ask"
+            or not isinstance(payload, dict)
+            or not isinstance(record.get("evidence_id"), str)
+            or not record["evidence_id"]
+            or payload.get("evidence_id") != record["evidence_id"]
+            or payload.get("currency") != "CNY" or payload.get("unit") != "gram"
+            or payload.get("verification") != "self_reported"):
+        raise ValueError("selected gold retail quote has an invalid evidence record")
+    try:
+        build(merchant=payload["merchant"], product=payload["product"],
+              ask_per_fine_gram=payload["ask_per_fine_gram"], observed_at=payload["observed_at"],
+              account_id=payload.get("account_id"))
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("selected gold retail quote has an invalid reported price or identity") from exc
+    return record
+
+
+def select_quote(snapshot: dict) -> dict | None:
+    """Return the active gold quote evidence, or the unique latest legacy report.
+
+    A pointer is authoritative. Missing, duplicate or invalid pointed evidence
+    is refused rather than replaced by a different merchant/price. Older
+    snapshots have no pointer: compare timezone-aware observations, and refuse
+    ambiguous or malformed reports. Freshness remains the policy gate's check.
+    """
+    instrument = snapshot.get("instruments", {}).get(SYMBOL, {})
+    evidence = snapshot.get("evidence", [])
+    pointer_field = "active_retail_quote_evidence_id"
+    if pointer_field in instrument:
+        pointer = instrument[pointer_field]
+        if not isinstance(pointer, str) or not pointer:
+            raise ValueError("active retail quote pointer must be a non-empty evidence id")
+        matches = [record for record in evidence if isinstance(record, dict)
+                   and record.get("evidence_id") == pointer]
+        if len(matches) != 1:
+            raise ValueError("active retail quote pointer does not resolve to exactly one evidence record")
+        try:
+            return _selected_record(matches[0])
+        except ValueError as exc:
+            raise ValueError("active retail quote pointer resolves to an invalid gold quote") from exc
+    candidates = [record for record in evidence
+                  if isinstance(record, dict) and "retail_quote" in record]
+    if not candidates:
+        return None
+    observed = []
+    for record in candidates:
+        try:
+            stamp = _observed(record["retail_quote"]["observed_at"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("legacy retail quote has an invalid observation time; select a new reported quote") from exc
+        observed.append((datetime.fromisoformat(stamp), record))
+    latest = max(stamp for stamp, _ in observed)
+    matches = [record for stamp, record in observed if stamp == latest]
+    if len(matches) != 1:
+        raise ValueError("legacy retail quote selection is ambiguous at the latest observation time")
+    return _selected_record(matches[0])
 
 
 def _reseal(snapshot: dict) -> dict:
@@ -155,6 +221,7 @@ def attach(snapshot: dict, quote: dict, *, now: datetime) -> dict:
     }
     updated["evidence"] = list(updated.get("evidence", [])) + [record]
     instrument = updated["instruments"][SYMBOL]
+    instrument["active_retail_quote_evidence_id"] = evidence_id
     # The id is deliberately NOT appended to instrument["evidence_ids"]. That
     # list is the instrument's MARKET evidence -- policy derives market_ids from
     # it and then validates every id in that set on EVERY proposal, cited or

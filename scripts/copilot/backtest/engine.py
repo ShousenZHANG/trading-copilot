@@ -130,6 +130,7 @@ class Result:
     cash_floor_pct: float | None = None
     integer_shares: bool | None = None
     execution_assumptions: dict = field(default_factory=dict)
+    rebalance_attempt_count: int = 0
 
     @property
     def average_value(self) -> float:
@@ -154,6 +155,38 @@ def _validate(targets: dict[str, float], frame: PriceFrame) -> None:
         frame.index_of(symbol)
 
 
+@dataclass
+class _CloseExecution:
+    cash: float
+    positions: dict[str, float]
+    traded_notional: float = 0.0
+    total_costs: float = 0.0
+    executed: bool = False
+
+
+def _execute_at_close(*, targets: dict[str, float], prices: dict[str, float],
+                      positions: dict[str, float], cash: float, cost_model: CostModel,
+                      cash_floor_pct: float, integer_shares: bool) -> _CloseExecution:
+    """One funded fill calculation shared by the timing experiment and engine."""
+    plan = plan_orders(weights=targets, prices=prices, held_shares=positions,
+                       investable_cash=cash, cash_floor_pct=cash_floor_pct,
+                       cost_model=cost_model, integer_shares=integer_shares)
+    desired = {order["instrument_id"]: order["target_shares"] for order in plan["orders"]}
+    fill = _CloseExecution(cash=cash, positions={s: q for s, q in desired.items() if q > 0})
+    # Sorted iteration keeps float accumulation independent of PYTHONHASHSEED.
+    for symbol in sorted(set(positions) | set(desired)):
+        delta = desired.get(symbol, 0.0) - positions.get(symbol, 0.0)
+        if abs(delta) < 1e-9:
+            continue
+        notional = abs(delta) * prices[symbol]
+        cost = cost_model.total(shares=abs(delta), notional=notional)
+        fill.cash -= delta * prices[symbol] + cost
+        fill.traded_notional += notional
+        fill.total_costs += cost
+        fill.executed = True
+    return fill
+
+
 def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostModel,
         cash_floor_pct: float, integer_shares: bool = True) -> Result:
     """Trade at each bar's close, paying costs on the traded notional."""
@@ -166,10 +199,12 @@ def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostMod
     result.execution_assumptions = {
         "execution_price": "same_bar_close", "signal_cutoff": "includes_current_bar",
         "price_basis": frame.price_basis,
+        "rebalance_cadence": "completed_nonzero_trades",
         "cash_reserve": "fraction_of_pretrade_NAV_reserved_before_trade_costs",
         "disclosures": [
             "Signals may use the current close and trade at that close; the next executable time, gaps and fill availability are not modeled.",
             "When prices are adjusted, share counts and per-share fees are synthetic approximations; historical as-traded quantities are not reconstructed.",
+            "Only a completed nonzero trade advances rebalance cadence; an attempted plan with no share delta does not.",
         ],
     }
     cash = float(start_cash)
@@ -185,40 +220,19 @@ def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostMod
         current = {sym: (qty * prices[sym]) / value for sym, qty in positions.items()} if value else {}
         if rule.should_rebalance(frame, i, current, last_rebalance_index,
                                  cash_floor_pct=cash_floor_pct):
-            last_rebalance_index = i
+            result.rebalance_attempt_count += 1
             targets = rule.weights(frame, i)
             _validate(targets, frame)
-            plan = plan_orders(weights=targets, prices=prices, held_shares=positions,
-                               investable_cash=cash, cash_floor_pct=cash_floor_pct,
-                               cost_model=cost_model, integer_shares=integer_shares)
-            desired = {order["instrument_id"]: order["target_shares"] for order in plan["orders"]}
-            # rebalance_count reports trades, not attempts: should_rebalance
-            # firing every bar while every target rounds to zero shares (a
-            # tiny book against expensive holdings) is zero rebalances, not
-            # one per bar. Tracked locally because the delta loop is the only
-            # place that knows whether a share actually moved.
-            executed_trade = False
-            # sorted(...), not a bare set union: iteration order of a set of
-            # strings varies with PYTHONHASHSEED, and float addition is not
-            # associative, so cash/total_costs/traded_notional silently
-            # depended on the interpreter's hash seed. Demonstrated: the same
-            # frame and rule produced different bit patterns for all three
-            # under different hash seeds. This module's own docstring opens
-            # with "Deterministic: no clock, no network, no random" -- sorting
-            # here is load-bearing, not cosmetic.
-            for symbol in sorted(set(positions) | set(desired)):
-                delta = desired.get(symbol, 0.0) - positions.get(symbol, 0.0)
-                if abs(delta) < 1e-9:
-                    continue
-                executed_trade = True
-                notional = abs(delta) * prices[symbol]
-                cost = cost_model.total(shares=abs(delta), notional=notional)
-                cash -= delta * prices[symbol] + cost
-                result.traded_notional += notional
-                result.total_costs += cost
-            positions = {s: q for s, q in desired.items() if q > 0}
-            if executed_trade:
+            fill = _execute_at_close(targets=targets, prices=prices, positions=positions,
+                                     cash=cash, cost_model=cost_model,
+                                     cash_floor_pct=cash_floor_pct, integer_shares=integer_shares)
+            cash, positions = fill.cash, fill.positions
+            result.traded_notional += fill.traded_notional
+            result.total_costs += fill.total_costs
+            # Both the count and the cadence follow actual nonzero fills.
+            if fill.executed:
                 result.rebalance_count += 1
+                last_rebalance_index = i
             value = cash + sum(qty * prices[sym] for sym, qty in positions.items())
         # This is the invariant metrics._validated depends on downstream, so
         # it is enforced where the value is produced, not only where it is

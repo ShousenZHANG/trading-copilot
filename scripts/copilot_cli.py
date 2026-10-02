@@ -63,6 +63,8 @@ def main() -> int:
     quote_cmd.add_argument("--ask-per-fine-gram", type=float, required=True)
     quote_cmd.add_argument("--observed-at", required=True,
                            help="ISO-8601 with a timezone offset, e.g. 2026-09-20T10:15:00+08:00")
+    quote_cmd.add_argument("--account-id", default=None,
+                           help="optional user-confirmed account identifier; use the same id as its fills")
     adopt_cmd = sub.add_parser(
         "adopt",
         help="print a stored adoption; read-only. Recording a NEW adoption is done by "
@@ -115,7 +117,7 @@ def main() -> int:
             result = service.capture_retail_quote(
                 snapshot_id=args.snapshot_id, merchant=args.merchant, product=args.product,
                 ask_per_fine_gram=args.ask_per_fine_gram, observed_at=args.observed_at,
-                db_path=args.db)
+                account_id=args.account_id, db_path=args.db)
         elif args.command == "adopt":
             result = service.adoption(args.rule_id, db_path=args.db)
         elif args.command == "evaluate":

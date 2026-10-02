@@ -102,9 +102,69 @@ def context(instrument_ids: list[str] | None = None, *, db_path=None, as_of=None
     sleeve, and a lookup that ignored the sleeve would let a CNY gold
     declaration mark the USD ETF book complete.
     """
-    from .journal import get_context
-    return get_context(instrument_ids, as_of=as_of, sleeve=sleeve, now=now,
-                       db_path=database_path(db_path))
+    from .journal import get_context, _clock
+    result = get_context(instrument_ids, as_of=as_of, sleeve=sleeve, now=now,
+                         db_path=database_path(db_path))
+    moment = _clock(now if now is not None else result["as_of"])
+    result["recommendations"] = [_recommendation_view(item, moment)
+                                 for item in result["recommendations"]]
+    return result
+
+
+def _recommendation_view(decision: dict, moment: datetime) -> dict:
+    """Expose read-only historical advice without rewriting immutable records.
+
+    The journal's valuation summaries use original observations even after
+    advice expires. The conversation view must not revive old order quantities
+    just because no new trade has changed the portfolio version.
+    """
+    from .data_calendar import parse_time
+    from .policy import POLICY_VERSION
+    from .ruleset import SCHEMA_VERSION
+    view = dict(decision)
+    policy_current = decision.get("policy_version") == POLICY_VERSION
+    try:
+        snapshot_current = (isinstance(decision.get("created_at"), str)
+                            and isinstance(decision.get("valid_until"), str)
+                            and parse_time(decision["created_at"]) <= moment
+                            < parse_time(decision["valid_until"]))
+    except (TypeError, ValueError):
+        snapshot_current = False
+    is_basket = "rule_id" in decision or "evaluation_id" in decision
+    adoption_current = not is_basket or decision.get("adoption_schema_version") == SCHEMA_VERSION
+    basket_current = not is_basket or decision.get("basket_execution_scope") == "actionable"
+    invalidation = []
+    for current, reason in (
+            (decision.get("portfolio_current") is True, "portfolio_changed"),
+            (policy_current, "policy_version_missing_or_changed"),
+            (snapshot_current, "evidence_expired_future_or_time_unknown"),
+            (adoption_current, "adoption_evidence_version_missing_or_changed"),
+            (basket_current, "basket_not_actionable_or_binding_missing")):
+        if not current:
+            invalidation.append(reason)
+    recorded_scope = decision.get("execution_scope", "research_only")
+    # Context is an audit read, not a new evaluation of active config, current
+    # cash, fees, quotes and account quotas. Even fresh historical advice must
+    # not become an order channel through this interface.
+    bindings_current = not invalidation
+    invalidation.append("historical_recommendation_requires_fresh_evaluation")
+    view.update(policy_current=policy_current, snapshot_current=snapshot_current,
+                adoption_schema_current=adoption_current, basket_recorded_actionable=basket_current,
+                recorded_bindings_current=bindings_current, requires_reevaluation=True,
+                view="historical_recommendation", recorded_execution_scope=recorded_scope,
+                execution_scope="research_only", current_execution_scope="research_only",
+                invalidation_reasons=invalidation)
+    if "basket_execution_scope" in view:
+        view["recorded_basket_execution_scope"] = view["basket_execution_scope"]
+        view["basket_execution_scope"] = "research_only"
+    execution_fields = ("quantity", "price", "delta_shares", "target_shares", "target_weight",
+                        "limit_price", "limit_price_basis", "estimated_cost", "stop_loss",
+                        "amount_cny", "grams", "target_grams")
+    historical = {key: view.pop(key) for key in execution_fields if key in view}
+    if historical:
+        view["historical_order"] = {**historical, "action": decision.get("action"),
+                                     "execution_scope": "research_only"}
+    return view
 
 
 def snapshot(snapshot_id: str, *, db_path=None) -> dict:
@@ -219,12 +279,13 @@ def declare_coverage(*, sleeve: str = "etf", base_currency: str = "USD",
 
 def capture_retail_quote(*, snapshot_id: str, merchant: str, product: str,
                          ask_per_fine_gram: float, observed_at: str,
-                         db_path=None, now=None) -> dict:
+                         account_id: str | None = None, db_path=None, now=None) -> dict:
     """Attach a user-reported merchant gold quote to a stored snapshot.
 
     Writes a NEW snapshot rather than editing the stored one: snapshots are
     content-addressed and the journal's triggers forbid an update. The returned
-    snapshot_id is the one to evaluate against.
+    snapshot_id is the one to evaluate against. Only an explicit user-confirmed
+    account_id scopes a daily quota; omitting it keeps all accounts included.
     """
     from .journal import save_snapshot
     from . import retailquote
@@ -232,7 +293,8 @@ def capture_retail_quote(*, snapshot_id: str, merchant: str, product: str,
     stored = snapshot(snapshot_id, db_path=path)
     moment = now or datetime.now(timezone.utc)
     quote = retailquote.build(merchant=merchant, product=product,
-                              ask_per_fine_gram=ask_per_fine_gram, observed_at=observed_at)
+                              ask_per_fine_gram=ask_per_fine_gram, observed_at=observed_at,
+                              account_id=account_id)
     attached = retailquote.attach(stored, quote, now=moment)
     save_snapshot(attached, db_path=path)
     return {"snapshot_id": attached["snapshot_id"], "quote": quote,
@@ -461,6 +523,12 @@ def evaluate(*, snapshot_id: str, sleeve: str = "etf", config_path=None, db_path
                            investable_cash=investable, brake=brake, now=now)
     prepared = []
     for order in result["orders"]:
+        if (result["execution_scope"] != "actionable"
+                and order.get("execution_scope") == "actionable"
+                and order.get("action") in {"buy", "reduce", "sell"}):
+            raise ValueError("a non-executable basket cannot persist an actionable transaction")
+        order["basket_execution_scope"] = result["execution_scope"]
+        order["adoption_schema_version"] = adoption_record["schema_version"]
         order["evaluation_id"] = result["evaluation_id"]
         order["evaluation_session"] = result["evaluation_session"]
         order["rebalance_due"] = result["rebalance_due"]

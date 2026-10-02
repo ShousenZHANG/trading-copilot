@@ -106,6 +106,8 @@ class Report:
 
 def assess(result: Result, *, sessions_by_year: dict[int, int],
            waivers: dict[str, str] | None = None) -> Report:
+    if not isinstance(result, Result):
+        raise ValueError("admission requires an engine.Result; research timing experiments are not eligible")
     waivers = dict(waivers or {})
     unknown = sorted(set(waivers) - WAIVABLE)
     if unknown:

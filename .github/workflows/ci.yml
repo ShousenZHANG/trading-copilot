@@ -153,6 +153,7 @@ jobs:
               "scripts/copilot_cli.py", "scripts/copilot/config.py",
               "scripts/copilot/valuation.py", "scripts/mcp_env.py", "scripts/self_tests.py",
               "scripts/backtest_cli.py", "scripts/copilot/backtest/engine.py",
+              "scripts/copilot/backtest/execution_sensitivity.py",
               "scripts/copilot/backtest/rules.py", "scripts/copilot/backtest/admission.py",
               "evals/scorer.py", "evals/stockbench/backtest_engine.py",
               "mcps/finnhub_mcp.py", "mcps/akshare_mcp.py",

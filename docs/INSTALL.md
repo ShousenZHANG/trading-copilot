@@ -52,6 +52,11 @@ configuration, a real admitted backtest, declared coverage and current evidence.
 The examples below demonstrate the workflow, not an investment recommendation.
 They write adoption/coverage/snapshot records to your local journal; `--db` on
 the CLIs can direct them to a separate isolated journal.
+Schema 1/2 adoption records remain readable for audit. The current schema 3
+requires rerunning the corresponding backtest under the current engine, reviewing
+and adopting its result, then updating the sleeve's rule pointer yourself. Only
+actual completed trades advance execution cadence; evaluating a rule, saving a
+recommendation or an attempted plan with no trade does not.
 
 1. Keep an existing private config. For a new one, copy
    `config/user.example.toml` to `config/user.toml` and edit your actual capital,
@@ -76,12 +81,31 @@ the CLIs can direct them to a separate isolated journal.
    changing the config alone cannot activate an untested basket or reserve.
    `python scripts/copilot_cli.py adopt <rule_id>` reads the stored record; it
    cannot create a new one. No command edits your private config automatically.
+   To compare execution timing separately for the same ETF universe:
+
+   ```sh
+   python scripts/backtest_cli.py --universe SPY,QQQ,IWM,VUG,VTV,VEA,VWO,XLK,XLV,XLF --family bands --execution-sensitivity next-session-close --out-dir data/audit/execution-sensitivity
+   ```
+
+   This research report freezes targets after the signal session's close and
+   simulates execution at the next common published session's close, recalculating
+   affordable quantities and costs then. A final signal without a next session
+   remains unfilled. It is not evidence of an actual fill and cannot be adopted:
+   the flag and `--adopt` are mutually exclusive. Gold contribution schedules
+   and income proxies do not support this comparison.
 3. Record only real completed trades you report. Review
    `python scripts/copilot_cli.py context --sleeve etf`. When you have explicitly
    confirmed that this is your complete ETF book, including an explicitly empty
    book, declare it with `python scripts/copilot_cli.py declare-coverage --sleeve etf`.
    This records your assertion; it does not independently verify it. A later
    completed trade invalidates the declaration.
+   Context `recommendations` are historical research views, including those whose
+   holdings are still current. They are not fresh executable orders. Always collect
+   current evidence and evaluate the adopted rule again before acting on an order.
+   These rows have `view=historical_recommendation`, `requires_reevaluation=true`
+   and `execution_scope=research_only`; previous quantities live in `historical_order`.
+   `recorded_bindings_current` describes historical bindings, not a check of your
+   current configuration, cash or account quotas.
 4. Collect every member of the configured ETF universe into one fresh snapshot:
 
    ```sh
@@ -122,6 +146,12 @@ the CLIs can direct them to a separate isolated journal.
 
    The receipt returns a **new snapshot_id**. Quote freshness/shape checks do not
    verify the reported price; unknown purity or fees require clarification.
+   For an updated quote, pass the last returned snapshot ID and evaluate the new
+   receipt's ID: it selects that report while keeping the previous evidence.
+   If you explicitly identify the account, append `--account-id "<your-local-account-id>"`
+   using the same identifier as its recorded trades. The MCP tool accepts the
+   equivalent optional `account_id`. Do not infer it from a merchant or bank name;
+   when unknown, omit it and the daily quota conservatively counts all accounts.
 4. Use that new ID with
    `python scripts/copilot_cli.py evaluate <new_snapshot_id> --sleeve gold`.
    Review CNY amount/grams, refusals and the unbacktested-schedule disclosure.

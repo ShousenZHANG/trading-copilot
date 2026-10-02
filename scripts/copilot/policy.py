@@ -13,7 +13,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-POLICY_VERSION = "1.1"
+POLICY_VERSION = "1.2"
 SHANGHAI_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 ACTIONS = {"buy", "hold", "reduce", "sell", "avoid"}
 _LIMITS = {
@@ -879,6 +879,7 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
     withhold = bool(blocked) or not coverage_known
 
     plan, measured, rebalance_due, portfolio_valuation, drawdown_measurement = None, {}, None, None, {}
+    applied_brakes = {}
     evaluation_issues, holdings, held = [], [], {}
     if not withhold:
         try:
@@ -923,16 +924,39 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
         # case anyway, since `weights` is never empty for a real rule). The loop
         # below zeroes every delta when a rebalance is not due, so plan_orders
         # never needs to see a different holdings view to get that right.
+        cost_model = CostModel(**adoption["cost_model"])
         plan = sizing.plan_orders(
             weights=weights, prices=prices, held_shares=held,
             investable_cash=float(investable_cash),
             cash_floor_pct=float(adoption.get("cash_floor_pct", 0.0)),
-            cost_model=CostModel(**adoption["cost_model"]))
+            cost_model=cost_model)
         if not rebalance_due:
             for order in plan["orders"]:
                 order.update(delta_shares=0, side="hold", notional=0.0, estimated_cost=0.0,
                              target_shares=order["held_shares"])
             plan["cash_remaining"] = float(investable_cash)
+        # The gate, journal quantities and cash funding must describe the same
+        # post-brake execution. Sales retain their delta; reducing a sale would
+        # leave more exposure. A zero buy incurs no fill or commission.
+        remaining_cash = float(investable_cash)
+        for order in plan["orders"]:
+            traded = abs(order["delta_shares"])
+            applied = brake_module.applied(record=brake_record, quantity=traded)
+            applied["applied_to_side"] = order["side"]
+            if order["side"] == "sell":
+                applied["post_brake_quantity"] = traded
+            applied["changed"] = applied["post_brake_quantity"] != traded
+            applied_brakes[order["instrument_id"]] = applied
+            if order["side"] == "buy":
+                order["delta_shares"] = applied["post_brake_quantity"]
+            delta = order["delta_shares"]
+            order["target_shares"] = order["held_shares"] + delta
+            order["side"] = "hold" if delta == 0 else "buy" if delta > 0 else "sell"
+            notional = abs(delta) * order["limit_price"]
+            cost = cost_model.total(shares=abs(delta), notional=notional) if delta else 0.0
+            order.update(notional=round(notional, 2), estimated_cost=round(cost, 2))
+            remaining_cash -= delta * order["limit_price"] + cost
+        plan["cash_remaining"] = round(remaining_cash, 2)
         # Only unchanged holdings/cash observations are comparable without
         # dated cash flows. A missing segment is a baseline, not a measured 0.
         from .valuation import observe
@@ -1005,22 +1029,12 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
         if idle:
             reasons = [f"adopted rule {rule_id} did not select {symbol}（未选中）and no "
                        "position is held, so there is nothing to do"]
-        applied = None
+        applied = applied_brakes.get(symbol)
         item = {"instrument_id": symbol, "action": "hold", "mode": "accumulation",
                 "horizon": "long_term", "reasons": reasons, "conditions": [],
                 "evidence_ids": [_primary_evidence(snapshot, symbol)["evidence_id"]]}
         if order is not None and order["delta_shares"] != 0:
             traded = abs(order["delta_shares"])
-            # The brake only ever reduces EXPOSURE. Halving a sell would leave
-            # more exposure than the rule asked for, so a sell is never braked.
-            if order["side"] == "buy":
-                applied = brake_module.applied(record=brake_record, quantity=traded)
-                traded = applied["post_brake_quantity"]
-            else:
-                applied = {**brake_module.applied(record=brake_record, quantity=traded),
-                           "post_brake_quantity": traded}
-            applied["applied_to_side"] = order["side"]
-            applied["changed"] = traded != abs(order["delta_shares"])
             if traded > 0:
                 item["action"] = _order_action(order["side"], order["target_shares"])
                 item["quantity"] = traded
@@ -1039,7 +1053,7 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
             if "drawdown" not in drawdown_measurement:
                 decision["warnings"].append("Comparable valuation history is missing after holdings/cash changed; this observation is a baseline, not zero drawdown")
         decision["brake"] = applied or dict(brake_record)
-        if idle:
+        if idle or (order is not None and order["delta_shares"] == 0):
             decision["no_action_required"] = True
         if order is not None and decision["data_status"] == "ready" and "quantity" in decision:
             decision["limit_price"] = order["limit_price"]
@@ -1062,13 +1076,34 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
     requires_action = [o for o in orders if not o.get("no_action_required")]
     actionable = (not withhold and bool(rebalance_due) and bool(requires_action)
                   and all(o.get("execution_scope") == "actionable" for o in requires_action))
+    basket_scope = "actionable" if actionable else "research_only"
+    proposed_plan = None
+    for decision in orders:
+        decision["basket_execution_scope"] = basket_scope
+        if not actionable and not decision.get("no_action_required"):
+            proposed = sized.get(decision["instrument_id"])
+            if proposed is not None:
+                decision["proposed_order"] = {**proposed, "execution_scope": "research_only"}
+            decision.update(action="hold", execution_scope="research_only")
+            decision["warnings"].append("The entire rebalance basket is withheld; a rejected sale cannot fund another order")
+            for field in ("quantity", "price", "limit_price", "limit_price_basis", "delta_shares",
+                          "target_shares", "estimated_cost"):
+                decision.pop(field, None)
+    if plan is not None and not actionable:
+        proposed_plan = {**plan, "orders": [dict(order) for order in plan["orders"]],
+                         "execution_scope": "research_only"}
+        plan = {**plan, "orders": [{**order, "delta_shares": 0,
+                                    "target_shares": order["held_shares"], "side": "hold",
+                                    "notional": 0.0, "estimated_cost": 0.0}
+                                   for order in plan["orders"]],
+                "cash_remaining": float(investable_cash), "execution_scope": "research_only"}
     result = {
         "schema_version": 1, "rule_id": rule_id, "sleeve": "etf",
         "snapshot_id": snapshot.get("snapshot_id"), "orders": orders,
         "blocked_symbols": blocked, "coverage_known": coverage_known,
         "evaluation_issues": evaluation_issues,
         "rebalance_due": bool(rebalance_due),
-        "execution_scope": "actionable" if actionable else "research_only",
+        "execution_scope": basket_scope,
         "brake": brake_record, "waived": bool(adoption.get("waived")),
         "admitted_metrics": dict(adoption.get("admission", {}).get("metrics", {})),
         "evaluation_session": (snapshot.get("instruments", {}).get(universe[0], {})
@@ -1079,6 +1114,8 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
     }
     if not withhold:
         result["cash_plan"] = plan
+        if proposed_plan is not None:
+            result["proposed_cash_plan"] = proposed_plan
     result["evaluation_id"] = "eval-" + _digest(result)[:16]
     return result
 
@@ -1147,6 +1184,7 @@ def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, br
     """
     from . import brake as brake_module
     from . import goldsizing
+    from .retailquote import select_quote
     from .backtest import goldrules as goldrules_module
     from .backtest import goldrules
 
@@ -1177,9 +1215,7 @@ def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, br
     coverage_known = (context.get("portfolio_complete") is True
                       and str(context.get("base_currency")) == "CNY")
 
-    quote_record = next((e for e in snapshot.get("evidence", [])
-                         if e.get("retail_quote")
-                         and e.get("instrument_id") == goldsizing.SYMBOL), None)
+    quote_record = select_quote(snapshot)
 
     item = {"instrument_id": goldsizing.SYMBOL, "action": "hold", "mode": "accumulation",
             "horizon": "long_term", "conditions": [],

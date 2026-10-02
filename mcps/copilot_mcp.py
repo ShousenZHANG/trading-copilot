@@ -88,17 +88,22 @@ def declare_holdings_coverage(base_currency: str = "USD", sleeve: str = "etf") -
 
 @mcp.tool()
 def record_retail_gold_quote(snapshot_id: str, merchant: str, product: str,
-                             ask_per_fine_gram: float, observed_at: str) -> dict:
+                             ask_per_fine_gram: float, observed_at: str,
+                             account_id: str | None = None) -> dict:
     """Attach a merchant gold ask YOU observed to a stored snapshot.
 
     The Shanghai Gold Exchange benchmark is not a price anyone can buy at, so a
     gold order cannot be sized without this. The system validates the shape and
     the freshness of what you report; it does not and cannot verify the price.
     `observed_at` must be ISO-8601 with a timezone offset and within 24 hours.
+    Supply `account_id` only when the user explicitly identifies that account,
+    using the same local id as its recorded fills. Without it, the daily quota
+    conservatively includes all accounts; merchant text does not identify one.
     """
     return service.capture_retail_quote(
         snapshot_id=snapshot_id, merchant=merchant, product=product,
-        ask_per_fine_gram=ask_per_fine_gram, observed_at=observed_at)
+        ask_per_fine_gram=ask_per_fine_gram, observed_at=observed_at,
+        account_id=account_id)
 
 
 @mcp.tool()

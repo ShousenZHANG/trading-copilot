@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import sys
 import unittest
+import copy
 from datetime import date, timedelta
+from functools import lru_cache
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -29,12 +31,20 @@ def admitted_result(family="momentum_top_n", parameters=None, days=5200):
     caller's claim, so the tests have to hand it something a backtest actually
     produced.
     """
+    parameters = parameters or {"top_n": 4.0, "lookback_days": 252.0, "skip_days": 21.0}
+    # Each test receives its own mutable Result. Reuse the deterministic
+    # historical engine run without sharing any field that tests can alter.
+    return copy.deepcopy(_cached_admitted_result(family, tuple(sorted(parameters.items())), days))
+
+
+@lru_cache(maxsize=8)
+def _cached_admitted_result(family, parameter_items, days):
+    parameters = dict(parameter_items)
     # top_n=4 over five symbols, not top_n=2 over three: at the default 15%
     # cash floor a two-name rotation puts 42.5% in one holding, above the ETF
     # sleeve's 25% single-name limit, so build_adoption now refuses it as a rule
     # that could never produce an executable order. Four of five is a real
     # rotation and clears the limit at 21.25% a name.
-    parameters = parameters or {"top_n": 4.0, "lookback_days": 252.0, "skip_days": 21.0}
     symbols = ["IWM", "IVV", "QQQ", "SPY", "VTI"]
     start = date(2005, 1, 3)
     dates, closes, day = [], [], start
@@ -58,10 +68,12 @@ def admitted_result(family="momentum_top_n", parameters=None, days=5200):
 
 class RuleIdentity(unittest.TestCase):
     def test_new_execution_semantics_have_a_new_adoption_identity(self):
-        self.assertEqual(ruleset.SCHEMA_VERSION, 2)
+        self.assertEqual(ruleset.SCHEMA_VERSION, 3)
         # Captured from the schema-1 implementation before the sizing/bands
         # repair: the same configuration must not reuse its old evidence ID.
         self.assertNotEqual(ruleset.rule_id(**self.material()), "rule-5abfee10fbcbed84")
+        # Schema 2 advanced cadence even when its rebalance traded zero.
+        self.assertNotEqual(ruleset.rule_id(**self.material()), "rule-9a04ea6eda9af9b3")
 
     def material(self, **overrides):
         base = dict(
@@ -136,6 +148,22 @@ class RuleIdentity(unittest.TestCase):
 
 
 class AdoptionRecord(unittest.TestCase):
+    def test_old_or_different_execution_evidence_cannot_be_adopted(self):
+        for changed in ({"rebalance_cadence": "rebalance_attempts"},
+                        {"execution_price": "next_session_close"},
+                        {"signal_cutoff": "unknown"}):
+            with self.subTest(changed=changed):
+                _, _, result = admitted_result()
+                result.execution_assumptions.update(changed)
+                with self.assertRaisesRegex(ValueError, "execution evidence"):
+                    self.build(result=result)
+
+    def test_missing_execution_evidence_is_refused(self):
+        _, _, result = admitted_result()
+        result.execution_assumptions = {}
+        with self.assertRaisesRegex(ValueError, "execution evidence"):
+            self.build(result=result)
+
     def test_execution_settings_must_match_the_actual_backtest(self):
         for override in ({"cash_floor_pct": 0.90}, {"integer_shares": False},
                          {"cost_model": bt_engine.CostModel.free()}):
@@ -188,7 +216,7 @@ class AdoptionRecord(unittest.TestCase):
         # ADR-0004's last consequence promises every order carries the backtest
         # statistics it was adopted under, so they must be stored here.
         record = self.build()
-        self.assertEqual(record["schema_version"], 2)
+        self.assertEqual(record["schema_version"], ruleset.SCHEMA_VERSION)
         for key in ("years", "cagr", "max_drawdown", "annual_turnover", "sharpe"):
             self.assertIn(key, record["admission"]["metrics"], key)
 

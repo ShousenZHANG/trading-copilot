@@ -64,6 +64,23 @@ records disclose same-bar-close execution and the limitations of using adjusted
 prices for synthetic share counts/per-share fees. Cash and all modeled trade
 costs share one funded sizing calculation.
 
+An optional ETF execution-timing experiment leaves that primary report intact:
+
+```bash
+python scripts/backtest_cli.py --universe SPY,QQQ,IWM,VTV,VUG --family all --execution-sensitivity next-session-close --out-dir data/audit
+```
+
+The separate `execution_sensitivity` block is research-only and cannot enter
+admission or adoption. It freezes targets using only the signal session and
+earlier closes, then sizes funded quantities at the next common published
+session's close. Final signals without a later session remain unexecuted.
+Paired metrics share the same initial cash and include initial trade costs;
+they do not replace the primary report's metrics. Both modes advance rebalance
+cadence only after an actual nonzero simulated fill. This is neither next-open
+execution nor a performance lower bound, and adjusted-price/share-count
+limitations still apply. The CLI rejects combinations with `--adopt`, gold
+accumulation or income-index proxies.
+
 An admission verdict checks the declared history/cost/reporting requirements.
 The post-2019 segment does not prove that today's parameter choices were never
 tuned on that segment. A convincing effectiveness evaluation still needs frozen

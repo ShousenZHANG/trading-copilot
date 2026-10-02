@@ -530,6 +530,30 @@ class CostModel(unittest.TestCase):
 
 
 class EngineLoop(unittest.TestCase):
+    def test_unfilled_bootstrap_does_not_advance_rebalance_cadence(self):
+        frame = frame_mod.build(
+            dates=[date(2024, 1, 2) + timedelta(days=i) for i in range(4)],
+            symbols=["AAA"], closes=[[p] for p in (150, 151, 150, 80)])
+        result = engine.run(
+            frame, rule=rules.InverseVolatility(("AAA",), lookback_days=2,
+                                               rebalance_days=21),
+            start_cash=100, cost_model=engine.CostModel.free(), cash_floor_pct=0)
+        self.assertEqual(result.positions_history, [{}, {"AAA": 1}])
+        self.assertEqual(result.rebalance_count, 1)
+        self.assertEqual(result.rebalance_attempt_count, 2)
+
+    def test_due_plan_with_no_delta_does_not_reset_an_existing_cadence(self):
+        frame = frame_mod.build(
+            dates=[date(2024, 1, 2) + timedelta(days=i) for i in range(6)],
+            symbols=["AAA"], closes=[[p] for p in (100, 100, 100, 100, 100, 50)])
+        result = engine.run(
+            frame, rule=rules.InverseVolatility(("AAA",), lookback_days=2,
+                                               rebalance_days=2),
+            start_cash=1000, cost_model=engine.CostModel.free(), cash_floor_pct=0.2)
+        self.assertEqual(result.positions_history[-1], {"AAA": 9})
+        self.assertEqual(result.rebalance_count, 2)
+        self.assertEqual(result.rebalance_attempt_count, 3)
+
     def test_results_disclose_execution_timing_and_adjusted_price_limits(self):
         result = engine.run(self.flat_frame(2), rule=engine.StaticWeights({"AAA": 1.0}),
                             start_cash=1000.0, cost_model=engine.CostModel.free(), cash_floor_pct=0.0)

@@ -9,15 +9,23 @@ from package_release import REQUIRED_ARTIFACT_FILES, _audit_zip
 
 
 class ReleasePrivacyTests(unittest.TestCase):
-    def audit(self, additions):
+    def audit(self, additions, *, omissions=()):
         with tempfile.TemporaryDirectory() as directory:
             archive = Path(directory) / "fixture.zip"
             files = {name: "{}" if name.endswith(".json") else "" for name in REQUIRED_ARTIFACT_FILES}
             files.update(additions)
+            for name in omissions:
+                files.pop(name, None)
             with zipfile.ZipFile(archive, "w") as output:
                 for name, content in files.items():
                     output.writestr("trading-copilot/" + name, content)
             return _audit_zip(archive)
+
+    def test_execution_sensitivity_dependency_must_ship(self):
+        name = "scripts/copilot/backtest/execution_sensitivity.py"
+        self.assertEqual(self.audit({}), [])
+        problems = self.audit({}, omissions=(name,))
+        self.assertTrue(any(name in problem for problem in problems), problems)
 
     def test_codex_secret_is_rejected_in_actual_archive(self):
         problems = self.audit({".codex/config.toml": '[mcp_servers.fixture.env]\nAPI_KEY="fixture-only-secret"'})

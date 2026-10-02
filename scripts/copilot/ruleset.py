@@ -54,9 +54,11 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping, Sequence
 
 # Version 2 binds complete execution settings and uses funded sizing / reserve-
-# aware bands. A schema-1 adoption's old metrics cannot describe that behavior.
+# aware bands. Schema 3 also binds cadence to actual nonzero executions;
+# a zero-quantity attempt does not advance the rebalance interval. Earlier
+# admission metrics cannot establish the evidence for this calculation.
 # The journal retains old records; execution surfaces require this version.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 #: The sleeves that may be adopted. Each one brings its own universe check and
 #: its own exchange calendar; adding a name here without both is the bug the
 #: old "only the ETF sleeve exists" comment warned about, because a sleeve with
@@ -351,6 +353,14 @@ def build_adoption(*, sleeve: str, result, cost_model: Mapping[str, Any],
         raise ValueError("adopted cash_floor_pct does not match the actual backtest cash_floor_pct")
     if type(integer_shares) is not bool or getattr(result, "integer_shares", None) is not integer_shares:
         raise ValueError("adopted integer_shares does not match the actual backtest integer_shares")
+    expected_execution = {"execution_price": "same_bar_close",
+                          "signal_cutoff": "includes_current_bar",
+                          "rebalance_cadence": "completed_nonzero_trades"}
+    actual_execution = getattr(result, "execution_assumptions", None)
+    if (not isinstance(actual_execution, dict)
+            or any(actual_execution.get(key) != value for key, value in expected_execution.items())):
+        raise ValueError("execution evidence does not match the current adoptable backtest; "
+                         "rerun it with the current engine before adoption")
 
     _refuse_an_unexecutable_rule(family, cleaned_parameters, symbols, cleaned_targets,
                                  float(cash_floor_pct))
