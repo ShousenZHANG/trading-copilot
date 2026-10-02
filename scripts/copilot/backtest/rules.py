@@ -97,7 +97,7 @@ class FixedWeightBands:
         return dict(self.targets)
 
     def should_rebalance(self, frame: PriceFrame, i: int, current: dict[str, float],
-                         last_rebalance_index: int | None) -> bool:
+                         last_rebalance_index: int | None, *, cash_floor_pct: float = 0.0) -> bool:
         # Bootstrap. bt 1.2.3's RunIfOutOfBounds returns False here because it
         # iterates children that Rebalance has not created yet, and the whole
         # backtest then sits in cash. This branch is that bug's absence.
@@ -111,7 +111,9 @@ class FixedWeightBands:
         # and must be able to trigger a rebalance like any other drifted
         # symbol. Iterating self.targets alone made such a holding invisible.
         for symbol in set(self.targets) | set(current):
-            target = self.targets.get(symbol, 0.0)
+            # Current weights use total account value, including its reserve.
+            # Translate invested-book targets to that same denominator.
+            target = (1.0 - cash_floor_pct) * self.targets.get(symbol, 0.0)
             drift = abs(current.get(symbol, 0.0) - target)
             if drift >= self.absolute_band or (target > 0 and drift / target >= self.relative_band):
                 return True
@@ -193,7 +195,7 @@ class InverseVolatility:
         return {s: v / total for s, v in inverse.items()}
 
     def should_rebalance(self, frame: PriceFrame, i: int, current: dict[str, float],
-                         last_rebalance_index: int | None) -> bool:
+                         last_rebalance_index: int | None, *, cash_floor_pct: float = 0.0) -> bool:
         if last_rebalance_index is None:
             return True
         return i - last_rebalance_index >= self.rebalance_days
@@ -293,7 +295,7 @@ class MomentumTopN:
         return {symbol: share for symbol in chosen}
 
     def should_rebalance(self, frame: PriceFrame, i: int, current: dict[str, float],
-                         last_rebalance_index: int | None) -> bool:
+                         last_rebalance_index: int | None, *, cash_floor_pct: float = 0.0) -> bool:
         if last_rebalance_index is None:
             return True
         return i - last_rebalance_index >= self.skip_days

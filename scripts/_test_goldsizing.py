@@ -16,6 +16,14 @@ def plan(**overrides):
 
 
 class MoneyIsDecimalNeverFloat(unittest.TestCase):
+    def test_order_counts_must_be_nonnegative_whole_numbers(self):
+        for count in (-1, 1.5, True, "2"):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                plan(orders_today=count)
+        for maximum in (0, 1.5, True, "10"):
+            with self.subTest(maximum=maximum), self.assertRaises(ValueError):
+                plan(max_orders_per_day=maximum)
+
     """CLAUDE.md: monetary journal values use decimal strings."""
 
     def test_the_amount_is_a_string(self):

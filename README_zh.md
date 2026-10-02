@@ -25,4 +25,8 @@
 
 默认会话输出约 4–6 行，包含建议、依据、再观察条件、数据日期和来源。买入数量与限价只来自策略引擎对你在 config/user.toml 中采纳的规则的计算（见 ADR-0004），不承诺任何收益。
 
+具体数量需要依次完成：私人配置、真实回测与规则采用、该账簿的完整持仓声明、当前快照；黄金还需本人观察的商家含费报价。完整操作步骤见 [安装教程](docs/INSTALL.md#adopt-a-rule-and-request-engine-orders)。黄金定投节奏未回测；历史曲线只衡量持有黄金的表现。
+
+`/watchlist` 写入本机私有的 data/watchlist.local.md，公开的 data/watchlist.md 只提供受支持示例。当前没有无人值守扫描器、券商同步或自动下单。
+
 开发、测试、共享配置和备份命令见 [README](README.md)。研究用途及条款见 [DISCLAIMER](DISCLAIMER.md)。

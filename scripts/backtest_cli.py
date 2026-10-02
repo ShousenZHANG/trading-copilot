@@ -259,6 +259,7 @@ def run_family(frame, rule, *, start_cash: float, cash_floor_pct: float) -> dict
                  for neighbour in sensitivity_grid(result.parameters)]
     deltas = [abs(n["cagr"] - base_cagr) for n in neighbours if "cagr" in n]
     return {"rule": rule.name, "parameters": result.parameters, "caveats": list(rule.caveats),
+            "execution_assumptions": result.execution_assumptions,
             "admitted": report.admitted, "failures": report.failures, "metrics": report.metrics,
             "sensitivity": {"neighbours": neighbours,
                            "max_abs_cagr_delta": round(max(deltas), 6) if deltas else None,
@@ -302,6 +303,7 @@ def run_gold(*, start_cash: float, cash_floor_pct: float, waivers=None) -> dict:
     report = admission.assess(result, sessions_by_year=admission.stress_sessions_for("gold"),
                               waivers=dict(waivers or {}))
     return {"rule": rule.name, "parameters": result.parameters,
+            "execution_assumptions": result.execution_assumptions,
             "caveats": [goldrules.DISCLOSURE],
             "admitted": report.admitted, "waived": report.waived,
             "waiver_reasons": list(report.waiver_reasons),
@@ -348,6 +350,7 @@ def run_income_proxy(*, start_cash: float, cash_floor_pct: float) -> dict:
     report = admission.assess(result, sessions_by_year=admission.STRESS_SESSIONS,
                               waivers=bxn.Q29_WAIVER)
     return {"rule": "bxn_index_proxy", "label": bxn.evidence_label(tuple(sorted(universe.INCOME_PROXY_ONLY))),
+            "execution_assumptions": result.execution_assumptions,
             "admitted": report.admitted, "waived": report.waived,
             "waiver_reasons": report.waiver_reasons, "failures": report.failures,
             "metrics": report.metrics}
@@ -614,6 +617,8 @@ def _write_report(payload: dict, alignment: dict, caveats: list, *, out_dir: Pat
             print(f"            - {failure}")
         for caveat in family["caveats"]:
             print(f"            caveat: {caveat}")
+        for note in family.get("execution_assumptions", {}).get("disclosures", []):
+            print(f"            execution assumption: {note}")
     print(f"\n  common history: {alignment['common_first']} .. {alignment['common_last']} "
           f"({alignment['common_bars']} bars); start bound by {alignment['binds_start']}, "
           f"end bound by {alignment['binds_end']}, {alignment['bars_lost_vs_longest']} bars "

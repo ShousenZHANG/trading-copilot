@@ -24,6 +24,7 @@
       "mcp__trading-copilot__record_investment_operation",
       "mcp__trading-copilot__get_data_capabilities",
       "mcp__trading-copilot__declare_holdings_coverage",
+      "mcp__trading-copilot__record_retail_gold_quote",
       "mcp__trading-copilot__evaluate_adopted_rule"
     ],
     "deny": [

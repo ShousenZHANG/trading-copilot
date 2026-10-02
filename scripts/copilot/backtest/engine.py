@@ -8,11 +8,12 @@ comment, because look-ahead is the failure that makes a backtest look good.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Protocol, Sequence
 
 from .frame import PriceFrame
+from ..sizing import plan_orders
 
 WEIGHT_TOLERANCE = 1e-6
 
@@ -41,7 +42,7 @@ class Rule(Protocol):
         """Target weights for bar `i`, summing to 1.0. Look backwards only."""
 
     def should_rebalance(self, frame: PriceFrame, i: int, current: dict[str, float],
-                         last_rebalance_index: int | None) -> bool:  # pragma: no cover - default
+                         last_rebalance_index: int | None, *, cash_floor_pct: float = 0.0) -> bool:  # pragma: no cover - default
         return True
 
 
@@ -60,7 +61,7 @@ class StaticWeights:
         return dict(self.targets)
 
     def should_rebalance(self, frame: PriceFrame, i: int, current: dict[str, float],
-                         last_rebalance_index: int | None) -> bool:
+                         last_rebalance_index: int | None, *, cash_floor_pct: float = 0.0) -> bool:
         return True
 
 
@@ -121,6 +122,14 @@ class Result:
     traded_notional: float = 0.0
     total_costs: float = 0.0
     rebalance_count: int = 0
+    # None distinguishes old/hand-built metric fixtures from engine-produced
+    # results. Such fixtures remain useful for admission tests but cannot be
+    # adopted without the execution settings that produced their curve.
+    targets: dict[str, float] | None = None
+    cost_model: dict | None = None
+    cash_floor_pct: float | None = None
+    integer_shares: bool | None = None
+    execution_assumptions: dict = field(default_factory=dict)
 
     @property
     def average_value(self) -> float:
@@ -150,7 +159,19 @@ def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostMod
     """Trade at each bar's close, paying costs on the traded notional."""
     if not 0.0 <= cash_floor_pct < 1.0:
         raise ValueError(f"cash_floor_pct must be in [0, 1), got {cash_floor_pct}")
-    result = Result(rule_name=rule.name, parameters=dict(rule.parameters), universe=frame.symbols)
+    result = Result(rule_name=rule.name, parameters=dict(rule.parameters), universe=frame.symbols,
+                    targets=(dict(rule.targets) if getattr(rule, "targets", None) is not None else None),
+                    cost_model=asdict(cost_model), cash_floor_pct=float(cash_floor_pct),
+                    integer_shares=integer_shares)
+    result.execution_assumptions = {
+        "execution_price": "same_bar_close", "signal_cutoff": "includes_current_bar",
+        "price_basis": frame.price_basis,
+        "cash_reserve": "fraction_of_pretrade_NAV_reserved_before_trade_costs",
+        "disclosures": [
+            "Signals may use the current close and trade at that close; the next executable time, gaps and fill availability are not modeled.",
+            "When prices are adjusted, share counts and per-share fees are synthetic approximations; historical as-traded quantities are not reconstructed.",
+        ],
+    }
     cash = float(start_cash)
     positions: dict[str, float] = {}
     last_rebalance_index: int | None = None
@@ -162,22 +183,15 @@ def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostMod
         prices = frame.row(i)
         value = cash + sum(qty * prices[sym] for sym, qty in positions.items())
         current = {sym: (qty * prices[sym]) / value for sym, qty in positions.items()} if value else {}
-        if rule.should_rebalance(frame, i, current, last_rebalance_index):
+        if rule.should_rebalance(frame, i, current, last_rebalance_index,
+                                 cash_floor_pct=cash_floor_pct):
             last_rebalance_index = i
             targets = rule.weights(frame, i)
             _validate(targets, frame)
-            # Known wart, deliberately left visible: with integer shares the
-            # engine buys floor(investable / price) and then pays commission, so
-            # cash can finish a bar a few dollars below the floor (negative when
-            # the floor is 0). It self-corrects on the next rebalance by selling
-            # one share, and the error is bounded by one share plus costs. A real
-            # broker would reject the overdraft; modelling that needs a
-            # cost-aware sizing loop, which is Plan 4's problem, not this one's.
-            investable = value * (1.0 - cash_floor_pct)
-            desired: dict[str, float] = {}
-            for symbol, weight in targets.items():
-                raw = (investable * weight) / prices[symbol]
-                desired[symbol] = float(int(raw)) if integer_shares else raw
+            plan = plan_orders(weights=targets, prices=prices, held_shares=positions,
+                               investable_cash=cash, cash_floor_pct=cash_floor_pct,
+                               cost_model=cost_model, integer_shares=integer_shares)
+            desired = {order["instrument_id"]: order["target_shares"] for order in plan["orders"]}
             # rebalance_count reports trades, not attempts: should_rebalance
             # firing every bar while every target rounds to zero shares (a
             # tiny book against expensive holdings) is zero rebalances, not
@@ -208,8 +222,7 @@ def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostMod
             value = cash + sum(qty * prices[sym] for sym, qty in positions.items())
         # This is the invariant metrics._validated depends on downstream, so
         # it is enforced where the value is produced, not only where it is
-        # consumed. Cash alone may dip a few dollars below the floor (the
-        # documented wart above); total value must not, and never NaN/inf.
+        # consumed. Costs have already been reserved before orders are sized.
         if not math.isfinite(value) or value <= 0:
             raise ValueError(
                 f"bar {i} ({when}): portfolio value must be finite and positive, got {value}")

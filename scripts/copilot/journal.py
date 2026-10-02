@@ -15,12 +15,13 @@ import sqlite3
 import time as wall_time
 import uuid
 from contextlib import contextmanager
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Any
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "state" / "copilot.sqlite"
+SHANGHAI_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 
 
 class JournalConflict(ValueError):
@@ -476,8 +477,76 @@ def record_operation(operation: dict, idempotency_key: str, *, db_path: Any = No
         return receipt
 
 
+def _sleeve_of(value: dict) -> str:
+    """Classify old records without allowing their currency to select a book."""
+    return "gold" if value.get("instrument_id") == "GOLD.CNY" else "etf"
+
+
+def _gold_execution_context(states: list[dict], moment: Any) -> dict:
+    """Current completed fills, counted on the merchant's Shanghai calendar."""
+    day = _clock(moment).astimezone(SHANGHAI_TIMEZONE).date()
+    completed = [s["operation"] for s in states
+                 if s["status"] == "executed" and s["operation"].get("instrument_id") == "GOLD.CNY"]
+    counts: dict[tuple, int] = {}
+    for trade in completed:
+        if _clock(trade["occurred_at"]).astimezone(SHANGHAI_TIMEZONE).date() != day:
+            continue
+        key = (trade.get("account_id"), trade.get("merchant"))
+        counts[key] = counts.get(key, 0) + 1
+    buys = [trade for trade in completed if trade["side"] == "buy"]
+    latest = max(buys, key=lambda trade: _clock(trade["occurred_at"])) if buys else None
+    return {"gold_orders_today": sum(counts.values()),
+            "gold_order_day": day.isoformat(), "gold_order_timezone": "Asia/Shanghai",
+            "gold_order_counts_today": [{"account_id": account, "merchant": merchant, "count": count}
+                                        for (account, merchant), count in sorted(
+                                            counts.items(), key=lambda item: str(item[0]))],
+            "gold_last_completed_buy_at": latest["occurred_at"] if latest else None}
+
+
+def _valuation_summaries(recommendations: list[dict], sleeve: str, version: str) -> list[dict]:
+    """Bounded high-water summaries, computed before conversational row limits."""
+    currency = "CNY" if sleeve == "gold" else "USD"
+    segments: dict[tuple, dict] = {}
+    rows = list(reversed(recommendations))
+    if rows and all(row.get("created_at") for row in rows):
+        rows.sort(key=lambda row: str(row["created_at"]))
+    for row in rows:
+        valuation = row.get("portfolio_valuation")
+        if not isinstance(valuation, dict) or valuation.get("holdings_version") != version:
+            continue
+        if valuation.get("sleeve") != sleeve or valuation.get("currency") != currency:
+            continue
+        try:
+            value = Decimal(str(valuation.get("total_value")))
+        except InvalidOperation:
+            continue
+        if not value.is_finite() or value <= 0:
+            continue
+        key = (valuation.get("cash_value"), valuation.get("mark_basis"))
+        if any(value is not None and not isinstance(value, str) for value in key):
+            continue
+        segment = segments.setdefault(key, {
+            "sleeve": sleeve, "currency": currency, "holdings_version": version,
+            "cash_value": key[0], "mark_basis": key[1], "peak_value": value,
+            "max_drawdown": Decimal(0), "sample_count": 0, "seen": set()})
+        snapshot_id = row.get("snapshot_id")
+        if not isinstance(snapshot_id, str) or snapshot_id in segment["seen"]:
+            continue
+        segment["seen"].add(snapshot_id)
+        segment["peak_value"] = max(segment["peak_value"], value)
+        segment["max_drawdown"] = max(segment["max_drawdown"],
+                                      (segment["peak_value"] - value) / segment["peak_value"])
+        segment["sample_count"] += 1
+        segment["latest_snapshot_id"] = snapshot_id
+    return [{**{key: value for key, value in segment.items()
+                if key not in {"seen", "peak_value", "max_drawdown"}},
+             "peak_value": _number(segment["peak_value"]),
+             "max_drawdown": _number(segment["max_drawdown"])}
+            for segment in segments.values()]
+
+
 def get_context(instrument_ids: Any = None, as_of: Any = None, *, sleeve: str = "etf",
-                recommendations_limit: int = 200, db_path: Any = None) -> dict:
+                recommendations_limit: int = 200, db_path: Any = None, now: Any = None) -> dict:
     """Read holdings and audit context; as_of means information known by that UTC time.
 
     `sleeve` selects which sleeve's coverage declaration to read. Coverage
@@ -504,6 +573,7 @@ def get_context(instrument_ids: Any = None, as_of: Any = None, *, sleeve: str = 
             states = _states(connection, as_of)
             portfolio_version = _portfolio_version(states)
             holdings = [item for item in _holdings(states) if not instruments or item["instrument_id"] in instruments]
+            sleeve_holdings = [item for item in holdings if _sleeve_of(item) == sleeve]
             matching = [state for state in states if not instruments or state["operation"].get("instrument_id") in instruments]
             # Newest first, and the LIMIT is applied AFTER the instrument filter:
             # limiting in SQL first would return the newest rows overall and then
@@ -518,7 +588,8 @@ def get_context(instrument_ids: Any = None, as_of: Any = None, *, sleeve: str = 
             query += " ORDER BY recorded_at DESC, decision_id"
             matched = [json.loads(row[0]) for row in connection.execute(query, params).fetchall()]
             matched = [item for item in matched
-                       if not instruments or item.get("instrument_id") in instruments]
+                       if _sleeve_of(item) == sleeve
+                       and (not instruments or item.get("instrument_id") in instruments)]
             limit = max(1, int(recommendations_limit))
             truncated = len(matched) > limit
             decisions = [dict(item, portfolio_current=item.get("portfolio_version") == portfolio_version)
@@ -537,6 +608,15 @@ def get_context(instrument_ids: Any = None, as_of: Any = None, *, sleeve: str = 
             else:
                 complete, completeness, base_currency = False, "unknown", None
             result = {"portfolio_version": portfolio_version, "portfolio_complete": complete, "completeness": completeness, "base_currency": base_currency, "fx_status": "unknown", "portfolio_value": None, "holdings": holdings, "holdings_by_currency": {currency: [item for item in holdings if item["currency"] == currency] for currency in sorted({item["currency"] for item in holdings})}, "pending_operations": [state for state in matching if state["status"] in {"pending", "pending_duplicate"}], "intents": [state for state in matching if state["status"] == "intent"], "operations": matching, "recommendations": decisions, "recommendations_truncated": truncated, "as_of": _stamp(as_of, end_of_day=True) if as_of is not None else None}
+            sleeve_states = [state for state in states if _sleeve_of(state["operation"]) == sleeve]
+            completed = [state["operation"] for state in sleeve_states if state["status"] == "executed"]
+            result.update(context_source="journal", sleeve=sleeve, sleeve_holdings=sleeve_holdings,
+                          sleeve_portfolio_version=_portfolio_version(sleeve_states),
+                          last_completed_execution_at=(max(completed, key=lambda trade: _clock(
+                              trade["occurred_at"]))["occurred_at"] if completed else None))
+            result["valuation_history"] = _valuation_summaries(
+                matched, sleeve, result["sleeve_portfolio_version"])
+            result.update(_gold_execution_context(states, now if now is not None else as_of))
             connection.execute("COMMIT")
             return result
         except BaseException:
@@ -563,8 +643,7 @@ def save_snapshot(snapshot: dict, *, db_path: Any = None) -> dict:
         return {"snapshot_id": snapshot_id, "recorded": True, "replayed": bool(previous)}
 
 
-def record_recommendation(decision: dict, *, db_path: Any = None) -> dict:
-    """Store a structured policy Decision. This never creates a journal trade."""
+def _prepare_recommendation(decision: dict) -> tuple[dict, str]:
     if not isinstance(decision, dict):
         raise ValueError("decision must be a dict")
     for field in ("snapshot_id", "portfolio_version", "instrument_id", "action"):
@@ -575,18 +654,45 @@ def record_recommendation(decision: dict, *, db_path: Any = None) -> dict:
     if not isinstance(decision_id, str) or not decision_id:
         raise ValueError("decision_id must be a nonempty string")
     payload["decision_id"] = decision_id
-    serialized = _json(payload)
+    return payload, _json(payload)
+
+
+def record_recommendations(decisions: list[dict], *, db_path: Any = None) -> list[dict]:
+    """Commit a whole evaluated basket, or leave every new row uncommitted.
+
+    A single BEGIN IMMEDIATE binds every row to the same current portfolio.
+    Replays remain allowed, but IDs can never describe different bytes.
+    """
+    if not isinstance(decisions, list):
+        raise ValueError("decisions must be a list")
+    prepared = [_prepare_recommendation(decision) for decision in decisions]
+    if not prepared:
+        return []
+    if len({payload["portfolio_version"] for payload, _ in prepared}) != 1:
+        raise JournalConflict("a recommendation basket must use one portfolio_version")
+    receipts = []
     with _connection(db_path) as connection:
         with _transaction(connection):
-            previous = connection.execute("SELECT payload FROM recommendations WHERE decision_id=?", (decision_id,)).fetchone()
-            if previous and previous[0] != serialized:
-                raise JournalConflict("decision_id already contains a different decision")
-            if not previous and payload["portfolio_version"] != _portfolio_version(_states(connection)):
-                raise JournalConflict("portfolio changed before recommendation commit; reassess against current holdings")
-            if not connection.execute("SELECT 1 FROM evidence_snapshots WHERE snapshot_id=?", (payload["snapshot_id"],)).fetchone():
-                raise ValueError("save the referenced evidence snapshot before recording a recommendation")
-            connection.execute("INSERT OR IGNORE INTO recommendations VALUES (?,?,?,?)", (decision_id, payload["snapshot_id"], _stamp(), serialized))
-        return {"decision_id": decision_id, "recorded": True, "replayed": bool(previous)}
+            current = _portfolio_version(_states(connection))
+            stamp = _stamp()
+            for payload, serialized in prepared:
+                decision_id = payload["decision_id"]
+                previous = connection.execute("SELECT payload FROM recommendations WHERE decision_id=?", (decision_id,)).fetchone()
+                if previous and previous[0] != serialized:
+                    raise JournalConflict("decision_id already contains a different decision")
+                if not previous and payload["portfolio_version"] != current:
+                    raise JournalConflict("portfolio changed before recommendation commit; reassess against current holdings")
+                if not connection.execute("SELECT 1 FROM evidence_snapshots WHERE snapshot_id=?", (payload["snapshot_id"],)).fetchone():
+                    raise ValueError("save the referenced evidence snapshot before recording a recommendation")
+                connection.execute("INSERT OR IGNORE INTO recommendations VALUES (?,?,?,?)",
+                                   (decision_id, payload["snapshot_id"], stamp, serialized))
+                receipts.append({"decision_id": decision_id, "recorded": True, "replayed": bool(previous)})
+    return receipts
+
+
+def record_recommendation(decision: dict, *, db_path: Any = None) -> dict:
+    """Single-decision compatibility facade over the atomic basket operation."""
+    return record_recommendations([decision], db_path=db_path)[0]
 
 
 COVERAGE_SLEEVES = ("etf", "gold")

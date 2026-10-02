@@ -210,4 +210,5 @@ def to_frame(series: Sequence[Series], *, dividend_adjusted: bool = True) -> Pri
         lookup[s.symbol] = dict(zip(s.dates, chosen))
     symbols = [s.symbol for s in series]
     closes = [[lookup[sym][d] for sym in symbols] for d in dates]
-    return build(dates=dates, symbols=symbols, closes=closes)
+    return build(dates=dates, symbols=symbols, closes=closes,
+                 price_basis="split_and_dividend_adjusted" if dividend_adjusted else "split_adjusted")

@@ -1,6 +1,6 @@
 # Trading Copilot
 
-Free daily investment research in Claude Code and Codex, with short Chinese answers and a shared local operation journal. Covers registered US ETFs (a closed whitelist in scripts/copilot/instruments.py), the Nasdaq-100 and Composite indexes as benchmarks, and Shanghai Gold Exchange Au99.99 gold in RMB.
+Investment research with free market data in Claude Code and Codex, short Chinese answers and a shared local operation journal. Covers registered US ETFs (a closed whitelist in scripts/copilot/instruments.py), the Nasdaq-100 and Composite indexes as benchmarks, and Shanghai Gold Exchange Au99.99 gold in RMB. Your chosen model/client may have its own usage costs.
 
 Ask naturally: “QQQ 适合长期持有吗？” “现在适合积累金条吗？” “我已经买了两股 QQQ……” The assistant collects a fresh evidence snapshot, checks its quality, assesses a proposal and returns a brief sourced answer. An explicit completed purchase/sale is recorded; an intention or incomplete execution stays separate. No broker order is sent.
 
@@ -50,11 +50,17 @@ Conversation and /gold produce concise answers from one validated snapshot. Orde
 
 Private state lives in gitignored data/state, data/runs and data/decisions. Back up a live journal with `python scripts/copilot_cli.py backup <destination>`. Credentials and private state are excluded from release archives.
 
+`/watchlist` stores personal choices in gitignored data/watchlist.local.md;
+data/watchlist.md is a public supported example. For engine orders, follow the
+[configuration, adoption, coverage and evaluation walkthrough](docs/INSTALL.md#adopt-a-rule-and-request-engine-orders).
+Research works without an adopted rule. There is no unattended scan runner or broker integration.
+
 ## Development
 
 Canonical prompts are in .claude. Run `python scripts/sync_runtimes.py` to generate .agents/skills, skills/ and .codex/config.toml. Drift checks, contract tests and runtime probes cover different guarantees:
 ```sh
 python scripts/check.py
+python scripts/self_tests.py
 python -m unittest discover -s scripts -p "_test_*.py"
 uv run --no-project --quiet --script scripts/copilot_probe.py
 python scripts/package_release.py

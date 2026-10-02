@@ -70,7 +70,7 @@ class ScheduledAccumulation:
         return {SYMBOL: 1.0}
 
     def should_rebalance(self, frame: PriceFrame, i: int, current: dict[str, float],
-                         last_rebalance_index: int | None) -> bool:
+                         last_rebalance_index: int | None, *, cash_floor_pct: float = 0.0) -> bool:
         if last_rebalance_index is None or not current:
             return True                      # bootstrap: the first contribution
         if i - last_rebalance_index < self.interval_days:

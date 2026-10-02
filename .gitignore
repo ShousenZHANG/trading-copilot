@@ -7,6 +7,7 @@
 
 # Personal trading state (do not commit positions/portfolio)
 data/positions.md
+data/watchlist.local.md
 data/runs/
 data/memory/trading_memory.md
 data/audit/
@@ -37,7 +38,7 @@ reference/*
 
 # The one vendored exception. The offline CI matrix installs zero third-party
 # packages and has no network, so the gold backtest can only run against a
-# series held in the tree — see scripts/refresh_gold_history.py.
+# series held in the tree — see scripts/refresh_gold_prices.py.
 !reference/sge-au9999-daily.csv
 
 # Python (for any helper scripts)

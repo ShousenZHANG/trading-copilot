@@ -76,7 +76,9 @@ REMOVED_FEATURES = (
     "bull-researcher",
 )
 
-REQUIRED_DOCS = ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md")
+REQUIRED_DOCS = ("README.md", "README_zh.md", "AGENTS.md", "CLAUDE.md",
+                 "docs/INSTALL.md", "docs/mcp-setup.md", "docs/continuous-tracking.md",
+                 "evals/README.md")
 
 # Markdown that quotes or links rather than advertises.
 _FENCED_CODE_RE = re.compile(r"```.*?```", re.S)
@@ -337,6 +339,20 @@ def check_docs() -> None:
             err(f"{relative}: still advertises removed feature '{marker}' (if "
                 f"this line documents the removal, mark it with "
                 f"{HISTORICAL_MARKER})")
+        for target in missing_local_references(read(path)):
+            err(f"{relative}: references missing local file '{target}'")
+
+
+def missing_local_references(text: str, root: Path = ROOT) -> list[str]:
+    """Check runnable local paths even when they appear in fenced examples."""
+    targets = re.findall(r"(?<![\w./-])((?:scripts|mcps|docs/adr)/[A-Za-z0-9_./-]+\.(?:py|md))", text)
+    return sorted({target for target in targets if not (root / target).is_file()})
+
+
+def check_self_tests() -> None:
+    from self_tests import validate
+    for problem in validate():
+        err(problem)
 
 
 def _is_ignored(candidate: str) -> bool:
@@ -413,6 +429,7 @@ def check_private_state_not_tracked() -> None:
                 "data/state",
                 "data/decisions",
                 "data/positions.md",
+                "data/watchlist.local.md",
                 "docs/strategy.md",
                 "config/user.toml",
                 ".env",
@@ -438,6 +455,7 @@ def main() -> int:
     check_commands()
     check_agents()
     check_skill_mirror()
+    check_self_tests()
     check_docs()
     check_workflows()
     check_private_state_not_tracked()

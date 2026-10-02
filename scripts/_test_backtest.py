@@ -530,6 +530,34 @@ class CostModel(unittest.TestCase):
 
 
 class EngineLoop(unittest.TestCase):
+    def test_results_disclose_execution_timing_and_adjusted_price_limits(self):
+        result = engine.run(self.flat_frame(2), rule=engine.StaticWeights({"AAA": 1.0}),
+                            start_cash=1000.0, cost_model=engine.CostModel.free(), cash_floor_pct=0.0)
+        self.assertEqual(result.execution_assumptions["execution_price"], "same_bar_close")
+        self.assertTrue(any("adjusted" in note for note in result.execution_assumptions["disclosures"]))
+
+    def test_costs_never_overdraw_cash_or_the_cash_reserve(self):
+        for integer, floor in ((True, 0.0), (True, 0.20), (False, 0.0), (False, 0.20)):
+            with self.subTest(integer=integer, floor=floor):
+                frame = frame_mod.build(dates=[date(2024, 1, 2)], symbols=["AAA"],
+                                        closes=[[100.0]])
+                result = engine.run(frame, rule=engine.StaticWeights({"AAA": 1.0}),
+                                    start_cash=1000.0, cost_model=engine.CostModel(),
+                                    cash_floor_pct=floor, integer_shares=integer)
+                self.assertGreaterEqual(result.cash_history[0], 1000.0 * floor - 1e-8)
+
+    def test_bands_respect_cash_reserve_without_unnecessary_trades(self):
+        frame = frame_mod.build(
+            dates=[date(2024, 1, d) for d in (2, 3, 4, 5)],
+            symbols=["SPY", "IVV", "QQQ", "VTI"],
+            closes=[[p] * 4 for p in (100.0, 100.1, 100.2, 100.3)])
+        result = engine.run(frame, rule=rules.FixedWeightBands({s: 0.25 for s in frame.symbols}),
+                            start_cash=1000000.0, cost_model=engine.CostModel(),
+                            cash_floor_pct=0.30)
+        # Uniform price moves preserve the invested allocation. The reserve
+        # must not be mistaken for a 7.5-point drift in each holding.
+        self.assertEqual(result.rebalance_count, 1)
+
     def flat_frame(self, n=30):
         return frame_mod.build(dates=[date(2020, 1, 1) + timedelta(days=i) for i in range(n)],
                                symbols=["AAA", "BBB"], closes=[[100.0, 50.0]] * n)
@@ -598,16 +626,16 @@ class EngineLoop(unittest.TestCase):
                        start_cash=1000.0, cost_model=engine.CostModel.free(),
                        cash_floor_pct=0.0, integer_shares=False)
 
-    def test_run_raises_when_a_bar_value_turns_non_positive(self):
-        # A cost model with an uncapped, huge minimum fee and a single-dollar
-        # start turns portfolio value negative on bar 0. That must raise
-        # rather than silently hand a negative "equity curve" to a caller.
+    def test_unaffordable_fees_leave_the_cash_unspent(self):
+        # The rebalance planner must refuse an unaffordable purchase instead
+        # of paying a huge minimum fee and producing negative cash/NAV.
         frame = frame_mod.build(dates=[date(2020, 1, 1)], symbols=["AAA"], closes=[[1.0]])
         ruinous = engine.CostModel(per_share_usd=0.0, minimum_usd=1000.0,
                                    max_pct_of_notional=None, spread_bps=0.0)
-        with self.assertRaisesRegex(ValueError, "portfolio value"):
-            engine.run(frame, rule=engine.StaticWeights({"AAA": 1.0}), start_cash=1.0,
-                       cost_model=ruinous, cash_floor_pct=0.0)
+        result = engine.run(frame, rule=engine.StaticWeights({"AAA": 1.0}), start_cash=1.0,
+                            cost_model=ruinous, cash_floor_pct=0.0)
+        self.assertEqual(result.cash_history, [1.0])
+        self.assertEqual(result.rebalance_count, 0)
 
     def test_result_reports_traded_notional_for_turnover(self):
         result = engine.run(self.flat_frame(), rule=engine.StaticWeights({"AAA": 1.0}),

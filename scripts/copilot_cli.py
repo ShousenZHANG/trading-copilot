@@ -33,8 +33,12 @@ def main() -> int:
     collect.add_argument("instruments", nargs="+")
     collect.add_argument("--horizon", choices=("daily", "swing", "long_term"), default="daily")
     sub.add_parser("capabilities")
+    resolve = sub.add_parser("resolve", help="normalize one instrument against the shared registry")
+    resolve.add_argument("--input", default="-", help="JSON with instrument_id, from a file or stdin")
     ctx = sub.add_parser("context")
     ctx.add_argument("instruments", nargs="*")
+    ctx.add_argument("--sleeve", choices=("etf", "gold"), default="etf",
+                     help="which book's coverage declaration to read: etf USD or gold CNY")
     snap = sub.add_parser("get-snapshot")
     snap.add_argument("snapshot_id")
     review = sub.add_parser("review")
@@ -84,8 +88,11 @@ def main() -> int:
             result = service.collect(args.instruments, args.horizon, db_path=args.db)
         elif args.command == "capabilities":
             result = service.capabilities()
+        elif args.command == "resolve":
+            from copilot.instruments import normalize_instrument
+            result = {"instrument_id": normalize_instrument(read_object(args.input)["instrument_id"])}
         elif args.command == "context":
-            result = service.context(args.instruments or None, db_path=args.db)
+            result = service.context(args.instruments or None, sleeve=args.sleeve, db_path=args.db)
         elif args.command == "get-snapshot":
             result = service.snapshot(args.snapshot_id, db_path=args.db)
         elif args.command == "review":

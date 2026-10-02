@@ -41,35 +41,10 @@ jobs:
       - name: Shared core behavioral contracts
         run: python -m unittest discover -s scripts -p '_test_*.py'
 
-      - name: Self-tests (auto-discovered)
-        run: |
-          set -euo pipefail
-          # Any module exposing --self-test is picked up automatically, so a new
-          # module cannot silently ship without CI coverage.
-          # -e is required: a bare '--self-test' pattern would be parsed as a
-          # grep option, and using '--' to stop parsing swallows --include.
-          mapfile -t modules < <(
-            grep -rl --include='*.py' --exclude='_test_*.py' -e '--self-test' scripts evals mcps | sort
-          )
-          if [ ${#modules[@]} -eq 0 ]; then
-            echo "::error::no self-testing modules found — discovery is broken"
-            exit 1
-          fi
-          echo "Discovered ${#modules[@]} self-testing module(s):"
-          printf '  %s\n' "${modules[@]}"
-          echo
-          failed=0
-          for module in "${modules[@]}"; do
-            echo "::group::$module --self-test"
-            if python "$module" --self-test; then
-              echo "PASS $module"
-            else
-              echo "::error file=$module::self-test failed"
-              failed=1
-            fi
-            echo "::endgroup::"
-          done
-          exit "$failed"
+      # The explicit list is checked against real code interfaces. Mentioning
+      # a flag in a docstring must not dispatch a dev-only third-party script.
+      - name: Offline self-tests
+        run: python scripts/self_tests.py
 
       - name: Integration test suites
         run: |
@@ -176,6 +151,7 @@ jobs:
           required = [
               "scripts/ticker.py", "scripts/parse_rating.py", "scripts/notify.py",
               "scripts/copilot_cli.py", "scripts/copilot/config.py",
+              "scripts/copilot/valuation.py", "scripts/mcp_env.py", "scripts/self_tests.py",
               "scripts/backtest_cli.py", "scripts/copilot/backtest/engine.py",
               "scripts/copilot/backtest/rules.py", "scripts/copilot/backtest/admission.py",
               "evals/scorer.py", "evals/stockbench/backtest_engine.py",
@@ -184,9 +160,15 @@ jobs:
               ".codex/config.toml", ".codex-plugin/plugin.json", "AGENTS.md",
               ".claude-plugin/plugin.json", "README.md", "DISCLAIMER.md",
               "config/user.example.toml",
+              ".claude/skills/investment-chat/references/adopted-rules.md",
+              ".agents/skills/investment-chat/references/adopted-rules.md",
+              "skills/investment-chat/references/adopted-rules.md",
+              "docs/adr/0008-gold-sleeve-evidence-and-admission.md",
           ]
-          missing = [r for r in required
-                     if not any(n.endswith(r) for n in names)]
+          # Compare exact relative paths: skills/... must not be satisfied by
+          # the canonical .claude/skills/... copy when a generated copy is absent.
+          present = {n.split("/", 1)[1] for n in names if "/" in n}
+          missing = [r for r in required if r not in present]
           if missing:
               sys.exit("missing from release zip: " + ", ".join(missing))
 
@@ -194,6 +176,7 @@ jobs:
           # regression there must not quietly ship personal state.
           leaked = [n for n in names
                     if "positions.md" in n or "trading_memory" in n
+                    or n.lower().endswith("/watchlist.local.md")
                     or n.endswith(".env") or "/data/runs/" in n
                     or "/data/decisions/" in n or "/data/state/" in n
                     or "config/user.toml" in n

@@ -1,51 +1,21 @@
-# evals/prices/ — committed price maps
+# Fixed public prices for legacy signal replay
 
-These JSON files are **public daily closing prices** fetched from the keyless
-Yahoo v8 chart endpoint by [`scripts/prices.py`](../../scripts/prices.py).
-
-They are **safe to commit**, unlike everything under `data/`:
-
-| | `data/` | `evals/prices/` |
-|---|---|---|
-| Content | the maintainer's real positions, decisions and memory log | public closing prices |
-| Personal | yes — gitignored | no |
-| Purpose | trading state | make a backtest reproducible |
-
-Committing the price map is what makes a replay backtest **reproducible**: the
-engine is deterministic, so a fixed price map plus a fixed set of decisions
-always produces byte-identical metrics. Without the file checked in, a rerun
-silently reprices against whatever Yahoo says today (adjusted closes move on
-splits and dividends) and the numbers drift for no visible reason.
-
-## Format
-
-Exactly what `evals/stockbench/backtest_engine.JsonPriceSource` consumes:
+`prices.json` is a committed public daily-price map read by
+`stockbench/backtest_engine.JsonPriceSource`. The original price-map builder
+has been removed; this snapshot remains for reproducing existing replay inputs.
 
 ```json
 {
-  "NVDA": [{"date": "2026-04-01", "close": 123.45}, ...],
-  "GC=F": [...],
-  "SPY":  [...]
+  "SPY": [{"date": "2026-04-01", "close": 123.45}]
 }
 ```
 
-## Refresh
+A fixed map and fixed signals produce deterministic metrics. The map does not
+establish that signals were available at the time, that every needed session is
+covered, or that the replay measures an actual portfolio. Adjusted prices may
+also differ from historical as-traded prices.
 
-```bash
-# replace
-python scripts/prices.py --tickers NVDA,GC=F,SPY \
-    --start 2026-04-01 --end 2026-09-30 --out evals/prices/prices.json
-
-# add a ticker to an existing map (incoming wins on a same-date conflict)
-python scripts/prices.py --tickers NDQ.AX --start 2026-04-01 --end 2026-09-30 --merge
-```
-
-Then rerun the replay:
-
-```bash
-python evals/stockbench/runner.py --replay --prices evals/prices/prices.json \
-    --snap-forward --run-name replay-2026
-```
-
-Closes are **split/dividend adjusted** (`adjclose` when Yahoo supplies it), so
-a refetch after a corporate action legitimately changes historical values.
+For new evaluations, supply an explicit price map whose source, retrieval date,
+price basis and coverage are recorded with the run, or explicitly select the
+runner's optional `--yfinance` adapter. Do not silently refresh this committed
+snapshot and compare the changed metrics as if only the model had changed.

@@ -10,10 +10,11 @@ import hashlib
 import json
 import math
 import re
-from datetime import date, datetime, timezone
-from decimal import Decimal
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 
-POLICY_VERSION = "1.0"
+POLICY_VERSION = "1.1"
+SHANGHAI_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 ACTIONS = {"buy", "hold", "reduce", "sell", "avoid"}
 _LIMITS = {
     "single_name": ("post_trade_weight", 0.05, False),
@@ -475,6 +476,11 @@ def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None,
                             "detail": exempt}
             continue
         limit = limit_for(name, sleeve)
+        if name == "drawdown" and source == "engine" and context.get("max_drawdown_pct") is not None:
+            configured = context["max_drawdown_pct"]
+            if not _number(configured, positive=True) or configured > 1:
+                raise ValueError("max_drawdown_pct must be a finite fraction in (0, 1]")
+            limit = min(limit, configured)
         value = inputs.get(field)
         eligible = _number(value) and 0 <= value <= 1
         check = "unknown" if not eligible else "pass" if (value < limit if strict else value <= limit) else "fail"
@@ -641,17 +647,59 @@ def _build_rule(adoption: dict):
     raise ValueError(f"unknown rule family {family!r}")
 
 
-def _last_rebalance_index(context: dict, adoption: dict, dates: list) -> int | None:
-    """Index of the session this rule last rebalanced on, from prior decisions.
+def _last_rebalance_index(context: dict, adoption: dict, dates: list, *, now=None) -> int | None:
+    """Production cadence advances only on completed executions.
 
-    The rule families decide WHETHER to trade in `should_rebalance`, not in
-    `weights`: FixedWeightBands.weights returns the stored targets unconditionally
-    and all of its behaviour -- the 25% relative band, the 5-point absolute band,
-    the calendar leg -- lives in the trigger. Evaluating `weights` alone turns an
-    annual rule into a daily one and the turnover the admission gate measured
-    stops describing it.
+    Old standalone rule fixtures retain their recommendation-based context;
+    a journal-backed context always uses the explicit execution timestamp.
     """
     from datetime import date as _date
+    if context.get("context_source") == "journal":
+        assessed_at = _time(now if now is not None else datetime.now(timezone.utc), "cadence now")
+        actual = context.get("last_completed_execution_at")
+        if not actual:
+            return None
+        if not dates:
+            raise ValueError("insufficient published sessions to assess the completed execution")
+        if "T" in str(actual) or " " in str(actual):
+            moment = _time(actual, "last completed execution")
+            if moment > assessed_at:
+                raise ValueError("completed execution is in the future")
+            # Exchange-calendar tz includes DST. Never guess a New York UTC
+            # offset or silently use the UTC date for evening fills.
+            from .data_calendar import MarketCalendar
+            calendar = MarketCalendar()._calendar(moment.year)
+            stamp = moment.astimezone(calendar.tz).date()
+            if not calendar.is_session(stamp.isoformat()):
+                raise ValueError("completed ETF execution date is not a verified exchange session")
+        else:
+            stamp = date.fromisoformat(str(actual))
+            if stamp > assessed_at.date():
+                raise ValueError("completed execution is in the future")
+        if stamp < dates[0]:
+            parameters = adoption.get("parameters") or {}
+            family = adoption.get("family")
+            if family == "fixed_weight_bands":
+                interval = _quantity_decimal(parameters.get("calendar_days"), "calendar_days")
+                lower_bound = (dates[-1] - stamp).days
+            elif family in {"inverse_volatility", "momentum_top_n"}:
+                field = "rebalance_days" if family == "inverse_volatility" else "skip_days"
+                interval = _quantity_decimal(parameters.get(field), field)
+                lower_bound = len(set(dates))
+            else:
+                raise ValueError("cannot verify cadence for the adopted rule family")
+            if interval != interval.to_integral_value():
+                raise ValueError("rebalance interval must be a whole number")
+            if lower_bound >= int(interval):
+                # We do not invent an index for a fill outside the window.
+                # The verified lower bound proves the calendar/session leg
+                # is due, so the rule's bootstrap trigger is safe here.
+                return None
+            raise ValueError("insufficient published history to prove the rebalance interval elapsed")
+        for index in range(len(dates) - 1, -1, -1):
+            if dates[index] <= stamp:
+                return index
+        return None
     sessions = [r.get("evaluation_session") for r in (context.get("recommendations") or [])
                 if r.get("rule_id") == adoption["rule_id"] and r.get("rebalance_due")]
     stamps = sorted({_date.fromisoformat(str(s)[:10]) for s in sessions if s})
@@ -669,8 +717,13 @@ def _current_weights(holdings: list, prices: dict, total_value: float) -> dict:
     weights = {}
     for holding in holdings or []:
         symbol = str(holding.get("instrument_id", "")).upper()
-        price, quantity = prices.get(symbol), holding.get("quantity")
-        if price is None or isinstance(quantity, bool) or not isinstance(quantity, (int, float)):
+        if symbol == "GOLD.CNY":
+            continue
+        quantity = _share_quantity(holding)
+        price = prices.get(symbol)
+        if price is None:
+            if quantity:
+                raise ValueError(f"{symbol}: held position has no validated valuation price")
             continue
         weights[symbol] = weights.get(symbol, 0.0) + float(quantity) * float(price) / total_value
     return weights
@@ -680,11 +733,64 @@ def _held_shares(holdings: list) -> dict:
     held = {}
     for holding in holdings or []:
         symbol = str(holding.get("instrument_id", "")).upper()
-        quantity = holding.get("quantity")
-        if isinstance(quantity, bool) or not isinstance(quantity, (int, float)):
+        if symbol == "GOLD.CNY":
             continue
-        held[symbol] = held.get(symbol, 0.0) + float(quantity)
+        quantity = _share_quantity(holding)
+        if quantity:
+            held[symbol] = held.get(symbol, 0.0) + float(quantity)
     return held
+
+
+def _quantity_decimal(value: object, field: str) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        raise ValueError(f"{field} must be a finite nonnegative decimal quantity")
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation as exc:
+        raise ValueError(f"{field} must be a decimal quantity") from exc
+    if not number.is_finite() or number < 0 or not math.isfinite(float(number)):
+        raise ValueError(f"{field} must be finite and nonnegative; opening balances must be resolved")
+    return number
+
+
+def _share_quantity(holding: dict) -> Decimal:
+    if holding.get("unit", "share") != "share" or holding.get("currency", "USD") != "USD":
+        raise ValueError("ETF holdings require USD/share units")
+    if holding.get("opening_balance_required"):
+        raise ValueError("held position has an unresolved opening balance")
+    return _quantity_decimal(holding.get("quantity"), "quantity")
+
+
+def _sleeve_holdings(context: dict, sleeve: str) -> list:
+    if context.get("context_source") == "journal":
+        if context.get("sleeve") != sleeve or not isinstance(context.get("sleeve_holdings"), list):
+            raise ValueError("journal context must carry holdings for the evaluated sleeve")
+        return context["sleeve_holdings"]
+    return [holding for holding in context.get("holdings") or []
+            if (holding.get("instrument_id") == "GOLD.CNY") == (sleeve == "gold")]
+
+
+def _fine_grams(holdings: list) -> Decimal:
+    total = Decimal(0)
+    for holding in holdings:
+        if holding.get("instrument_id") != "GOLD.CNY":
+            continue
+        if holding.get("currency", "CNY") != "CNY" or holding.get("unit", "gram") not in {"gram", "item"}:
+            raise ValueError("gold holdings require CNY and gram/item units")
+        if holding.get("opening_balance_required"):
+            raise ValueError("gold holding has an unresolved opening balance")
+        if holding.get("pure_gold_grams") is not None:
+            grams = _quantity_decimal(holding["pure_gold_grams"], "pure_gold_grams")
+        else:
+            quantity = _quantity_decimal(holding.get("quantity"), "quantity")
+            purity = _quantity_decimal(holding.get("purity", "1"), "purity")
+            if not 0 < purity <= 1:
+                raise ValueError("gold purity must be in (0, 1]")
+            weight = (_quantity_decimal(holding.get("weight_grams"), "weight_grams")
+                      if holding.get("unit") == "item" else Decimal(1))
+            grams = quantity * weight * purity
+        total += grams
+    return total
 
 
 def _absent_decision(snapshot: dict, symbol: str, reasons: list, version: str) -> dict:
@@ -732,6 +838,10 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
         raise ValueError(f"sleeve must be 'etf' or 'gold'; this adoption says "
                          f"{sleeve!r} and no other sleeve has an engine")
     context = dict(context or {})
+    if context.get("context_source") == "journal":
+        from .ruleset import SCHEMA_VERSION
+        if adoption.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError("adopted rule uses an older execution schema; rerun the backtest and adopt its current result")
     rule_id = str(adoption["rule_id"])
     universe = tuple(str(s).upper() for s in adoption.get("universe") or [])
     if not universe:
@@ -763,13 +873,35 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
     instruments = snapshot.get("instruments", {})
     blocked = [s for s in universe
                if s not in instruments or instruments[s].get("quality_status") != "pass"]
-    coverage_known = context.get("portfolio_complete") is True
+    coverage_known = (context.get("portfolio_complete") is True
+                      and context.get("base_currency") == "USD")
     version = str(context.get("portfolio_version") or "")
     withhold = bool(blocked) or not coverage_known
 
-    plan, measured, rebalance_due = None, {}, None
+    plan, measured, rebalance_due, portfolio_valuation, drawdown_measurement = None, {}, None, None, {}
+    evaluation_issues, holdings, held = [], [], {}
+    if not withhold:
+        try:
+            holdings = _sleeve_holdings(context, "etf")
+            held = _held_shares(holdings)
+            if adoption.get("integer_shares", True) is not True:
+                evaluation_issues.append("Live ETF execution currently supports whole-share adopted rules; fractional backtests cannot silently become whole-share orders")
+            if adoption.get("integer_shares", True) and any(q != int(q) for q in held.values()):
+                evaluation_issues.append("Whole-share execution requires whole-share holdings; fractional holdings cannot be silently rounded")
+            outside = set(held) - set(universe)
+            if outside:
+                evaluation_issues.append("Held positions lack validated adopted-universe prices: " + ", ".join(sorted(outside)))
+        except ValueError as exc:
+            evaluation_issues.append(str(exc))
+        withhold = bool(evaluation_issues)
     if not withhold:
         dates, closes, records = _bars_matrix(snapshot, universe)
+        try:
+            last_rebalance_index = _last_rebalance_index(context, adoption, dates, now=now)
+        except ValueError as exc:
+            evaluation_issues.append(str(exc))
+            withhold = True
+    if not withhold:
         rule = _build_rule(adoption)
         if len(dates) <= rule.warmup_bars:
             raise ValueError(f"{adoption['family']} needs more than {rule.warmup_bars} bars to "
@@ -778,12 +910,12 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
         frame = build_frame(dates=dates, symbols=list(universe), closes=closes)
         last_index = len(dates) - 1
         prices = {s: instruments[s]["price"] for s in universe}
-        held = _held_shares(context.get("holdings"))
         holdings_value = sum(held.get(s, 0.0) * prices[s] for s in held if s in prices)
         total_value = holdings_value + float(investable_cash)
-        current = _current_weights(context.get("holdings"), prices, total_value)
+        current = _current_weights(holdings, prices, total_value)
         rebalance_due = rule.should_rebalance(
-            frame, last_index, current, _last_rebalance_index(context, adoption, dates))
+            frame, last_index, current, last_rebalance_index,
+            cash_floor_pct=float(adoption.get("cash_floor_pct", 0.0)))
         weights = rule.weights(frame, last_index)
         # `held` is passed unconditionally, not
         # `held if rebalance_due else weights and held` (a draft expression that
@@ -798,26 +930,16 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
             cost_model=CostModel(**adoption["cost_model"]))
         if not rebalance_due:
             for order in plan["orders"]:
-                order.update(delta_shares=0, side="hold", notional=0.0, estimated_cost=0.0)
-        # journal.get_context returns recommendations NEWEST FIRST ("ORDER BY
-        # recorded_at DESC"), and riskinputs.portfolio_drawdown walks FORWARD
-        # from a running peak, so reading that list in place measured the curve
-        # backwards: 100 -> 90 -> 70 -> 50 came out as 0% rather than 50%, and
-        # the 15% limit passed a book that had halved. Drawdown is the only one
-        # of the five limits that measures the book LOSING money, so nothing
-        # else caught it.
-        #
-        # Reversing first puts rows that carry no usable timestamp back in
-        # chronological order; the stable sort then orders by each row's own
-        # created_at, but only when every row has one -- an empty-string key
-        # would otherwise drag untimestamped rows to the front of the series.
-        prior = [r for r in reversed(context.get("recommendations") or [])
-                 if isinstance(r.get("portfolio_total_value"), (int, float))
-                 and not isinstance(r.get("portfolio_total_value"), bool)]
-        if all(str(r.get("created_at") or "") for r in prior):
-            prior.sort(key=lambda r: str(r["created_at"]))
-        history = [float(r["portfolio_total_value"]) for r in prior]
-        history.append(plan["total_value"])
+                order.update(delta_shares=0, side="hold", notional=0.0, estimated_cost=0.0,
+                             target_shares=order["held_shares"])
+            plan["cash_remaining"] = float(investable_cash)
+        # Only unchanged holdings/cash observations are comparable without
+        # dated cash flows. A missing segment is a baseline, not a measured 0.
+        from .valuation import observe
+        portfolio_valuation, drawdown_measurement = observe(
+            context=context, sleeve="etf", total_value=plan["total_value"],
+            cash_value=float(investable_cash), invested=any(held.values()),
+            snapshot_id=snapshot["snapshot_id"], mark_basis="regular_session_close")
         sector_values: dict[str, float] = {}
         for order in plan["orders"]:
             sector = sector_of(order["instrument_id"])
@@ -846,12 +968,15 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
                 sector_of=sector,
                 average_dollar_volume=riskinputs.average_dollar_volume(
                     _primary_evidence(snapshot, symbol)["bars"]),
-                value_history=history, delta_shares=order["delta_shares"])
+                value_history=None, delta_shares=order["delta_shares"])
+            measured[symbol].update(drawdown_measurement)
 
     sized = {o["instrument_id"]: o for o in (plan["orders"] if plan else [])}
     orders = []
     for symbol in universe:
-        if blocked:
+        if evaluation_issues:
+            reasons = [f"adopted rule {rule_id} paused: " + "; ".join(evaluation_issues)]
+        elif blocked:
             reasons = [f"adopted rule {rule_id} paused: {', '.join(blocked)} has no "
                        "validated market data in this snapshot"]
         elif not coverage_known:
@@ -905,6 +1030,14 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
                             "verified_risk_inputs": measured.get(symbol, {})}
         decision = assess_proposal(item, snapshot, proposal_context, now=now, source="engine")
         decision["rule_id"] = rule_id
+        decision["warnings"].extend(evaluation_issues)
+        decision.update(sleeve="etf", currency="USD")
+        if portfolio_valuation is not None:
+            decision["portfolio_valuation"] = dict(portfolio_valuation)
+            decision["portfolio_total_value"] = float(portfolio_valuation["total_value"])
+            decision["drawdown_history_status"] = drawdown_measurement.get("drawdown_history_status")
+            if "drawdown" not in drawdown_measurement:
+                decision["warnings"].append("Comparable valuation history is missing after holdings/cash changed; this observation is a baseline, not zero drawdown")
         decision["brake"] = applied or dict(brake_record)
         if idle:
             decision["no_action_required"] = True
@@ -933,17 +1066,68 @@ def evaluate_rule(*, adoption: dict, snapshot: dict, context: dict | None = None
         "schema_version": 1, "rule_id": rule_id, "sleeve": "etf",
         "snapshot_id": snapshot.get("snapshot_id"), "orders": orders,
         "blocked_symbols": blocked, "coverage_known": coverage_known,
+        "evaluation_issues": evaluation_issues,
         "rebalance_due": bool(rebalance_due),
         "execution_scope": "actionable" if actionable else "research_only",
         "brake": brake_record, "waived": bool(adoption.get("waived")),
         "admitted_metrics": dict(adoption.get("admission", {}).get("metrics", {})),
         "evaluation_session": (snapshot.get("instruments", {}).get(universe[0], {})
                                .get("latest_session")),
+        "portfolio_valuation": portfolio_valuation,
+        "portfolio_total_value": (float(portfolio_valuation["total_value"])
+                                  if portfolio_valuation is not None else None),
     }
     if not withhold:
         result["cash_plan"] = plan
     result["evaluation_id"] = "eval-" + _digest(result)[:16]
     return result
+
+
+def _gold_schedule(adoption: dict, snapshot: dict, context: dict) -> tuple[bool, str]:
+    """Count published sessions since an actual buy, never since advice."""
+    raw_interval = (adoption.get("parameters") or {}).get("interval_days")
+    interval = _quantity_decimal(raw_interval, "interval_days")
+    if interval < 1 or interval != interval.to_integral_value():
+        raise ValueError("gold interval_days must be a positive integer")
+    if context.get("context_source") == "journal" and "gold_last_completed_buy_at" not in context:
+        return False, "Completed gold purchase history is unavailable; contribution schedule is paused"
+    last_buy = context.get("gold_last_completed_buy_at")
+    if not last_buy:
+        return True, "Initial gold contribution; no completed purchase is recorded"
+    if "T" in str(last_buy) or " " in str(last_buy):
+        bought = _time(last_buy, "last completed gold buy").astimezone(SHANGHAI_TIMEZONE).date()
+    else:
+        bought = date.fromisoformat(str(last_buy))
+    sessions = sorted({date.fromisoformat(str(row["session"])[:10])
+                       for row in _primary_evidence(snapshot, "GOLD.CNY")["bars"]
+                       if row.get("session")})
+    if not sessions:
+        return False, "No published sessions are available to assess the completed gold purchase"
+    # Buys on holidays/weekends start their count after that calendar date.
+    elapsed = sum(session > bought for session in sessions)
+    if bought < sessions[0] and elapsed < int(interval):
+        return False, "Insufficient published sessions to prove the gold contribution interval elapsed; collect sufficient history"
+    return (elapsed >= int(interval), "Gold contribution interval reached" if elapsed >= int(interval)
+            else "Gold contribution interval has not elapsed since the completed purchase")
+
+
+def _gold_order_count(context: dict, quote: dict) -> int:
+    counts = context.get("gold_order_counts_today")
+    if isinstance(counts, list):
+        account = quote.get("account_id")
+        # Merchant text is not account identity (aliases are user-reported).
+        # An unknown account cannot prove it belongs to a different quota.
+        matched = [entry for entry in counts if account is None
+                   or entry.get("account_id") in {None, account}]
+        if any(type(entry.get("count")) is not int or entry["count"] < 0 for entry in matched):
+            raise ValueError("gold account/day order counts must be nonnegative integers")
+        return sum(entry["count"] for entry in matched)
+    if context.get("context_source") == "journal":
+        raise ValueError("journal context has no verified account/day gold order counts")
+    count = context.get("gold_orders_today", 0)
+    if type(count) is not int or count < 0:
+        raise ValueError("gold_orders_today must be a nonnegative integer")
+    return count
 
 
 def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, brake_record):
@@ -1006,7 +1190,16 @@ def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, br
             "evidence_ids": [e["evidence_id"] for e in snapshot.get("evidence", [])
                              if e.get("instrument_id") == goldsizing.SYMBOL
                              and not e.get("retail_quote")]}
-    plan = None
+    plan, due, schedule_reason = None, False, "Gold contribution has not been evaluated"
+    holdings = _sleeve_holdings(context, "gold")
+    held_grams = _fine_grams(holdings)
+    portfolio_valuation, drawdown_measurement = None, {}
+    if instrument and instrument.get("quality_status") == "pass":
+        from .valuation import observe
+        portfolio_valuation, drawdown_measurement = observe(
+            context=context, sleeve="gold", total_value=float(held_grams * Decimal(str(instrument["price"]))),
+            cash_value=None, invested=held_grams > 0, snapshot_id=snapshot["snapshot_id"],
+            mark_basis="sge_au9999_close")
 
     if blocked:
         item["reasons"] = [f"adopted rule {rule_id} paused: GOLD.CNY has no validated price"]
@@ -1018,16 +1211,18 @@ def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, br
                            "缺少商家报价（上金所基准价不是可成交价）"]
     else:
         quote = quote_record["retail_quote"]
-        held_grams = sum(float(h.get("quantity", 0.0)) for h in (context.get("holdings") or [])
-                         if h.get("instrument_id") == goldsizing.SYMBOL)
-        sized = dict(ask_per_fine_gram=float(quote["ask_per_fine_gram"]),
-                     investable_total_cny=float(investable_cash), held_grams=held_grams,
+        due, schedule_reason = _gold_schedule(adoption, snapshot, context)
+        sized = dict(ask_per_fine_gram=quote["ask_per_fine_gram"],
+                     investable_total_cny=investable_cash, held_grams=str(held_grams),
                      min_order_cny=int(settings.get("min_order_cny", 1200)),
                      order_increment_cny=int(settings.get("order_increment_cny", 200)),
-                     orders_today=int(context.get("gold_orders_today", 0)),
+                     orders_today=_gold_order_count(context, quote),
                      max_orders_per_day=int(settings.get("max_orders_per_day", 10)))
         plan = goldsizing.plan_contribution(
-            **sized, contribution_cny=float(settings.get("contribution_cny", 0.0)))
+            **sized, contribution_cny=settings.get("contribution_cny", 0.0) if due else 0)
+        if not due:
+            plan["refusals"] = [schedule_reason] + [reason for reason in plan["refusals"]
+                                                   if reason.startswith("max_orders_per_day")]
 
         # The brake only ever reduces, and it halves the MONEY rather than the
         # grams: an increment-respecting half of the contribution is still a
@@ -1059,12 +1254,19 @@ def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, br
 
     proposal_context = {**context, "snapshot_id": snapshot["snapshot_id"],
                         "risk_proposal_fingerprint": proposal_fingerprint(item),
-                        "verified_risk_inputs": _gold_risk_inputs(context, plan)}
+                        "verified_risk_inputs": drawdown_measurement}
     decision = assess_proposal(item, snapshot, proposal_context, now=now, source="engine")
     decision["rule_id"] = rule_id
     decision["sleeve"] = "gold"
     decision["currency"] = "CNY"
     decision["brake"] = dict(brake_record)
+    decision["schedule_status"] = schedule_reason
+    if portfolio_valuation is not None:
+        decision["portfolio_valuation"] = portfolio_valuation
+        decision["portfolio_total_value"] = float(portfolio_valuation["total_value"])
+        decision["drawdown_history_status"] = drawdown_measurement.get("drawdown_history_status")
+        if "drawdown" not in drawdown_measurement:
+            decision["warnings"].append("Comparable gold valuation history is missing after holdings changed; this observation is a baseline, not zero drawdown")
     # Falls back to the family constant rather than trusting the adoption to
     # carry it. The disclosure is a property of scheduled_accumulation itself --
     # engine.run cannot exercise a contribution schedule at any parameter value
@@ -1078,6 +1280,9 @@ def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, br
                       "ask_per_fine_gram", "refusals"):
             decision[field] = plan[field]
         decision["sizing_reasons"] = list(plan["reasons"])
+        if plan["action"] == "buy" and decision["execution_scope"] != "actionable":
+            decision.update(amount_cny="0", grams="0.0000", target_grams=plan["held_grams"])
+            decision["refusals"].append("Measured portfolio risk or comparable valuation history does not permit a contribution")
     # The merchant and product the rendered message names come from here.
     # assess_proposal VALIDATES `retail_quote` on the proposal but copies only
     # price/quantity/target_weight/stop_loss onto the decision, so without this
@@ -1091,7 +1296,10 @@ def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, br
     return {"schema_version": 1, "rule_id": rule_id, "sleeve": "gold",
             "snapshot_id": snapshot.get("snapshot_id"), "orders": [decision],
             "blocked_symbols": blocked, "coverage_known": coverage_known,
-            "rebalance_due": bool(plan and plan["action"] == "buy"),
+            "rebalance_due": bool(due and plan and plan["action"] == "buy"),
+            "portfolio_valuation": portfolio_valuation,
+            "portfolio_total_value": (float(portfolio_valuation["total_value"])
+                                      if portfolio_valuation is not None else None),
             # Read off the decision rather than recomputed. assess_proposal is
             # the only thing entitled to say a gold order is actionable, and
             # `.get` defaults to research_only so a future assess_proposal that
@@ -1107,37 +1315,3 @@ def _evaluate_gold_rule(*, adoption, snapshot, context, investable_cash, now, br
             "evaluation_session": (instrument or {}).get("latest_session"),
             "evaluation_id": "eval-" + _digest({"rule_id": rule_id, "plan": plan,
                                                 "snapshot_id": snapshot.get("snapshot_id")})[:16]}
-
-
-def _gold_risk_inputs(context, plan) -> dict:
-    """Only drawdown is measurable for a one-instrument sleeve.
-
-    The other four limits are exempt for gold (policy._SLEEVE_EXEMPT keyed
-    "physical_gold"), so supplying figures for them would be inventing numbers
-    nothing measured. Drawdown comes from the same recommendation history the
-    ETF path uses, read forwards -- see the comment above `prior` in
-    evaluate_rule for why the ordering is load-bearing.
-    """
-    from . import riskinputs
-
-    prior = [r for r in reversed(context.get("recommendations") or [])
-             if isinstance(r.get("portfolio_total_value"), (int, float))
-             and not isinstance(r.get("portfolio_total_value"), bool)]
-    if all(str(r.get("created_at") or "") for r in prior):
-        prior.sort(key=lambda r: str(r["created_at"]))
-    history = [float(r["portfolio_total_value"]) for r in prior]
-    if plan is not None:
-        history.append(float(Decimal(plan["held_grams"]) * Decimal(plan["ask_per_fine_gram"])
-                             + Decimal(plan["amount_cny"])))
-    # portfolio_drawdown drops non-positive observations itself and then RAISES
-    # if nothing positive is left -- rightly, since a book worth 0 has no peak
-    # to have fallen from. A refused contribution on an empty position values
-    # this book at exactly 0, so the plan's `if not history` guard was not
-    # enough: every refusal (below the minimum, daily cap reached, out of
-    # budget) with no prior recommendations crashed the whole evaluation out of
-    # the facade. Returning {} instead leaves drawdown "unknown", which is what
-    # it is, and unknown already forecloses an actionable order.
-    if not any(math.isfinite(v) and v > 0 for v in history):
-        return {}
-    drawdown, samples = riskinputs.portfolio_drawdown(history)
-    return {"drawdown": drawdown, "drawdown_sample_count": samples}

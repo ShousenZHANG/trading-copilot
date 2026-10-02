@@ -18,9 +18,9 @@ WHAT THIS DOES AND DOES NOT GUARANTEE
 `build_adoption` takes a backtest `Result` and calls the admission gate itself
 rather than accepting a caller's `{"admitted": True}` -- a self-asserted boolean
 would make a hand-written JSON pipe enough to adopt a strategy that never ran.
-It then checks that `result.rule_name`, `result.parameters` and
-`result.universe` match the family, parameters and universe being adopted, and
-refuses to proceed if any of the three disagree. That check guarantees the
+It checks family, parameters, universe, fixed targets, cost model, cash floor
+and share granularity against the engine-produced Result, and refuses any
+disagreement or absent execution metadata. That check guarantees the
 recorded identity and the attached admission metrics always describe the same
 backtest: a caller cannot pass a genuinely admitted Result for one
 configuration and have it recorded, with that Result's metrics, against a
@@ -53,7 +53,10 @@ import json
 from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping, Sequence
 
-SCHEMA_VERSION = 1
+# Version 2 binds complete execution settings and uses funded sizing / reserve-
+# aware bands. A schema-1 adoption's old metrics cannot describe that behavior.
+# The journal retains old records; execution surfaces require this version.
+SCHEMA_VERSION = 2
 #: The sleeves that may be adopted. Each one brings its own universe check and
 #: its own exchange calendar; adding a name here without both is the bug the
 #: old "only the ETF sleeve exists" comment warned about, because a sleeve with
@@ -268,8 +271,8 @@ def build_adoption(*, sleeve: str, result, cost_model: Mapping[str, Any],
 
     `result` is a backtest engine.Result. The admission verdict is computed here
     from it, never taken from a caller. Before that verdict is even asked for,
-    `result.rule_name`/`.parameters`/`.universe` are checked against the family/
-    parameters/universe being adopted -- see the module docstring for exactly
+    all recorded strategy/execution settings are checked against the inputs
+    being adopted -- see the module docstring for exactly
     what that binding does and does not guarantee.
 
     `family`, `parameters` and `universe` may be omitted, which means "adopt
@@ -338,6 +341,17 @@ def build_adoption(*, sleeve: str, result, cost_model: Mapping[str, Any],
                          f"adopted universe {symbols!r}; the admitted backtest must describe "
                          "the strategy being adopted")
 
+    actual_targets = getattr(result, "targets", None)
+    if actual_targets != cleaned_targets:
+        raise ValueError("adopted targets do not match the actual backtest targets")
+    actual_costs = getattr(result, "cost_model", None)
+    if actual_costs is None or _clean_cost_model(actual_costs) != _clean_cost_model(cost_model):
+        raise ValueError("adopted cost_model does not match the actual backtest cost_model")
+    if getattr(result, "cash_floor_pct", None) != float(cash_floor_pct):
+        raise ValueError("adopted cash_floor_pct does not match the actual backtest cash_floor_pct")
+    if type(integer_shares) is not bool or getattr(result, "integer_shares", None) is not integer_shares:
+        raise ValueError("adopted integer_shares does not match the actual backtest integer_shares")
+
     _refuse_an_unexecutable_rule(family, cleaned_parameters, symbols, cleaned_targets,
                                  float(cash_floor_pct))
 
@@ -359,6 +373,7 @@ def build_adoption(*, sleeve: str, result, cost_model: Mapping[str, Any],
         "targets": cleaned_targets, "cost_model": _clean_cost_model(cost_model),
         "cash_floor_pct": float(cash_floor_pct), "integer_shares": bool(integer_shares),
         "admission": admission, "waived": bool(report.waived),
+        "execution_assumptions": dict(getattr(result, "execution_assumptions", {})),
     }
     if sleeve == "gold":
         if float(result.parameters.get("pause_below_trend", 0.0)):

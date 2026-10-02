@@ -77,7 +77,7 @@ def portfolio_drawdown(value_history: Sequence[float]) -> tuple[float, int]:
 
 def compute(*, symbol: str, target_shares: int, price: float, total_value: float,
             sector_values: Mapping[str, float], sector_of: str,
-            average_dollar_volume: float | None, value_history: Sequence[float],
+            average_dollar_volume: float | None, value_history: Sequence[float] | None,
             delta_shares: int | None = None) -> dict:
     """The measured inputs for one post-trade position.
 
@@ -93,15 +93,15 @@ def compute(*, symbol: str, target_shares: int, price: float, total_value: float
         raise ValueError(f"price must be a finite positive number, got {price!r}")
     position_value = float(target_shares) * float(price)
     traded = float(target_shares if delta_shares is None else delta_shares)
-    drawdown, samples = portfolio_drawdown(value_history)
     inputs = {
         "post_trade_weight": _clamp(position_value / total_value),
         "post_trade_sector_weight": _clamp(
             (position_value + float(sector_values.get(sector_of, 0.0))) / total_value),
-        "drawdown": _clamp(drawdown),
-        "drawdown_sample_count": samples,
         "sector": sector_of,
     }
+    if value_history is not None:
+        drawdown, samples = portfolio_drawdown(value_history)
+        inputs.update(drawdown=_clamp(drawdown), drawdown_sample_count=samples)
     if average_dollar_volume is not None and average_dollar_volume > 0:
         inputs["position_adv_fraction"] = _clamp(
             abs(traded) * float(price) / float(average_dollar_volume))

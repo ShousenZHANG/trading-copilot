@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from copilot import journal, service
+from copilot.ruleset import SCHEMA_VERSION as ADOPTION_SCHEMA_VERSION
 from _test_policy import (NOW, bands_adoption, engine_fixture, fixture, gold_engine_fixture,
                           proposal, seal)
 from _test_ruleset import admitted_result
@@ -183,26 +184,7 @@ class EngineFacade(unittest.TestCase):
                    cash_floor_pct=0.15, integer_shares=True)
 
     def evaluate_with_a_failing_row(self):
-        """Race a concurrent trade into the write loop; return the would-be evaluation_id.
-
-        record_recommendation commits one row per call, with no primitive that
-        spans several rows in one transaction. The lever here makes the very
-        FIRST write see a stale portfolio_version (a trade recorded between
-        service.evaluate's own context() read and that first write), so the
-        loop raises before attempting any row -- "nothing persisted" holds
-        because nothing was ever written, not because of any new atomicity
-        this change adds.
-
-        That is a real, reportable limit, not a hidden gap: if the SAME race
-        instead landed on the second or later order, the earlier row(s)
-        would already be committed by the time the failure surfaced, because
-        each record_recommendation call opens and commits its own
-        transaction independently. A genuinely atomic multi-row write would
-        need a new primitive (one transaction spanning the whole basket, or
-        a batch-insert function) that this task does not add. This helper
-        demonstrates the achievable half of the guarantee -- fail before the
-        first write -- not a general fix for a failure on row N>1.
-        """
+        """A trade between evaluation and the atomic write invalidates the basket."""
         from copilot.config import load_config
         from copilot.policy import evaluate_rule
         config_path = self.config(pointer=self.rule_id)
@@ -213,18 +195,18 @@ class EngineFacade(unittest.TestCase):
         expected = evaluate_rule(adoption=adoption_record, snapshot=stored_snapshot,
                                  context=current,
                                  investable_cash=settings.etf.investable_cash_usd, now=self.now)
-        original = journal.record_recommendation
+        original = journal.record_recommendations
 
-        def racer(decision, **kwargs):
+        def racer(decisions, **kwargs):
             journal.record_operation(
                 {"statement": "I already bought QQQ.", "instrument_id": "QQQ",
                  "execution_status": "executed", "quantity": "1", "price": "100",
                  "currency": "USD", "unit": "share", "side": "buy",
                  "occurred_at": "2025-01-06", "source_message_id": "facade-racer"},
                 "facade-racer", db_path=self.db)
-            return original(decision, **kwargs)
+            return original(decisions, **kwargs)
 
-        with patch("copilot.journal.record_recommendation", side_effect=racer):
+        with patch("copilot.journal.record_recommendations", side_effect=racer):
             with self.assertRaises(journal.JournalConflict):
                 service.evaluate(snapshot_id=self.snapshot_id, config_path=config_path,
                                  db_path=self.db, now=self.now)
@@ -260,9 +242,7 @@ class EngineFacade(unittest.TestCase):
             self.assertEqual(order["evaluation_id"], result["evaluation_id"])
 
     def test_nothing_is_persisted_when_one_order_cannot_be_stored(self):
-        # record_recommendation opens its own transaction per row, so a mid-loop
-        # failure would leave half a basket in a table with immutability
-        # triggers, permanently, with nothing marking the rest as missing.
+        # The journal rejects a stale portfolio before committing any basket row.
         result = self.evaluate_with_a_failing_row()
         stored = service.context(db_path=self.db)["recommendations"]
         self.assertEqual([r for r in stored if r.get("evaluation_id") == result], [])
@@ -451,11 +431,18 @@ class TheRenderedMessageAccountsForEveryOrder(unittest.TestCase):
         self.assertIn("规则未触发再平衡", rendered(
             execution_scope="research_only", rebalance_due=False))
 
+    def test_a_missing_drawdown_baseline_explains_the_next_observation(self):
+        message = rendered(execution_scope="research_only", orders=[
+            order("QQQ", action="hold", execution_scope="research_only",
+                  drawdown_history_status="baseline_required")])
+        self.assertIn("估值", message)
+        self.assertIn("更新行情", message)
+
 
 GOLD_RULE_ID = "rule-901d0123456789ab"
 
 GOLD_ADOPTION = {
-    "schema_version": 1, "rule_id": GOLD_RULE_ID, "sleeve": "gold",
+    "schema_version": ADOPTION_SCHEMA_VERSION, "rule_id": GOLD_RULE_ID, "sleeve": "gold",
     "family": "scheduled_accumulation",
     "parameters": {"interval_days": 21.0, "trend_days": 200.0, "pause_below_trend": 0.0},
     "universe": ["GOLD.CNY"], "targets": None,

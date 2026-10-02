@@ -1,158 +1,68 @@
-# MCP Server Setup
+# MCP setup
 
-> How the data servers are wired, and how to turn one on.
+The shared `trading-copilot` server provides the evidence, policy and local
+journal tools used by the investment skill. `.mcp.json` is the active set;
+`.mcp.json.template` is an optional adapter catalog. Any entry in the active
+set starts; a renamed entry is still active.
 
-## The model: active file + catalog
+## Default servers
 
-There are two files and one script.
+| Server | Purpose | Credential |
+|---|---|---|
+| `trading-copilot` | Shared snapshots, assessed decisions, operation journal, rule evaluation | Provider settings in [INSTALL](INSTALL.md) |
+| `yahoo-finance` | Auxiliary Yahoo tools; the shared core validates its own provider data | None |
+| `finnhub` | Auxiliary Finnhub tools; the shared core collects its own news evidence | FINNHUB_API_KEY |
 
-| File | Role |
-|------|------|
-| `.mcp.json` | The **active set**. Claude Code launches every server it finds here — nothing else. |
-| `.mcp.json.template` | The **catalog**. Every supported server, with its command line and the env var it reads. Nothing here runs. |
-| `scripts/enable_mcp.py` | Copies an entry from the catalog into the active file, or removes it again. |
+Install Python 3.11+ and uv. Launch from the repository with `scripts/start.ps1`
+or `scripts/start.sh` so optional credentials reach the client environment.
+Project configuration is generated for Codex from the same active set. There
+are no shipped agents; the investment skill calls the shared server directly.
+FRED macro coverage in the core requires FRED_API_KEY, not an extra FRED MCP.
+Chinese investment gold uses SGE evidence, with a separate observed merchant
+quote for a concrete CNY/gram order.
 
-```bash
-python scripts/enable_mcp.py                 # list the catalog and what is active
-python scripts/enable_mcp.py fred            # copy fred into .mcp.json
-python scripts/enable_mcp.py fred --disable  # remove it again
-```
+## Optional adapters
 
-Restart Claude Code (or `/reload-plugins`) after a change — the server list is
-read at startup.
-
-> **Absence is the off switch.** An earlier version of this repo "disabled" a
-> server by renaming its key to `_name`. Claude Code has no such convention: it
-> launched all of them anyway, which is why sessions used to open with a wall of
-> `_polygon: Connection closed` errors. If a server is in `.mcp.json`, it runs.
-
-## What ships active
-
-Two servers, and only two:
-
-| Server | Key needed | What it covers |
-|--------|-----------|----------------|
-| `yahoo-finance` | none | quotes, OHLCV history, company info, recommendations |
-| `finnhub` | `FINNHUB_API_KEY` (free tier, 60 req/min) | news, financials, earnings surprises, insider data |
-
-Both are spawned through `uv` / `uvx`, so **`uv` must be on your PATH** — neither
-server is pure-Python-stdlib and neither runs without it. Install from
-<https://docs.astral.sh/uv/>, then check with `uv --version`.
-
-## Verify — the only smoke test that means anything
-
-```bash
-python scripts/mcp_handshake.py --all
-```
-
-Run this **once from a shell before your first Claude Code session**. Claude Code
-allows a stdio MCP server 30 seconds to answer; a cold `uv` cache needs 26.3s just
-to provision `yahoo-finance`, so the first launch inside the client can time out
-while the same server is perfectly healthy. The handshake pre-warms the cache and
-turns that into a one-time 30-second wait you can see.
-
-This spawns each active server exactly the way `.mcp.json` tells Claude Code to,
-speaks the JSON-RPC `initialize` handshake, and requires a `serverInfo` back:
-
-```
-PASS     2.8s  finnhub          finnhub 1.28.1
-PASS     6.0s  yahoo-finance    yfinance 1.29.1
-
-2/2 server(s) completed the handshake.
-```
-
-Exit code 0 means every probed server answered; 1 means at least one did not.
-Use `--server <name>` to probe one, `--timeout` to raise the 180s default (a cold
-`uvx` run resolves dependencies before the server starts).
-
-Do **not** smoke-test with `uvx yahoo-finance-mcp --help`. That was the old
-instruction here and it is worthless: the process exits 0 even when the server
-dies on import, which is exactly how a broken `mcp` SDK pin went unnoticed for
-weeks. Inside Claude Code, `/mcp` shows the same truth interactively.
-
----
-
-## Catalog: keys and signup
-
-Every key lives in `.env` (gitignored) and is referenced as `${VAR}` from the
-config. Copy `.env.example` to `.env` and fill in only what you enable.
-
-### Free, no key
-
-**`akshare`** — A-share / HK / index data (`.SS`, `.SZ`, `.BJ`, `.HK`). No
-registration, no token. Fills the gap Yahoo and Finnhub do not cover. Local
-single-file wrapper at `mcps/akshare_mcp.py`; `uv` provisions its deps on first
-run, which is slow, which is why it is not active by default.
-
-```bash
+```sh
+python scripts/enable_mcp.py
 python scripts/enable_mcp.py akshare
-python mcps/akshare_mcp.py --probe      # requires network reachability
+python scripts/enable_mcp.py akshare --disable
 ```
 
-> **Honest status**: its `--self-test` covers symbol parsing and makes **zero
-> network calls**, and the server has never been verified against live AkShare
-> endpoints from this repo. The endpoints are mainland-China hosted and may be
-> unreachable from your network. Run `--probe` before relying on it.
+Enabling validates the conversion before changing the active set, then updates
+both runtimes. Restart Claude Code/Codex afterward. HTTP bearer/custom-header
+credentials remain references to process environment variables. A stdio adapter
+with a different destination variable name uses `scripts/mcp_env.py` to resolve
+the canonical mapping at process start. Generated files contain variable names,
+not credential values. The Codex fields follow the [official configuration
+reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-### Free with signup
+These catalog adapters are auxiliary integrations, not additions to the core's
+instrument whitelist or policy coverage. AkShare/Tushare do not make A-share/HK
+symbols valid investment-chat instruments. GoldAPI/futures do not replace SGE
+or the merchant quote. Paid or quota-limited adapters are optional and are not
+part of the free core. Catalog availability is configuration, not proof of a
+live entitlement or a working upstream endpoint.
 
-| Server | Signup | Free tier | Env var |
-|--------|--------|-----------|---------|
-| `finnhub` | <https://finnhub.io/register> | 60 req/min | `FINNHUB_API_KEY` |
-| `fred` | <https://fred.stlouisfed.org/docs/api/api_key.html> | unlimited | `FRED_API_KEY` |
-| `polygon` | <https://polygon.io/dashboard/signup> | 5 req/min | `POLYGON_API_KEY` |
-| `alpha-vantage` | <https://www.alphavantage.co/support/#api-key> | 25 req/day | `ALPHA_VANTAGE_API_KEY` |
-| `exa` | <https://exa.ai/> | ~$10 starting credit | `EXA_API_KEY` |
-| `gold` | <https://www.goldapi.io/> | 100 req/month | `GOLD_API_KEY` |
-| `tushare` | <https://tushare.pro/> | points quota | `TUSHARE_TOKEN` |
+Each enabled third-party server is another process or remote connection.
+Configure only the adapters you use, with their documented environment names;
+keep real keys in the local .env. The core's credential allow-list is described
+in INSTALL; optional adapters have their own names in the catalog.
 
-Notes on the ones with a catch:
+## Verify the correct layer
 
-- **`fred`** is what `macro-analyst` wants for `/gold` (real yields, DXY, CPI).
-  Without it the macro analyst falls back to what Yahoo exposes.
-- **`alpha-vantage`** and **`tushare`** are hosted HTTP MCPs — no local install,
-  but also nothing in this repo you can audit.
-- **`gold`** is optional even for `/gold`: Yahoo's `GC=F` (futures) and
-  `XAUUSD=X` (spot) are free and unlimited, at slightly lower precision.
-- **`tushare`** sits *below* `akshare` in the A-share fallback chain precisely
-  because it needs a token and gates endpoints behind a points quota. Try
-  `akshare` first.
-- **`exa`** is the social/news fallback. Without it, `social-analyst` degrades to
-  keyless Reddit RSS — see [mcp-fallback.md](./mcp-fallback.md).
+```sh
+python scripts/mcp_handshake.py --all
+uv run --no-project --quiet --script scripts/copilot_probe.py
+```
 
-### Windows note
+The handshake starts configured local stdio servers and checks initialize; it
+cannot certify source quality or all optional HTTP transports. The default
+probe checks actual shared MCP calls and restart persistence using a temporary
+database. `--live` additionally fetches providers into that temporary state.
+Neither proves all future feeds or model-provider login.
 
-`fred` and `exa` are launched via `npx`, which ships as a `.cmd` shim on Windows.
-If Claude Code cannot spawn one directly, wrap **that one entry** as
-`"command": "cmd", "args": ["/c", "npx", "-y", "<pkg>"]`. Never do this for
-`uv`/`uvx` (real executables), and never put a `<` inside a cmd-wrapped argv —
-`cmd` re-parses it as a redirect, which is how the `mcp<2` pin once became a
-broken shell redirection.
-
----
-
-## Troubleshooting
-
-A server shows `error` in `/mcp`, or `mcp_handshake.py` returns non-zero:
-
-1. **`uv` / `npx` on PATH?** `uv --version`, `npm --version`.
-2. **Key actually in the environment?** `${VAR}` is substituted from the
-   environment of the process that starts Claude Code, not read from `.env` by
-   Claude Code itself. Launch via `scripts/start.ps1` (Windows) or
-   `scripts/start.sh` (macOS / Linux / WSL) so `.env` is loaded first.
-3. **Env var name matches the catalog exactly?** `GOLD_API_KEY`, not
-   `GOLDAPI_KEY`.
-4. **Key still valid?** Test it in the vendor's own dashboard.
-5. **Run the handshake for the single server**: `python scripts/mcp_handshake.py
-   --server <name>` prints the actual failure instead of a generic
-   "Connection closed".
-
-## Recommended set
-
-Start with the shipped default — `yahoo-finance` + `finnhub` runs `/advise` and
-`/analyze` end to end. Add `fred` before you rely on `/gold`, `exa` if you want
-better social/news coverage than keyless RSS, and `akshare` only if you actually
-trade `.SS` / `.SZ` / `.HK` names and have verified it reaches its endpoints.
-
-Every server you enable is another third-party process reading your machine's
-environment. Enable deliberately.
+For a source error, read [data failures](mcp-fallback.md); for installation,
+credential presence and rule setup, use [INSTALL](INSTALL.md). On Windows,
+optional npx .cmd adapters may need a cmd wrapper around that single entry.
+Keep uv/uvx as direct executable commands.

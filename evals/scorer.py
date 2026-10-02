@@ -101,6 +101,28 @@ _NEGATION = re.compile(r"\b(?:not|no|never|neither|without|cannot|can't|don't|do
 _UNCERTAIN = re.compile(r"\b(?:maybe|perhaps|might|could|unknown|uncertain)\b|可能|不确定", re.I)
 
 
+def _numeric_unit(text: str) -> tuple[str, str | None]:
+    """Conservative dimension/currency labels; never convert FX or ratios."""
+    currency_patterns = {
+        "USD": r"\bUSD\b|\bUS\s*dollars?\b|\bdollars?\b|美元",
+        "CNY": r"\b(?:CNY|RMB)\b|人民币|￥|¥|(?<!\w)元(?!\w)",
+        "EUR": r"\bEUR\b|\beuros?\b|€|欧元",
+        "GBP": r"\bGBP\b|\bpounds?\b|£|英镑",
+        "JPY": r"\bJPY\b|\byen\b|日元|円",
+        "CAD": r"\bCAD\b|加拿大元",
+        "AUD": r"\bAUD\b|澳元",
+    }
+    currencies = {unit for unit, pattern in currency_patterns.items() if re.search(pattern, text, re.I)}
+    if "$" in text and not currencies:
+        currencies.add("USD")
+    percent = bool(re.search(r"%|\bpercent(?:age)?\b|百分", text, re.I))
+    if len(currencies) > 1 or (percent and currencies):
+        return "ambiguous", None
+    if currencies:
+        return "money", next(iter(currencies))
+    return ("percent", None) if percent else ("number", None)
+
+
 def _token_overlap(a: str, b: str) -> float:
     ta = {t for t in re.findall(r"[a-z0-9]+", a.lower()) if len(t) > 2}
     tb = {t for t in re.findall(r"[a-z0-9]+", b.lower()) if len(t) > 2}
@@ -132,6 +154,10 @@ def score(answer: str, reference: str, tolerance_pct: float = 1.0) -> Verdict:
     if ref_val is not None:
         if ans_val is None:
             return Verdict("fail", "answer has no number to compare", None, ref_val, None)
+        reference_unit, answer_unit = _numeric_unit(reference), _numeric_unit(answer)
+        if reference_unit != answer_unit or reference_unit[0] == "ambiguous":
+            return Verdict("fail", f"numeric units differ or are ambiguous: {answer_unit} versus {reference_unit}",
+                           ans_val, ref_val, None)
         if ref_val == 0:
             rel = abs(ans_val)
         else:
@@ -207,6 +233,13 @@ def _self_test() -> int:
         ("maybe Buy", "Buy", 1.0, "fail"),
         ("$100 or $200", "$100", 1.0, "fail"),
         ("buyback", "Buy", 1.0, "fail"),
+        ("100%", "$100", 1.0, "fail"),
+        ("$383.285 billion CNY", "$383.285 billion USD", 1.0, "fail"),
+        ("100 EUR", "100 USD", 1.0, "fail"),
+        ("12.5 dollars", "12.5%", 1.0, "fail"),
+        ("100 USD", "$100", 1.0, "pass"),
+        ("100 美元", "100 USD", 1.0, "pass"),
+        ("100 欧元", "100 EUR", 1.0, "pass"),
     ]
     passed = 0
     for ans, ref, tol, expected in cases:
@@ -263,7 +296,7 @@ def main() -> int:
         return 2
     v = score(args.answer, args.reference, args.tol)
     print(f"{v.status.upper()}: {v.detail}")
-    if v.answer_value is not None:
+    if v.answer_value is not None and v.rel_error is not None:
         print(f"  answer={v.answer_value:,.4g}  reference={v.reference_value:,.4g}  "
               f"rel_error={v.rel_error*100:.3f}%")
     return 0 if v.status in ("pass",) else 1

@@ -2,9 +2,16 @@
 from __future__ import annotations
 
 import sys
+import ast
+import copy
+import json
+import os
+import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from copilot import config as cfg
@@ -162,6 +169,97 @@ class AdoptionPointer(unittest.TestCase):
         for bad in ("momentum", "rule-XYZ", "rule-0123", "rule-0123456789ABCDEF"):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "adopted_rule_id"):
                 cfg.load_config(self.config(bad))
+
+
+class RuntimeMappingContracts(unittest.TestCase):
+    def generated(self, servers):
+        from sync_runtimes import generated_files
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            text = generated_files(root=root, config={"mcpServers": servers})[root / ".codex/config.toml"]
+            return text, tomllib.loads(text)["mcp_servers"]
+
+    def test_http_auth_preserves_bearer_and_custom_header_references(self):
+        _, generated = self.generated({
+            "alpha": {"url": "https://fixture.invalid/mcp",
+                      "headers": {"Authorization": "Bearer ${ALPHA_VANTAGE_API_KEY}"}},
+            "tushare": {"url": "https://fixture.invalid/mcp",
+                        "headers": {"X-Tushare-Token": "${TUSHARE_TOKEN}"}},
+        })
+        self.assertEqual(generated["alpha"]["bearer_token_env_var"], "ALPHA_VANTAGE_API_KEY")
+        self.assertEqual(generated["tushare"]["env_http_headers"], {"X-Tushare-Token": "TUSHARE_TOKEN"})
+
+    def test_same_name_stdio_mapping_stays_direct(self):
+        _, generated = self.generated({"fixture": {"command": "uv", "args": ["run", "fixture.py"],
+                                                     "env": {"TOKEN": "${TOKEN}"}}})
+        self.assertEqual(generated["fixture"]["args"], ["run", "fixture.py"])
+        self.assertEqual(generated["fixture"]["env_vars"], ["TOKEN"])
+
+    def test_renamed_stdio_mapping_uses_the_runtime_launcher(self):
+        _, generated = self.generated({"gold": {"command": "uvx", "args": ["mcp-metal-price"],
+                                               "env": {"GOLDAPI_KEY": "${GOLD_API_KEY}"}}})
+        self.assertIn("scripts/mcp_env.py", generated["gold"]["args"])
+        self.assertEqual(generated["gold"]["env_vars"], ["GOLD_API_KEY"])
+
+    def test_actual_child_receives_the_renamed_value_and_preserves_exit_status(self):
+        from mcp_env import launch
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "received.json"
+            code = ("import json,os,sys; "
+                    "open(sys.argv[1],'w').write(json.dumps(os.environ.get('GOLDAPI_KEY'))); "
+                    "sys.exit(7)")
+            spec = {"command": sys.executable, "args": ["-c", code, str(output)],
+                    "env": {"GOLDAPI_KEY": "${GOLD_API_KEY}"}}
+            inherited = {**os.environ, "GOLD_API_KEY": "fixture-only-value", "GOLDAPI_KEY": "stale"}
+            self.assertEqual(launch(spec, inherited=inherited, cwd=Path(directory)), 7)
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8")), "fixture-only-value")
+
+    def test_unrepresentable_secrets_are_refused_without_disclosing_values(self):
+        for spec in ({"command": "uv", "env": {"TOKEN": "fixture-secret"}},
+                     {"url": "https://fixture.invalid", "headers": {"Authorization": "Bearer fixture-secret"}}):
+            with self.assertRaises(ValueError) as captured:
+                self.generated({"fixture": spec})
+            self.assertNotIn("fixture-secret", str(captured.exception))
+
+
+class ContextFacadeContracts(unittest.TestCase):
+    def setUp(self):
+        from copilot import service
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.db = Path(self.temp.name) / "journal.sqlite"
+        service.declare_coverage(sleeve="gold", base_currency="CNY", db_path=self.db)
+
+    def test_cli_reports_the_selected_books_coverage(self):
+        for sleeve, expected in (("gold", True), ("etf", False)):
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/copilot_cli.py"),
+                                     "--db", str(self.db), "context", "--sleeve", sleeve],
+                                    capture_output=True, text=True, encoding="utf-8", check=True)
+            context = json.loads(result.stdout)
+            self.assertIs(context["portfolio_complete"], expected)
+            self.assertEqual(context["base_currency"], "CNY" if expected else None)
+
+    def test_mcp_facade_selects_the_same_book_without_loading_the_sdk(self):
+        from copilot import service
+        tree = ast.parse((ROOT / "mcps/copilot_mcp.py").read_text(encoding="utf-8"))
+        function = copy.deepcopy(next(node for node in tree.body
+                                      if isinstance(node, ast.FunctionDef) and node.name == "get_investment_context"))
+        function.decorator_list = []
+        namespace = {"service": SimpleNamespace(context=lambda instruments, **kwargs:
+                         service.context(instruments, db_path=self.db, **kwargs))}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "mcp-context-fixture", "exec"), namespace)
+        context = namespace["get_investment_context"](sleeve="gold")
+        self.assertTrue(context["portfolio_complete"])
+        self.assertEqual(context["base_currency"], "CNY")
+
+    def test_watchlist_validation_cli_uses_the_registry(self):
+        for symbol, expected_code in (("QQQ", 0), ("TSLA", 2)):
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/copilot_cli.py"),
+                                     "resolve"], input=json.dumps({"instrument_id": symbol}),
+                                    capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(result.returncode, expected_code)
+            if not expected_code:
+                self.assertEqual(json.loads(result.stdout)["instrument_id"], "QQQ")
 
 
 if __name__ == "__main__":

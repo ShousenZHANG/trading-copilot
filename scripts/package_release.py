@@ -101,6 +101,8 @@ INCLUDE_PATHS = [
 # Files a plugin-directory listing (and a first-run user) expects to find.
 # The build fails if any of these are absent from the finished zip.
 REQUIRED_ARTIFACT_FILES = [
+    "scripts/mcp_env.py",
+    "scripts/self_tests.py",
     ".claude-plugin/plugin.json",
     ".codex-plugin/plugin.json",
     ".codex/config.toml",
@@ -118,7 +120,7 @@ EXCLUDE_PATTERNS = [
     "*.pyc", "__pycache__", "*.log", ".DS_Store", "Thumbs.db", "desktop.ini",
     "*.swp", "*.swo", ".omc",
     # never ship personal state even if a path rule slips
-    "positions.md", "trading_memory.md",
+    "positions.md", "trading_memory.md", "watchlist.local.md",
     "settings.local.json", ".credentials.json",
     "*.env", ".env",
     # never ship the author's per-run analysis
@@ -188,7 +190,15 @@ def _hardcoded_codex_secrets(config_text: str) -> list[str]:
         return ["<unparseable Codex config>"]
     normalized = {name: {"env": spec.get("env", {}), "headers": spec.get("http_headers", {})}
                   for name, spec in servers.items()}
-    return _hardcoded_mcp_secrets(json.dumps({"mcpServers": normalized}))
+    offenders = _hardcoded_mcp_secrets(json.dumps({"mcpServers": normalized}))
+    for name, spec in servers.items():
+        variables = dict(spec.get("env_http_headers", {}))
+        if "bearer_token_env_var" in spec:
+            variables["bearer_token_env_var"] = spec["bearer_token_env_var"]
+        for key, value in variables.items():
+            if not isinstance(value, str) or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", value):
+                offenders.append(f"{name}.credential_variable.{key}")
+    return offenders
 
 
 #: Matches an archive member ending in "..._history.<ext>" or
@@ -210,7 +220,7 @@ def _forbidden_archive_name(name: str) -> bool:
     in the first place.
     """
     low = name.lower().replace("\\", "/")
-    if low.endswith("/.env") or low.endswith("/positions.md"):
+    if low.endswith(("/.env", "/positions.md", "/watchlist.local.md")):
         return True
     if "trading_memory.md" in low:
         return True

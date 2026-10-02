@@ -590,5 +590,75 @@ class GoldCoverageCanBeDeclared(unittest.TestCase):
             self.assertFalse(journal.get_context(sleeve="etf", db_path=db)["portfolio_complete"])
 
 
+class AuditJournalIntegration(unittest.TestCase):
+    def test_bounded_rows_keep_the_earlier_high_water_drawdown(self):
+        from copilot.valuation import observe
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / "journal.sqlite"
+            context = journal.get_context(db_path=db)
+            version = context["portfolio_version"]
+            with journal._connection(db) as connection:
+                connection.executemany("INSERT INTO evidence_snapshots VALUES (?,?,?)", [
+                    (f"valuation-{i}", journal._stamp(), "{}") for i in range(205)])
+            rows = []
+            for i in range(205):
+                rows.append({"snapshot_id": f"valuation-{i}", "decision_id": f"valuation-{i}",
+                             "portfolio_version": version, "instrument_id": "QQQ", "action": "hold",
+                             "created_at": f"2026-09-06T00:{i // 60:02d}:{i % 60:02d}+00:00",
+                             "portfolio_valuation": {"sleeve": "etf", "currency": "USD",
+                                 "holdings_version": context["sleeve_portfolio_version"],
+                                 "cash_value": "20000.0", "mark_basis": "regular_session_close",
+                                 "total_value": "100000" if i == 0 else "50000"}})
+            journal.record_recommendations(rows, db_path=db)
+            bounded = journal.get_context(db_path=db, recommendations_limit=2)
+            self.assertTrue(bounded["recommendations_truncated"])
+            self.assertEqual(len(bounded["recommendations"]), 2)
+            self.assertEqual(bounded["valuation_history"][0]["sample_count"], 205)
+            _, risk = observe(context=bounded, sleeve="etf", total_value=50000, cash_value=20000.0,
+                              invested=True, snapshot_id="next", mark_basis="regular_session_close")
+            self.assertEqual(risk["drawdown"], .5)
+
+    def test_gold_counts_follow_shanghai_day_and_executed_current_states(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / "journal.sqlite"
+            base = {"statement": "I already bought 1 gram gold.", "source_message_id": "count-1",
+                    "execution_status": "executed", "instrument_id": "GOLD.CNY", "side": "buy",
+                    "quantity": "1", "unit": "gram", "price": "900", "currency": "CNY",
+                    "occurred_at": "2026-09-05T16:05:00+00:00", "fees": "0",
+                    "merchant": "bank", "purity": "0.9999", "account_id": "gold-account"}
+            first = journal.record_operation(base, "count-1", db_path=db,
+                                             now="2026-09-06T02:00:00+00:00")
+            journal.record_operation({**base, "source_message_id": "count-2",
+                                      "statement": "I already sold 1 gram gold.", "side": "sell",
+                                      "occurred_at": "2026-09-06T01:00:00+00:00"},
+                                     "count-2", db_path=db, now="2026-09-06T02:00:00+00:00")
+            journal.record_operation({**base, "source_message_id": "count-pending", "price": None},
+                                     "count-pending", db_path=db, now="2026-09-06T02:00:00+00:00")
+            ctx = journal.get_context(sleeve="gold", db_path=db, now="2026-09-06T02:00:00+00:00")
+            self.assertEqual(ctx["gold_orders_today"], 2)
+            self.assertEqual(ctx["gold_order_counts_today"][0]["account_id"], "gold-account")
+            journal.record_operation({"event_type": "reverse", "operation_id": first["operation_id"],
+                                      "expected_version": 1, "statement": "reverse this record",
+                                      "source_message_id": "count-reverse"}, "count-reverse", db_path=db)
+            self.assertEqual(journal.get_context(sleeve="gold", db_path=db,
+                                                now="2026-09-06T02:00:00+00:00")["gold_orders_today"], 1)
+
+    def test_batch_recommendations_roll_back_a_later_conflict(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = Path(folder) / "journal.sqlite"
+            journal.save_snapshot({"snapshot_id": "batch-snapshot"}, db_path=db)
+            version = journal.get_context(db_path=db)["portfolio_version"]
+            common = {"snapshot_id": "batch-snapshot", "portfolio_version": version, "action": "hold"}
+            existing = {**common, "decision_id": "batch-existing", "instrument_id": "SPY"}
+            journal.record_recommendation(existing, db_path=db)
+            first = {**common, "decision_id": "batch-new", "instrument_id": "QQQ"}
+            conflicting = {**existing, "action": "buy"}
+            with self.assertRaises(journal.JournalConflict):
+                journal.record_recommendations([first, conflicting], db_path=db)
+            with self.assertRaises(KeyError):
+                journal.load_decision("batch-new", db_path=db)
+            self.assertEqual(journal.load_decision("batch-existing", db_path=db), existing)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

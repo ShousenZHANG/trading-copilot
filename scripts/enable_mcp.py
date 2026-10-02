@@ -214,9 +214,14 @@ def main() -> int:
 
     if updated != active:
         active_config["mcpServers"] = updated
-        ACTIVE_PATH.write_text(_dump(active_config), encoding="utf-8", newline="\n")
         from sync_runtimes import generated_files
-        for path, content in generated_files().items():
+        try:
+            generated = generated_files(config=active_config)
+        except ValueError as exc:
+            print(f"Cannot preserve this MCP configuration across runtimes: {exc}", file=sys.stderr)
+            return 1
+        ACTIVE_PATH.write_text(_dump(active_config), encoding="utf-8", newline="\n")
+        for path, content in generated.items():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8", newline="\n")
         print(message)

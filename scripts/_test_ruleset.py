@@ -57,6 +57,12 @@ def admitted_result(family="momentum_top_n", parameters=None, days=5200):
 
 
 class RuleIdentity(unittest.TestCase):
+    def test_new_execution_semantics_have_a_new_adoption_identity(self):
+        self.assertEqual(ruleset.SCHEMA_VERSION, 2)
+        # Captured from the schema-1 implementation before the sizing/bands
+        # repair: the same configuration must not reuse its old evidence ID.
+        self.assertNotEqual(ruleset.rule_id(**self.material()), "rule-5abfee10fbcbed84")
+
     def material(self, **overrides):
         base = dict(
             family="momentum_top_n",
@@ -130,6 +136,25 @@ class RuleIdentity(unittest.TestCase):
 
 
 class AdoptionRecord(unittest.TestCase):
+    def test_execution_settings_must_match_the_actual_backtest(self):
+        for override in ({"cash_floor_pct": 0.90}, {"integer_shares": False},
+                         {"cost_model": bt_engine.CostModel.free()}):
+            with self.subTest(override=override):
+                with self.assertRaisesRegex(ValueError, "backtest|match"):
+                    self.build(**override)
+
+    def test_fixed_targets_must_match_the_actual_backtest(self):
+        frame, _, _ = admitted_result()
+        actual_targets = {s: 0.20 for s in frame.symbols}
+        rule = rule_families.FixedWeightBands(actual_targets)
+        result = bt_engine.run(frame, rule=rule, start_cash=100000.0,
+                               cost_model=bt_engine.CostModel(), cash_floor_pct=0.15)
+        changed = dict(zip(frame.symbols, (0.29, 0.29, 0.14, 0.14, 0.14)))
+        with self.assertRaisesRegex(ValueError, "targets|backtest"):
+            ruleset.build_adoption(sleeve="etf", result=result, targets=changed,
+                                   cost_model=bt_engine.CostModel(), cash_floor_pct=0.15,
+                                   integer_shares=True)
+
     def build(self, **overrides):
         frame, rule, result = admitted_result()
         kwargs = dict(sleeve="etf", family=rule.name, parameters=dict(rule.parameters),
@@ -163,6 +188,7 @@ class AdoptionRecord(unittest.TestCase):
         # ADR-0004's last consequence promises every order carries the backtest
         # statistics it was adopted under, so they must be stored here.
         record = self.build()
+        self.assertEqual(record["schema_version"], 2)
         for key in ("years", "cagr", "max_drawdown", "annual_turnover", "sharpe"):
             self.assertIn(key, record["admission"]["metrics"], key)
 
@@ -366,6 +392,14 @@ class CostAwareSizing(unittest.TestCase):
 
 
 class OrderPlanning(unittest.TestCase):
+    def test_fees_cannot_spend_the_reserved_cash_on_buys_or_sells(self):
+        for held, cash in (({}, 1000.0), ({"AAA": 10}, 0.0)):
+            with self.subTest(held=held):
+                plan = self.plan(weights={"AAA": 1.0}, prices={"AAA": 100.0},
+                                 held_shares=held, investable_cash=cash,
+                                 cash_floor_pct=0.20, cost_model=bt_engine.CostModel())
+                self.assertGreaterEqual(plan["cash_remaining"], 200.0)
+
     def plan(self, **overrides):
         kwargs = dict(weights={"AAA": 0.5, "BBB": 0.5},
                       prices={"AAA": 100.0, "BBB": 50.0},

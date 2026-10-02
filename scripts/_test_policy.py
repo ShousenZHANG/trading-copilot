@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from copilot.instruments import get_instrument
 from copilot.policy import assess_proposal, proposal_fingerprint
+from copilot.ruleset import SCHEMA_VERSION as ADOPTION_SCHEMA_VERSION
 
 NOW = datetime(2026, 9, 6, 2, 0, tzinfo=timezone.utc)
 
@@ -499,7 +500,7 @@ def bands_adoption(**overrides):
     # leaves each name at ~42% of total_value, which always fails single_name
     # regardless of price. 0.6 leaves ~20% each, comfortably under 0.25. See the
     # report for the full arithmetic.
-    base = {"schema_version": 1, "rule_id": "rule-0123456789abcdef", "sleeve": "etf",
+    base = {"schema_version": ADOPTION_SCHEMA_VERSION, "rule_id": "rule-0123456789abcdef", "sleeve": "etf",
             "family": "fixed_weight_bands",
             "parameters": {"relative_band": 0.25, "absolute_band": 0.05, "calendar_days": 365.0},
             "universe": ["QQQ", "SPY"], "targets": {"QQQ": 0.5, "SPY": 0.5},
@@ -1142,7 +1143,7 @@ class AGoldRuleProducesACnyContribution(unittest.TestCase):
         # read the trailing "0123456789" as an unsupported numerical fact in the
         # reasons -- every gold order came back data_insufficient, blocked by
         # its own rule id. Keep this valid.
-        base = {"schema_version": 1, "rule_id": "rule-901d0123456789ab", "sleeve": "gold",
+        base = {"schema_version": ADOPTION_SCHEMA_VERSION, "rule_id": "rule-901d0123456789ab", "sleeve": "gold",
                 "family": "scheduled_accumulation",
                 "parameters": {"interval_days": 21.0, "trend_days": 200.0,
                                "pause_below_trend": 0.0},
@@ -1282,6 +1283,272 @@ class AGoldRuleProducesACnyContribution(unittest.TestCase):
                           snapshot=gold_engine_fixture(with_quote=True),
                           context=declared_context(base_currency="CNY"),
                           investable_cash=50000.0, now=NOW)
+
+
+class RealJournalPolicyContracts(unittest.TestCase):
+    def run_etf(self, context, snapshot=None, cash=20000):
+        from copilot.policy import evaluate_rule
+        return evaluate_rule(adoption=bands_adoption(), snapshot=snapshot or engine_fixture(),
+                             context=context, investable_cash=cash, now=NOW)
+
+    def populated_context(self):
+        holding = {"instrument_id": "QQQ", "quantity": "400", "unit": "share", "currency": "USD"}
+        return declared_context(context_source="journal", sleeve="etf", holdings=[holding],
+                                sleeve_holdings=[holding], sleeve_portfolio_version="etf-v1",
+                                last_completed_execution_at=None)
+
+    def test_decimal_string_holdings_are_used_and_invalid_units_refused(self):
+        from copilot.policy import _held_shares
+        self.assertEqual(_held_shares([{"instrument_id": "QQQ", "quantity": "400",
+                                        "unit": "share", "currency": "USD"}]), {"QQQ": 400.0})
+        with self.assertRaises(ValueError):
+            _held_shares([{"instrument_id": "QQQ", "quantity": "400",
+                           "unit": "gram", "currency": "CNY"}])
+
+    def test_gold_item_uses_fine_grams_and_respects_budget(self):
+        from copilot.policy import evaluate_rule
+        context = declared_context(base_currency="CNY", holdings=[{
+            "instrument_id": "GOLD.CNY", "quantity": "2", "unit": "item", "currency": "CNY",
+            "pure_gold_grams": "62.20073290464", "purity": "0.9999", "weight_grams": "31.1034768"}])
+        result = evaluate_rule(adoption=AGoldRuleProducesACnyContribution().gold_adoption(),
+                               snapshot=gold_engine_fixture(with_quote=True), context=context,
+                               investable_cash=50000, now=NOW)
+        self.assertEqual(result["orders"][0]["action"], "hold")
+        self.assertEqual(result["orders"][0]["amount_cny"], "0")
+
+    def test_gold_actual_fill_on_current_session_prevents_second_contribution(self):
+        from copilot.policy import evaluate_rule
+        snapshot = gold_engine_fixture(with_quote=True)
+        last = snapshot["instruments"]["GOLD.CNY"]["latest_session"]
+        context = declared_context(base_currency="CNY", context_source="journal", sleeve="gold",
+                                   sleeve_holdings=[], gold_orders_today=1, gold_order_counts_today=[],
+                                   gold_last_completed_buy_at=last + "T00:00:00+08:00")
+        result = evaluate_rule(adoption=AGoldRuleProducesACnyContribution().gold_adoption(),
+                               snapshot=snapshot, context=context, investable_cash=50000, now=NOW)
+        self.assertFalse(result["rebalance_due"])
+        self.assertEqual(result["orders"][0]["action"], "hold")
+
+    def test_foreign_currency_recommendations_do_not_create_gold_drawdown(self):
+        from copilot.policy import evaluate_rule
+        context = declared_context(base_currency="CNY", context_source="journal", sleeve="gold",
+                                   sleeve_holdings=[], gold_orders_today=0, gold_order_counts_today=[],
+                                   gold_last_completed_buy_at=None, recommendations=[{
+                                       "instrument_id": "QQQ", "portfolio_total_value": 20000.0,
+                                       "sleeve": "etf", "currency": "USD"}])
+        result = evaluate_rule(adoption=AGoldRuleProducesACnyContribution().gold_adoption(),
+                               snapshot=gold_engine_fixture(with_quote=True), context=context,
+                               investable_cash=50000, now=NOW)
+        self.assertEqual(result["orders"][0]["risk_checks"]["drawdown"]["value"], 0.0)
+        self.assertEqual(result["orders"][0]["portfolio_total_value"], 0.0)
+
+    def test_populated_book_needs_a_real_baseline_then_recovers_on_new_snapshot(self):
+        context = self.populated_context()
+        first = self.run_etf(context)
+        order = first["orders"][0]
+        self.assertEqual(order["portfolio_total_value"], 65980.0)
+        self.assertEqual(order["risk_checks"]["drawdown"]["status"], "unknown")
+        self.assertNotIn("quantity", order)
+        second_context = {**context, "recommendations": first["orders"]}
+        same = self.run_etf(second_context)
+        self.assertEqual(same["orders"][0]["risk_checks"]["drawdown"]["status"], "unknown")
+        next_snapshot = engine_fixture()
+        next_snapshot["created_at"] = "2026-09-06T01:01:00+00:00"
+        seal(next_snapshot)
+        second = self.run_etf(second_context, snapshot=next_snapshot)
+        self.assertEqual(second["orders"][0]["risk_checks"]["drawdown"]["status"], "pass")
+        self.assertEqual(second["orders"][0]["action"], "reduce")
+        self.assertEqual(second["orders"][0]["quantity"], 286)
+
+    def test_holdings_or_cash_change_cannot_be_treated_as_a_loss(self):
+        from copilot.valuation import observe
+        current = self.populated_context()
+        first = self.run_etf(current)
+        for changes in ({"sleeve_portfolio_version": "etf-v2"}, {}):
+            context = {**current, **changes, "recommendations": first["orders"]}
+            _, risk = observe(context=context, sleeve="etf", total_value=50000,
+                              cash_value=10000 if not changes else 20000, invested=True,
+                              snapshot_id="new-observation", mark_basis="regular_session_close")
+            self.assertNotIn("drawdown", risk)
+            self.assertEqual(risk["drawdown_history_status"], "baseline_required")
+
+    def test_gold_day_count_requires_account_identity_to_exclude_other_fills(self):
+        from copilot.policy import _gold_order_count
+        context = {"context_source": "journal", "gold_order_counts_today": [
+            {"merchant": "bank-a", "account_id": "a1", "count": 4},
+            {"merchant": "bank-a", "account_id": "a2", "count": 6},
+            {"merchant": "bank-b", "account_id": "b1", "count": 8}]}
+        self.assertEqual(_gold_order_count(context, {"merchant": "bank-a"}), 18)
+        self.assertEqual(_gold_order_count(context, {"merchant": "bank-a", "account_id": "a1"}), 4)
+        self.assertEqual(_gold_order_count(context, {"merchant": "bank-b"}), 18)
+        self.assertEqual(_gold_order_count(context, {"merchant": "a bank alias"}), 18)
+        context["gold_order_counts_today"].append({"merchant": "unknown alias", "account_id": None, "count": 2})
+        self.assertEqual(_gold_order_count(context, {"merchant": "bank-a", "account_id": "a1"}), 6)
+
+    def test_gold_schedule_requires_history_and_uses_completed_trading_sessions(self):
+        from copilot.policy import _gold_schedule
+        adoption = AGoldRuleProducesACnyContribution().gold_adoption()
+        snapshot = gold_engine_fixture(with_quote=True)
+        rows = snapshot["evidence"][0]["bars"]
+        context = {"context_source": "journal", "gold_last_completed_buy_at": "2020-01-01"}
+        self.assertTrue(_gold_schedule(adoption, snapshot, context)[0])
+        short = gold_engine_fixture(with_quote=True, bars=20)
+        self.assertFalse(_gold_schedule(adoption, short, context)[0])
+        context["gold_last_completed_buy_at"] = rows[-21]["session"]
+        self.assertFalse(_gold_schedule(adoption, snapshot, context)[0])
+        context["gold_last_completed_buy_at"] = rows[-22]["session"]
+        self.assertTrue(_gold_schedule(adoption, snapshot, context)[0])
+        self.assertFalse(_gold_schedule(adoption, snapshot, {"context_source": "journal"})[0])
+
+    def test_long_paused_etf_rules_use_observed_session_lower_bounds(self):
+        from datetime import date
+        from copilot.policy import _last_rebalance_index, _build_rule
+        dates = [date.fromisoformat(row["session"]) for row in bars_series()]
+        context = {"context_source": "journal", "last_completed_execution_at": "2020-01-02"}
+        for family, parameters in (
+            ("inverse_volatility", {"lookback_days": 63, "rebalance_days": 21}),
+            ("momentum_top_n", {"top_n": 1, "lookback_days": 252, "skip_days": 21})):
+            adoption = bands_adoption(family=family, parameters=parameters)
+            self.assertIsNone(_last_rebalance_index(context, adoption, dates))
+            with self.assertRaisesRegex(ValueError, "insufficient"):
+                _last_rebalance_index(context, adoption, dates[:20])
+        self.assertIsNone(_last_rebalance_index(context, bands_adoption(), dates))
+        with self.assertRaisesRegex(ValueError, "insufficient"):
+            _last_rebalance_index({**context, "last_completed_execution_at": "2024-12-31"},
+                                  bands_adoption(), dates[:20])
+
+    def test_real_long_paused_books_resume_after_comparable_valuation_baseline(self):
+        import tempfile
+        from pathlib import Path
+        from copilot import journal
+        from copilot.policy import evaluate_rule
+        for sleeve in ("etf", "gold"):
+            with self.subTest(sleeve=sleeve), tempfile.TemporaryDirectory() as folder:
+                db = Path(folder) / "cadence.sqlite"
+                gold = sleeve == "gold"
+                operation = {"statement": "I already bought this investment.", "source_message_id": "old-fill",
+                             "execution_status": "executed", "instrument_id": "GOLD.CNY" if gold else "QQQ",
+                             "side": "buy", "quantity": "5" if gold else "400", "unit": "gram" if gold else "share",
+                             "price": "900" if gold else "100", "currency": "CNY" if gold else "USD",
+                             "occurred_at": "2020-01-02", "fees": "0", "account_id": "account"}
+                if gold:
+                    operation.update(merchant="bank", purity="0.9999")
+                receipt = journal.record_operation(operation, "old-fill", db_path=db, now=NOW)
+                self.assertEqual(receipt["status"], "executed")
+                journal.record_coverage_declaration(sleeve=sleeve, base_currency=operation["currency"],
+                                                    portfolio_version=receipt["portfolio_version"], db_path=db)
+                snapshot = gold_engine_fixture(with_quote=True) if gold else engine_fixture()
+                adoption = (AGoldRuleProducesACnyContribution().gold_adoption() if gold else bands_adoption(
+                    family="inverse_volatility", parameters={"lookback_days": 63, "rebalance_days": 21}))
+                cash = 50000 if gold else 20000
+                journal.save_snapshot(snapshot, db_path=db)
+                first = evaluate_rule(adoption=adoption, snapshot=snapshot,
+                                      context=journal.get_context(sleeve=sleeve, db_path=db, now=NOW),
+                                      investable_cash=cash, now=NOW)
+                self.assertTrue(first["rebalance_due"])
+                self.assertEqual(first["execution_scope"], "research_only")
+                journal.record_recommendations(first["orders"], db_path=db)
+                snapshot["created_at"] = "2026-09-06T01:01:00+00:00"
+                seal(snapshot)
+                second = evaluate_rule(adoption=adoption, snapshot=snapshot,
+                                       context=journal.get_context(sleeve=sleeve, db_path=db, now=NOW),
+                                       investable_cash=cash, now=NOW)
+                self.assertTrue(second["rebalance_due"])
+                self.assertEqual(second["execution_scope"], "actionable")
+                if gold:
+                    self.assertEqual(second["orders"][0]["amount_cny"], "5000")
+                else:
+                    self.assertEqual(second["orders"][0]["action"], "reduce")
+
+    def test_etf_timestamp_uses_calendar_timezone_and_unavailable_calendar_pauses(self):
+        from datetime import date, timedelta, timezone
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from copilot.data_calendar import CalendarUnavailable
+        from copilot.policy import _last_rebalance_index
+        calendar = SimpleNamespace(tz=timezone(timedelta(hours=-5)),
+                                   is_session=lambda stamp: stamp in {"2026-01-05", "2026-01-06"})
+        context = {"context_source": "journal", "last_completed_execution_at": "2026-01-06T01:00:00+00:00"}
+        with patch("copilot.data_calendar.MarketCalendar._calendar", return_value=calendar):
+            self.assertEqual(_last_rebalance_index(context, bands_adoption(),
+                                                   [date(2026, 1, 5), date(2026, 1, 6)],
+                                                   now="2026-01-06T02:00:00+00:00"), 0)
+            with self.assertRaisesRegex(ValueError, "future"):
+                _last_rebalance_index(context, bands_adoption(), [date(2026, 1, 5), date(2026, 1, 6)],
+                                      now="2026-01-05T23:00:00+00:00")
+        populated = {**self.populated_context(), **context}
+        with patch("copilot.data_calendar.MarketCalendar._calendar",
+                   side_effect=CalendarUnavailable("calendar timezone unavailable")):
+            result = self.run_etf(populated)
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertIn("calendar timezone unavailable", result["evaluation_issues"][0])
+        self.assertIn("calendar timezone unavailable", result["orders"][0]["reasons"][0])
+        self.assertTrue(all("quantity" not in order for order in result["orders"]))
+
+    def test_invalid_or_future_completed_execution_does_not_open_cadence(self):
+        from datetime import date, timedelta, timezone
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from copilot.policy import _gold_schedule, _last_rebalance_index
+        adoption = AGoldRuleProducesACnyContribution().gold_adoption()
+        snapshot = gold_engine_fixture(with_quote=True)
+        self.assertFalse(_gold_schedule(adoption, snapshot, {
+            "context_source": "journal", "gold_last_completed_buy_at": "2030-01-02"})[0])
+        with self.assertRaises(ValueError):
+            _gold_schedule(adoption, snapshot, {"gold_last_completed_buy_at": "2026-02-30"})
+        dates = [date.fromisoformat(row["session"]) for row in bars_series()]
+        with self.assertRaisesRegex(ValueError, "future"):
+            _last_rebalance_index({"context_source": "journal", "last_completed_execution_at": "2030-01-02"},
+                                  bands_adoption(), dates, now=NOW)
+        with self.assertRaisesRegex(ValueError, "future"):
+            _last_rebalance_index({"context_source": "journal", "last_completed_execution_at": "2026-09-06T03:00:00+00:00"},
+                                  bands_adoption(), dates, now=NOW)
+        calendar = SimpleNamespace(tz=timezone(timedelta(hours=-5)), is_session=lambda stamp: False)
+        with patch("copilot.data_calendar.MarketCalendar._calendar", return_value=calendar), self.assertRaisesRegex(ValueError, "exchange session"):
+            _last_rebalance_index({"context_source": "journal", "last_completed_execution_at": "2026-01-04T18:00:00+00:00"},
+                                  bands_adoption(), dates, now=NOW)
+
+    def test_fractional_recorded_holdings_pause_whole_share_execution(self):
+        context = self.populated_context()
+        context["sleeve_holdings"][0]["quantity"] = "400.5"
+        result = self.run_etf(context)
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertIn("fractional", result["evaluation_issues"][0])
+        self.assertTrue(all("quantity" not in order for order in result["orders"]))
+
+    def test_fractional_adoption_cannot_silently_use_whole_share_live_execution(self):
+        from copilot.policy import evaluate_rule
+        result = evaluate_rule(adoption=bands_adoption(integer_shares=False), snapshot=engine_fixture(),
+                               context=self.populated_context(), investable_cash=20000, now=NOW)
+        self.assertEqual(result["execution_scope"], "research_only")
+        self.assertIn("fractional backtests", result["evaluation_issues"][0])
+
+    def test_configured_drawdown_can_only_tighten_engine_limit(self):
+        p, snapshot = proposal(), fixture()
+        context = complete_context(snapshot, p, drawdown=.1)
+        context["max_drawdown_pct"] = .05
+        strict = assess_proposal(p, snapshot, context, now=NOW, source="engine")
+        self.assertEqual(strict["risk_checks"]["drawdown"]["limit"], .05)
+        self.assertEqual(strict["action"], "hold")
+        context["max_drawdown_pct"] = .9
+        self.assertEqual(assess_proposal(p, snapshot, context, now=NOW, source="engine")
+                         ["risk_checks"]["drawdown"]["limit"], .15)
+        context["max_drawdown_pct"] = .05
+        self.assertEqual(assess_proposal(p, snapshot, context, now=NOW)
+                         ["risk_checks"]["drawdown"]["limit"], .15)
+
+    def test_truncated_history_without_summary_does_not_claim_a_pass(self):
+        from copilot.valuation import observe
+        context = {**self.populated_context(), "recommendations_truncated": True}
+        _, risk = observe(context=context, sleeve="etf", total_value=50000, cash_value=20000,
+                          invested=True, snapshot_id="new", mark_basis="regular_session_close")
+        self.assertNotIn("drawdown", risk)
+        self.assertEqual(risk["drawdown_history_status"], "history_truncated")
+
+    def test_journal_execution_refuses_an_old_adoption_schema(self):
+        from copilot.policy import evaluate_rule
+        with self.assertRaisesRegex(ValueError, "older execution schema"):
+            evaluate_rule(adoption=bands_adoption(schema_version=1), snapshot=engine_fixture(),
+                          context=self.populated_context(), investable_cash=20000, now=NOW)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ class PriceFrame:
     dates: tuple[date, ...]
     symbols: tuple[str, ...]
     closes: tuple[tuple[float, ...], ...]
+    price_basis: str = "unspecified"
 
     def __post_init__(self) -> None:
         """Validate on construction, not only through build().
@@ -92,7 +93,7 @@ class PriceFrame:
 
 
 def build(*, dates: Sequence[date], symbols: Sequence[str],
-          closes: Iterable[Sequence[float]]) -> PriceFrame:
+          closes: Iterable[Sequence[float]], price_basis: str = "unspecified") -> PriceFrame:
     """Normalize inputs and construct. All validation lives in `__post_init__`.
 
     This function's job is purely the normalization a caller should not have
@@ -103,4 +104,4 @@ def build(*, dates: Sequence[date], symbols: Sequence[str],
     """
     rows = tuple(tuple(float(v) for v in row) for row in closes)
     upper = tuple(s.upper() for s in symbols)
-    return PriceFrame(dates=tuple(dates), symbols=upper, closes=rows)
+    return PriceFrame(dates=tuple(dates), symbols=upper, closes=rows, price_basis=price_basis)

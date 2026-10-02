@@ -95,7 +95,7 @@ def collect(instrument_ids: list[str], horizon: str = "daily", *, db_path=None,
 
 
 def context(instrument_ids: list[str] | None = None, *, db_path=None, as_of=None,
-            sleeve: str = "etf") -> dict:
+            sleeve: str = "etf", now=None) -> dict:
     """Holdings and audit context. `sleeve` selects whose coverage declaration is read.
 
     Defaulting to "etf" matches journal.get_context: a declaration is per
@@ -103,7 +103,7 @@ def context(instrument_ids: list[str] | None = None, *, db_path=None, as_of=None
     declaration mark the USD ETF book complete.
     """
     from .journal import get_context
-    return get_context(instrument_ids, as_of=as_of, sleeve=sleeve,
+    return get_context(instrument_ids, as_of=as_of, sleeve=sleeve, now=now,
                        db_path=database_path(db_path))
 
 
@@ -130,7 +130,8 @@ def review(snapshot_id: str, proposal: dict, *, db_path=None, now=None) -> dict:
     from .journal import record_recommendation
     from .policy import assess_proposal
     stored = snapshot(snapshot_id, db_path=db_path)
-    current = context(db_path=db_path)
+    sleeve = "gold" if proposal.get("instrument_id") == "GOLD.CNY" else "etf"
+    current = context(db_path=db_path, sleeve=sleeve, now=now)
     decision = assess_proposal(proposal, stored, current, now=now)
     gaps = stored.get("research_issues", [])
     if gaps:
@@ -243,7 +244,7 @@ def adopt(adoption_inputs: dict, *, db_path=None) -> dict:
     """Record an adoption and tell the user how to make it live.
 
     Recording is not activation. The engine trades whatever
-    config/user.toml's etf.adopted_rule_id points at, and only the user edits
+    config/user.toml's corresponding sleeve.adopted_rule_id points at, and only the user edits
     that file (ADR-0007 clause 8). `adoption_inputs["result"]` must be a real
     `backtest.engine.Result` object, in memory in this process -- never a JSON
     payload, because Result cannot survive a JSON round trip with the binding
@@ -257,7 +258,7 @@ def adopt(adoption_inputs: dict, *, db_path=None) -> dict:
     record = build_adoption(**adoption_inputs)
     receipt = record_adoption(record, db_path=database_path(db_path))
     receipt["adoption"] = record
-    receipt["next_step"] = (f'set etf.adopted_rule_id = "{record["rule_id"]}" in '
+    receipt["next_step"] = (f'set {record["sleeve"]}.adopted_rule_id = "{record["rule_id"]}" in '
                             "config/user.toml to make this rule live")
     return receipt
 
@@ -298,6 +299,11 @@ def _brake_zeroed(order: dict) -> bool:
     return bool(applied.get("pre_brake_quantity")) and not applied.get("post_brake_quantity")
 
 
+def _baseline_required(orders: list[dict]) -> bool:
+    return any(order.get("drawdown_history_status") in {
+        "baseline_required", "valuation_unavailable"} for order in orders)
+
+
 def render_evaluation(result: dict, stored: dict) -> str:
     """Render only what the engine produced. Never print a heading with nothing under it.
 
@@ -320,6 +326,8 @@ def render_evaluation(result: dict, stored: dict) -> str:
         else:
             lines.append("研究观点，未给出具体克数（" +
                          "；".join(order.get("refusals") or order.get("reasons") or ["原因未记录"]) + "）")
+        if _baseline_required([order]):
+            lines.append("尚无可比较估值历史；本次已保留估值，更新行情后再评估")
         if (result.get("brake") or {}).get("level", "none") != "none":
             lines.append(result["brake"]["disclosure"])
         # All three disclosures travel with the number, never in a document the
@@ -347,6 +355,8 @@ def render_evaluation(result: dict, stored: dict) -> str:
             reason = "持仓覆盖未声明"
         elif not result.get("rebalance_due"):
             reason = "规则未触发再平衡"
+        elif _baseline_required(orders):
+            reason = "尚无可比较估值历史；本次已保留估值，更新行情后再评估"
         elif failed:
             reason = "风险检查未通过：" + "、".join(failed)
         elif suppressed:
@@ -392,20 +402,13 @@ def evaluate(*, snapshot_id: str, sleeve: str = "etf", config_path=None, db_path
     sleeve is refused rather than run, because the only thing that would
     otherwise catch it is the currency of the numbers it produced.
 
-    All orders are validated before any is written. record_recommendation opens
-    its own transaction per row, so writing as we go would leave half a basket in
-    a table with immutability triggers if a later row failed. That guarantee
-    covers validation failures (a missing required field) -- it does not make
-    the write loop itself atomic across rows, because record_recommendation
-    commits one row per call with no cross-row transaction primitive. A conflict
-    that lands on the FIRST row leaves nothing committed; a conflict landing on
-    a LATER row (a genuine race against a concurrent trade) would still leave
-    earlier rows committed. See _test_copilot_service.py's
-    evaluate_with_a_failing_row for the demonstration and full explanation.
+    The journal validates and commits the whole basket in one transaction. A
+    conflicting portfolio version or a failure on any row rolls back every row.
     """
     from .config import load_config
-    from .journal import load_adoption, record_recommendation
+    from .journal import load_adoption, record_recommendations
     from .policy import evaluate_rule
+    from .ruleset import SCHEMA_VERSION
     from .journal import COVERAGE_SLEEVES
     if sleeve not in COVERAGE_SLEEVES:
         raise ValueError(f"sleeve must be one of {COVERAGE_SLEEVES}, got {sleeve!r}")
@@ -419,13 +422,28 @@ def evaluate(*, snapshot_id: str, sleeve: str = "etf", config_path=None, db_path
                          "to a rule id printed by `backtest_cli.py --adopt`")
     path = database_path(db_path)
     adoption_record = load_adoption(pointer, db_path=path)
+    if adoption_record.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("adopted rule uses an older execution schema; rerun the backtest "
+                         "and adopt its result before evaluation")
     if adoption_record.get("sleeve") != sleeve:
         raise ValueError(f"{sleeve}.adopted_rule_id points at {pointer}, whose sleeve is "
-                         f"{adoption_record.get('sleeve')!r}; a pointer must name a rule for "
-                         "its own sleeve, because the two books are different currencies")
+                          f"{adoption_record.get('sleeve')!r}; a pointer must name a rule for "
+                          "its own sleeve, because the two books are different currencies")
+    if sleeve == "etf":
+        adopted_floor = adoption_record.get("cash_floor_pct")
+        if (isinstance(adopted_floor, bool) or not isinstance(adopted_floor, (int, float))
+                or abs(adopted_floor - settings.etf.min_cash_reserve_pct) > 1e-12):
+            raise ValueError("configured cash reserve differs from the adopted backtest; "
+                             "rerun backtest_cli.py with --cash-floor-pct and adopt that rule")
+        if (settings.etf.universe
+                and set(settings.etf.universe) != set(adoption_record.get("universe", []))):
+            raise ValueError("configured ETF universe differs from the adopted backtest; "
+                             "backtest and adopt the configured universe before evaluation")
     stored = snapshot(snapshot_id, db_path=db_path)
     _verify_brake_evidence(stored, brake)
-    current = context(db_path=db_path, sleeve=sleeve)
+    current = context(db_path=db_path, sleeve=sleeve, now=now)
+    if sleeve == "etf":
+        current["max_drawdown_pct"] = settings.etf.max_drawdown_pct
     if sleeve == "gold":
         # The [gold] account limits live in config, not in the adoption: they
         # describe the merchant's product (Bank of China 积存金: 1200 CNY
@@ -453,8 +471,7 @@ def evaluate(*, snapshot_id: str, sleeve: str = "etf", config_path=None, db_path
                 raise ValueError(f"order for {order.get('instrument_id')!r} cannot be recorded: "
                                  f"{field} is missing")
         prepared.append(order)
-    for order in prepared:
-        record_recommendation(order, db_path=path)
+    record_recommendations(prepared, db_path=path)
     result["message"] = render_evaluation(result, stored)
     return result
 

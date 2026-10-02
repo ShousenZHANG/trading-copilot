@@ -64,7 +64,9 @@ def plan_contribution(*, ask_per_fine_gram: float, investable_total_cny: float,
         raise ValueError(f"min_order_cny {min_order_cny} must be a multiple of "
                          f"order_increment_cny {order_increment_cny}; otherwise no floored "
                          "contribution can ever reach the minimum")
-    if int(max_orders_per_day) < 1:
+    if type(orders_today) is not int or orders_today < 0:
+        raise ValueError(f"orders_today must be a nonnegative integer, got {orders_today!r}")
+    if type(max_orders_per_day) is not int or max_orders_per_day < 1:
         raise ValueError(f"max_orders_per_day must be at least 1, got {max_orders_per_day!r}")
 
     refusals: list[str] = []
@@ -102,7 +104,7 @@ def plan_contribution(*, ask_per_fine_gram: float, investable_total_cny: float,
         reasons.append(f"floored to a multiple of order_increment_cny {increment}")
     amount = floored
 
-    if int(orders_today) >= int(max_orders_per_day):
+    if orders_today >= max_orders_per_day:
         refusals.append(f"max_orders_per_day {max_orders_per_day} already reached "
                         f"({orders_today} recorded today)")
     if amount < minimum:

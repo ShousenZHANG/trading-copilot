@@ -36,9 +36,9 @@ def get_evidence_snapshot(snapshot_id: str, full: bool = False) -> dict:
 
 
 @mcp.tool()
-def get_investment_context(instrument_ids: list[str] | None = None) -> dict:
-    """Read actual operations and prior decisions. Unknown portfolio completeness stays unknown."""
-    return service.context(instrument_ids)
+def get_investment_context(instrument_ids: list[str] | None = None, sleeve: str = "etf") -> dict:
+    """Read operations/decisions and coverage for one sleeve: etf (USD) or gold (CNY)."""
+    return service.context(instrument_ids, sleeve=sleeve)
 
 
 @mcp.tool()

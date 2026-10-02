@@ -1,4 +1,4 @@
-"""Whole-share order deltas that fit the budget after costs.
+"""Funded order deltas, reserving cash and costs in one shared calculation.
 
 TWO THINGS THE FIRST DRAFT GOT WRONG, BOTH FIXED HERE
 
@@ -16,6 +16,10 @@ The cash floor is withheld from that same total, because `engine.run` reserves a
 fraction of `cash + positions` (engine.py:167). Reserving a fraction of cash
 instead would make a rule reserve a different amount live than it did in the
 backtest it was admitted under.
+
+The live ETF default requires whole-share existing holdings. Fractional ETF
+holdings need a separately supported execution path; they are never truncated
+into whole shares. Fractional sizing here is used by the gold backtest.
 
 PRECONDITION: `affordable_shares` assumes `price >= 1.0`. Its descent subtracts
 the observed overshoot in whole shares, which is exact at ordinary prices; for
@@ -47,15 +51,55 @@ def affordable_shares(*, budget: float, price: float, cost_model) -> int:
     return 0
 
 
+def _funded_targets(*, weights, prices, held, cash, total_value, cash_floor_pct,
+                    cost_model, integer_shares):
+    """Reserve cash first, then fit the entire rebalance including sell fees.
+
+    Shrinking the investable book scales the intended allocation together;
+    sorted evaluation keeps the result independent of hash iteration order.
+    A bounded search handles both whole shares and fractional gold quantities.
+    """
+    symbols = sorted(set(weights) | set(held))
+    reserve = total_value * cash_floor_pct
+    investable = total_value - reserve
+
+    def candidate(amount):
+        targets, remaining = {}, cash
+        for symbol in symbols:
+            raw = amount * weights.get(symbol, 0.0) / prices[symbol]
+            targets[symbol] = int(raw) if integer_shares else raw
+            delta = targets[symbol] - held.get(symbol, 0.0)
+            if abs(delta) < 1e-9:
+                continue
+            notional = abs(delta) * prices[symbol]
+            remaining -= delta * prices[symbol] + cost_model.total(shares=abs(delta), notional=notional)
+        return targets, remaining
+
+    targets, remaining = candidate(investable)
+    if remaining >= reserve:
+        return targets, remaining
+    best, best_cash = candidate(0.0)
+    if best_cash < reserve:
+        raise ValueError("rebalance costs cannot preserve the portfolio value and cash reserve")
+    lower, upper = 0.0, investable
+    for _ in range(64):
+        middle = (lower + upper) / 2.0
+        proposed, proposed_cash = candidate(middle)
+        if proposed_cash >= reserve:
+            lower, best, best_cash = middle, proposed, proposed_cash
+        else:
+            upper = middle
+    return best, best_cash
+
+
 def plan_orders(*, weights: Mapping[str, float], prices: Mapping[str, float],
                 held_shares: Mapping[str, float], investable_cash: float,
-                cash_floor_pct: float, cost_model) -> dict:
+                cash_floor_pct: float, cost_model, integer_shares: bool = True) -> dict:
     """Turn target weights plus what is held into whole-share deltas.
 
-    Sells are computed first and are never limited by cash: a sell raises cash.
-    Buys then draw from the remaining budget in a deterministic (sorted) order,
-    so the total spend cannot exceed what is available even when rounding on one
-    symbol frees change a later one could use.
+    The whole rebalance is costed before exposing orders, including sell fees.
+    The cash reserve cannot fund commissions. Fractional quantities are used
+    only by the backtest gold path; live ETF callers keep whole-share defaults.
 
     A symbol is `unfunded` whenever it carries a positive target weight but
     ends the plan holding nothing -- either because the shared cash budget ran
@@ -78,44 +122,35 @@ def plan_orders(*, weights: Mapping[str, float], prices: Mapping[str, float],
             raise ValueError(f"{symbol}: weight must be finite and non-negative, got {weight!r}")
 
     held = {str(s).upper(): float(q) for s, q in (held_shares or {}).items() if q}
+    if any(not math.isfinite(q) or q < 0 or (integer_shares and not q.is_integer()) for q in held.values()):
+        raise ValueError("held shares must be finite, nonnegative and match the share basis")
     symbols = sorted(set(weights) | set(held))
     holdings_value = sum(held[s] * prices[s] for s in held)
     total_value = holdings_value + float(investable_cash)
     investable_value = total_value * (1.0 - cash_floor_pct)
 
-    targets: dict[str, int] = {}
     for symbol in symbols:
         price = prices[symbol]      # KeyError is correct: a missing price is a defect
-        if price <= 0:
+        if not math.isfinite(price) or price <= 0:
             raise ValueError(f"{symbol}: price must be positive, got {price!r}")
-        targets[symbol] = int((investable_value * weights.get(symbol, 0.0)) // price)
+    if not math.isfinite(total_value) or total_value <= 0 or not math.isfinite(investable_cash) or investable_cash < 0:
+        raise ValueError("portfolio value must be finite and positive with nonnegative cash")
+    targets, cash = _funded_targets(weights=weights, prices=prices, held=held,
+                                   cash=float(investable_cash), total_value=total_value,
+                                   cash_floor_pct=cash_floor_pct, cost_model=cost_model,
+                                   integer_shares=integer_shares)
 
     orders, unfunded = [], []
-    cash = float(investable_cash)
-    # Sells first: they fund the buys.
-    for symbol in symbols:
-        delta = targets[symbol] - int(held.get(symbol, 0))
-        if delta >= 0:
-            continue
-        notional = -delta * prices[symbol]
-        cost = cost_model.total(shares=-delta, notional=notional)
-        cash += notional - cost
     for symbol in symbols:
         price = prices[symbol]
-        current = int(held.get(symbol, 0))
+        current = int(held.get(symbol, 0)) if integer_shares else held.get(symbol, 0.0)
         delta = targets[symbol] - current
         cost = 0.0
-        if delta > 0:
-            affordable = affordable_shares(budget=cash, price=price, cost_model=cost_model)
-            if affordable < delta:
-                delta = affordable
-            if delta > 0:
-                notional = delta * price
-                cost = cost_model.total(shares=delta, notional=notional)
-                cash -= notional + cost
-        elif delta < 0:
-            notional = -delta * price
-            cost = cost_model.total(shares=-delta, notional=notional)
+        if abs(delta) >= 1e-9:
+            notional = abs(delta) * price
+            cost = cost_model.total(shares=abs(delta), notional=notional)
+        else:
+            delta = 0 if integer_shares else 0.0
         # A weight that never reached one whole share at this price bought
         # nothing just as surely as a weight the shared cash ran out on --
         # both leave this symbol holding zero despite a positive target

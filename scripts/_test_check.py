@@ -1,5 +1,6 @@
 """Stale-feature doc gate contracts: no network, no credentials, no personal state."""
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from check import (
     HISTORICAL_SECTION_MARKER,
     REMOVED_FEATURES,
     advertised_features,
+    missing_local_references,
     strip_markdown_noise,
 )
 
@@ -107,6 +109,58 @@ class MarkdownStrippingContracts(unittest.TestCase):
     def test_link_target_is_removed_but_link_text_survives(self):
         stripped = strip_markdown_noise("[label](.claude/commands/analyze.md)")
         self.assertEqual(stripped, "[label]()")
+
+
+class SelfTestListContracts(unittest.TestCase):
+    def test_docstring_mention_is_not_an_executable_interface(self):
+        from self_tests import exposes_self_test
+        self.assertFalse(exposes_self_test('"""No --self-test flag; imports bt."""\nimport bt\n'))
+        self.assertFalse(exposes_self_test('# --self-test\nprint("hello")\n'))
+
+    def test_argparse_and_manual_interfaces_are_recognized(self):
+        from self_tests import exposes_self_test
+        for source in ('parser.add_argument("--self-test", action="store_true")',
+                       'if arg == "--self-test":\n    run_tests()',
+                       'if sys.argv[1:] != ["--self-test"]:\n    raise SystemExit(2)'):
+            self.assertTrue(exposes_self_test(source), source)
+
+    def test_a_new_interface_cannot_be_silently_omitted(self):
+        from self_tests import validate
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            (root / "scripts/new.py").write_text('parser.add_argument("--self-test")', encoding="utf-8")
+            self.assertIn("self-test interface missing from MODULES: scripts/new.py",
+                          validate(root=root, modules=()))
+
+    def test_a_stale_entry_is_reported_without_importing_it(self):
+        from self_tests import validate
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIn("listed module has no self-test interface: scripts/removed.py",
+                          validate(root=Path(directory), modules=("scripts/removed.py",)))
+
+
+class ActiveDocumentationContracts(unittest.TestCase):
+    def test_missing_script_in_a_fenced_recipe_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(missing_local_references("```sh\npython scripts/prices.py --help\n```",
+                                                     root=Path(directory)), ["scripts/prices.py"])
+
+    def test_a_real_script_reference_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            (root / "scripts/exists.py").write_text("", encoding="utf-8")
+            self.assertEqual(missing_local_references("`scripts/exists.py`", root=root), [])
+
+    def test_all_public_watchlist_defaults_resolve(self):
+        from copilot.instruments import normalize_instrument
+        root = Path(__file__).resolve().parent.parent
+        rows = (root / "data/watchlist.md").read_text(encoding="utf-8").splitlines()
+        symbols = [row.split("|", 1)[0].strip() for row in rows
+                   if "|" in row and not row.lstrip().startswith(("#", ">"))]
+        self.assertTrue(symbols)
+        self.assertEqual([normalize_instrument(symbol) for symbol in symbols], symbols)
 
 
 if __name__ == "__main__":

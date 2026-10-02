@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from package_release import REQUIRED_ARTIFACT_FILES, _audit_zip
 
@@ -27,11 +28,22 @@ class ReleasePrivacyTests(unittest.TestCase):
         self.assertTrue(any("hardcoded secret" in problem for problem in problems))
 
     def test_private_database_and_strategy_never_ship(self):
-        for name in ("data/state/copilot.sqlite", "data/state/copilot.sqlite-wal", "docs/strategy.md"):
+        for name in ("data/state/copilot.sqlite", "data/state/copilot.sqlite-wal", "docs/strategy.md",
+                     "data/watchlist.local.md"):
             self.assertTrue(self.audit({name: "synthetic fixture"}), name)
 
     def test_variable_names_are_safe(self):
         self.assertEqual(self.audit({".codex/config.toml": '[mcp_servers.fixture]\nenv_vars=["API_KEY"]'}), [])
+
+    def test_http_credential_variable_names_are_safe(self):
+        self.assertEqual(self.audit({".codex/config.toml":
+            '[mcp_servers.fixture]\nbearer_token_env_var="API_KEY"\n'
+            'env_http_headers={"X-Token"="OTHER_KEY"}'}), [])
+
+    def test_literals_cannot_hide_in_http_credential_variable_fields(self):
+        for field in ('bearer_token_env_var="fixture-secret"',
+                      'env_http_headers={"X-Token"="fixture-secret"}'):
+            self.assertTrue(self.audit({".codex/config.toml": '[mcp_servers.fixture]\n' + field}))
 
     def test_third_party_market_history_never_ships(self):
         from package_release import _forbidden_archive_name
@@ -67,19 +79,26 @@ class ReleasePrivacyTests(unittest.TestCase):
         # A forbidden file must never enter the zip in the first place, so
         # prove build() itself refuses it -- not only that a post-hoc audit
         # of a zip containing it would flag it.
-        from package_release import ROOT, build
-        fixture = ROOT / "evals" / "_pkgtest_admission_review_history.csv"
-        fixture.write_text("DATE,BXN\n09/18/2009,298.140000\n", encoding="utf-8")
-        out = None
-        try:
-            out = build("0.0.0-pkgtest", "buildguard")
+        from package_release import build
+        from sync_runtimes import generated_files
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "evals").mkdir()
+            fixture = root / "evals/_pkgtest_admission_review_history.csv"
+            fixture.write_text("DATE,BXN\n09/18/2009,298.140000\n", encoding="utf-8")
+            (root / "data").mkdir()
+            (root / "data/watchlist.local.md").write_text("Private fixture notes", encoding="utf-8")
+            (root / ".mcp.json").write_text('{"mcpServers":{}}', encoding="utf-8")
+            for path, content in generated_files(root=root).items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            with patch("package_release.ROOT", root), patch("sync_runtimes.generated_files",
+                    side_effect=lambda: generated_files(root=root)):
+                out = build("0.0.0-pkgtest", "buildguard")
             with zipfile.ZipFile(out) as zf:
                 names = zf.namelist()
             self.assertFalse(any(n.endswith(fixture.name) for n in names), names)
-        finally:
-            fixture.unlink(missing_ok=True)
-            if out is not None:
-                out.unlink(missing_ok=True)
+            self.assertFalse(any(n.endswith("watchlist.local.md") for n in names), names)
 
 
 if __name__ == "__main__":
