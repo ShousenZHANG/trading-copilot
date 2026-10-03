@@ -1,6 +1,6 @@
 # Trading Copilot
 
-Investment research with free market data in Claude Code and Codex, short Chinese answers and a shared local operation journal. Covers registered US ETFs (a closed whitelist in scripts/copilot/instruments.py), the Nasdaq-100 and Composite indexes as benchmarks, and Shanghai Gold Exchange Au99.99 gold in RMB. Your chosen model/client may have its own usage costs.
+Investment research in Claude Code and Codex, short Chinese answers and a shared local operation journal. Covers registered US ETFs, explicitly provider-verified ordinary US stocks, Nasdaq benchmark indexes and SGE Au99.99 gold in RMB. Public research uses free sources; optional IBKR execution evidence may require market-data entitlements. Your chosen model/client may have its own usage costs.
 
 Ask naturally: “QQQ 适合长期持有吗？” “现在适合积累金条吗？” “我已经买了两股 QQQ……” The assistant collects a fresh evidence snapshot, checks its quality, assesses a proposal and returns a brief sourced answer. An explicit completed purchase/sale is recorded; an intention or incomplete execution stays separate. No broker order is sent.
 
@@ -34,6 +34,7 @@ python scripts/copilot_cli.py context
 | Research | Free sources / boundary |
 |---|---|
 | Registered US ETFs | Yahoo history + Nasdaq official latest close; eligible Alpaca SIP optional. Unknown tickers are rejected, not provisionally accepted. Corporate actions constrain comparisons |
+| Ordinary US stock research | Explicit research route, Nasdaq common-share identity and supported US venue; unknown/preferred/ADR identity is refused |
 | Nasdaq indexes | Yahoo plus official Nasdaq historical corroboration |
 | China investment bullion | Official SGE Au99.99 daily and SHAU benchmark; retail quote remains separate |
 | Company facts | SEC submissions/companyfacts with acceptance-time matching |
@@ -41,6 +42,20 @@ python scripts/copilot_cli.py context
 | Macro | FRED series plus release/vintage metadata; unresolved freshness stays unknown |
 
 The current free-source network and account entitlements determine coverage. Single-source or conflicting prices can return unknown; expired/failed evidence pauses dependent recommendations. No service can guarantee every future upstream quote. Raw and adjusted data stay distinct; 200-session indicators require sufficient valid daily history.
+
+Research signals provide reproducible trend/momentum, prior-session volume and
+reference trigger/invalidation levels for long-term and swing horizons. A bounded
+candidate scan combines those observations with available filings/news/macro
+evidence. Default model context is a sanitized summary; raw operations stay local.
+
+Optional [IBKR read-only snapshots](docs/IBKR.md) supply actual quotes, settled
+currency cash, positions and open-order reservations for adopted-rule manual
+cards. The user Reviews, runs a fresh preflight and submits manually. Separate
+stock/ETF long-term and swing templates require frozen history, cost/holdout
+validation and actual user adoption; see [strategy validation](docs/STRATEGY_VALIDATION.md).
+Research alone creates no funded orders, and no personal strategy was adopted
+by this code upgrade.
+Neither Review nor card expiry places or cancels broker orders.
 
 ## State and outputs
 

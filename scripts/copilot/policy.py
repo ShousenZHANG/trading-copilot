@@ -13,7 +13,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-POLICY_VERSION = "1.2"
+POLICY_VERSION = "1.3"
 SHANGHAI_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
 ACTIONS = {"buy", "hold", "reduce", "sell", "avoid"}
 _LIMITS = {
@@ -26,6 +26,10 @@ _LIMITS = {
 _INDICATOR_SAMPLES = {"sma20": 20, "sma50": 50, "sma200": 200, "rsi14": 15, "atr14": 15,
                       "return_20_sessions": 21, "return_252_sessions": 253,
                       "high_252_sessions": 252, "low_252_sessions": 252}
+_INDICATOR_SAMPLES.update({"reference_close": 1, "atr14_percent": 15,
+                          "distance_sma50_percent": 50, "distance_sma200_percent": 200,
+                          "average_volume_previous_20_sessions": 21, "volume_ratio_20_sessions": 21,
+                          "high_previous_20_sessions": 21, "low_previous_20_sessions": 21})
 
 #: Concentration is a different risk for a fund than for a single company. A
 #: broad-market ETF already holds hundreds of names, so the 5% ceiling written
@@ -225,7 +229,7 @@ def _claims(proposal: dict, snapshot: dict, evidence: dict, market_ids: set[str]
             verified.append({"evidence_id": eid, "path": path, "value": observed})
         except (ValueError, TypeError) as exc:
             issues.append(str(exc))
-    values, percentages = [], []
+    values, percentages, ratios = [], [], []
     for claim in verified:
         value = claim["value"]
         if not _number(value):
@@ -239,6 +243,13 @@ def _claims(proposal: dict, snapshot: dict, evidence: dict, market_ids: set[str]
             percentages.append(value * 100)
         elif leaf.endswith("_percent") or unit == "percent":
             percentages.append(value)
+        item = snapshot.get("instruments", {}).get(symbol, {})
+        sample_count = item.get("indicators", {}).get("sample_count")
+        if (path == instrument_prefix + "indicators/volume_ratio_20_sessions"
+                and claim["evidence_id"] == item.get("verification", {}).get("primary_evidence_id")
+                and isinstance(sample_count, int) and not isinstance(sample_count, bool)
+                and sample_count >= 21):
+            ratios.append(value)
     for text in [*proposal["reasons"], *proposal["conditions"]]:
         for match in _NUMERIC_TEXT.finditer(_IDENTITY_OR_DATE.sub(" ", text)):
             raw = match["number"].replace(",", "").replace("−", "-")
@@ -246,10 +257,8 @@ def _claims(proposal: dict, snapshot: dict, evidence: dict, market_ids: set[str]
             scale = _SCALES.get((match["scale"] or "").lower(), 1)
             stated = float(raw) * scale
             tolerance = 1e-10 if "e" in raw.lower() else 0.5 * (10 ** -decimals) * scale + 1e-10
-            candidates = percentages if match["percent"] else values
-            # Explicit scales and percentage units belong to the claim, too.
-            # Literal ratio/multiple claims currently have no typed core source.
-            if match["ratio"] or not math.isfinite(stated) or not any(abs(stated - value) <= tolerance for value in candidates):
+            candidates = ratios if match["ratio"] else percentages if match["percent"] else values
+            if not math.isfinite(stated) or not any(abs(stated - value) <= tolerance for value in candidates):
                 issues.append("unsupported numerical fact in reasons/conditions; provide a matching verified claim")
                 break
     return verified, list(dict.fromkeys(issues))
@@ -297,8 +306,14 @@ def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None,
     item = instruments.get(instrument_id)
     if not isinstance(item, dict) or item.get("instrument_id") != instrument_id:
         raise ValueError("instrument is absent from snapshot or has mismatched identity")
-    from .instruments import get_instrument
-    identity = get_instrument(instrument_id)
+    from .instruments import get_research_instrument, verify_stock_identity
+    identity = get_research_instrument(instrument_id)
+    stock_identity_issue = None
+    if identity["asset_class"] == "stock":
+        try:
+            identity = verify_stock_identity(snapshot, instrument_id)
+        except ValueError as exc:
+            stock_identity_issue = str(exc)
     if identity["instrument_id"] != instrument_id:
         raise ValueError("proposal must use the canonical instrument_id")
     # ADR-0004 clause 2: the model has no interface through which it can alter
@@ -329,6 +344,12 @@ def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None,
     valid_until = _time(snapshot.get("valid_until"), "snapshot.valid_until")
     blockers: list[str] = []
     warnings: list[str] = []
+    if stock_identity_issue:
+        blockers.append(stock_identity_issue)
+    if identity["asset_class"] == "stock":
+        warnings.append("ordinary-stock assessment is research only; funded cards require separate current template adoption and broker evidence")
+        if item.get("asset_class") != "stock":
+            blockers.append("provider-confirmed stock class is required")
     for key in ("currency", "unit", "tradable", "price_kind"):
         if item.get(key) != identity[key]:
             blockers.append(f"instrument {key} does not match canonical identity")
@@ -460,7 +481,7 @@ def assess_proposal(proposal: dict, snapshot: dict, context: dict | None = None,
     is_gold = item.get("asset_class") == "physical_gold"
     if item.get("asset_class") == "index":
         warnings.append("index points are a market view only; use a separately assessed ETF for purchases")
-    checks["tradable"] = {"status": "not_applicable" if is_gold else ("pass" if item.get("tradable") is True else "fail"), "detail": "physical product quote required" if is_gold else "index points are research only" if item.get("tradable") is not True else "tradable instrument"}
+    checks["tradable"] = {"status": "not_applicable" if is_gold else ("pass" if item.get("tradable") is True else "fail"), "detail": "physical product quote required" if is_gold else "ordinary-stock research requires a validated execution template" if identity["asset_class"] == "stock" else "index points are research only" if item.get("tradable") is not True else "tradable instrument"}
     # ETF look-through and cross-currency risk need real measured context too.
     complete = (context.get("portfolio_complete") is True and isinstance(version, str) and bool(version)
                 and bool(context.get("base_currency")) and context.get("snapshot_id") == snapshot["snapshot_id"]

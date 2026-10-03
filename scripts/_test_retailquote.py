@@ -411,7 +411,8 @@ class CapturingItWritesANewSnapshot(unittest.TestCase):
                                       if isinstance(node, ast.FunctionDef)
                                       and node.name == "record_retail_gold_quote"))
         function.decorator_list = []
-        namespace = {"service": SimpleNamespace(capture_retail_quote=lambda **kwargs:
+        namespace = {"service": SimpleNamespace(public_response=service.public_response,
+                         capture_retail_quote=lambda **kwargs:
                          service.capture_retail_quote(db_path=self.db, now=NOW, **kwargs))}
         exec(compile(ast.Module(body=[function], type_ignores=[]), "mcp-quote-fixture", "exec"), namespace)
         receipt = namespace["record_retail_gold_quote"](

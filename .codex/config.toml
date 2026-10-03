@@ -16,7 +16,7 @@ tool_timeout_sec = 180
 [mcp_servers."trading-copilot"]
 command = "uv"
 args = ["run", "--no-project", "--quiet", "--script", "mcps/copilot_mcp.py"]
-env_vars = ["ALPACA_API_KEY", "ALPACA_SECRET_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "COPILOT_DB_PATH", "FINNHUB_API_KEY", "FRED_API_KEY", "SEC_USER_AGENT"]
+env_vars = ["ALPACA_API_KEY", "ALPACA_SECRET_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "COPILOT_CONFIG_PATH", "COPILOT_DB_PATH", "FINNHUB_API_KEY", "FRED_API_KEY", "SEC_USER_AGENT"]
 startup_timeout_sec = 120
 tool_timeout_sec = 180
 
@@ -45,4 +45,37 @@ approval_mode = "approve"
 approval_mode = "approve"
 
 [mcp_servers."trading-copilot".tools.evaluate_adopted_rule]
+approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.get_operation_context]
+approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.analyze_market_signals]
+approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.scan_investment_opportunities]
+approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.collect_broker_snapshot]
+approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.prepare_manual_trade_plan]
+approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.get_manual_trade_plan]
+approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.confirm_manual_plan_review]
+approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.revalidate_manual_trade_plan]
+approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.confirm_account_cash_flow]
+approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.confirm_holding_modes]
+approval_mode = "approve"
+
+[mcp_servers."trading-copilot".tools.confirm_strategy_execution_state]
 approval_mode = "approve"

@@ -70,7 +70,7 @@ def generated_files(*, root: Path = ROOT, config: dict | None = None) -> dict[Pa
         forwarded = list(references.values())
         if name == "trading-copilot":
             from copilot.service import KEY_NAMES
-            forwarded.extend([*KEY_NAMES, "COPILOT_DB_PATH"])
+            forwarded.extend([*KEY_NAMES, "COPILOT_DB_PATH", "COPILOT_CONFIG_PATH"])
         if forwarded:
             lines.append("env_vars = " + json.dumps(sorted(set(forwarded))))
         lines += ["startup_timeout_sec = 120", "tool_timeout_sec = 180", ""]
@@ -83,7 +83,11 @@ def generated_files(*, root: Path = ROOT, config: dict | None = None) -> dict[Pa
             # the gold sleeve and is the reason this note exists.
             tools = ["collect_market_snapshot", "get_evidence_snapshot", "get_investment_context",
                      "assess_investment_proposal", "record_investment_operation", "get_data_capabilities",
-                     "declare_holdings_coverage", "record_retail_gold_quote", "evaluate_adopted_rule"]
+                     "declare_holdings_coverage", "record_retail_gold_quote", "evaluate_adopted_rule",
+                     "get_operation_context", "analyze_market_signals", "scan_investment_opportunities",
+                     "collect_broker_snapshot", "prepare_manual_trade_plan", "get_manual_trade_plan",
+                     "confirm_manual_plan_review", "revalidate_manual_trade_plan", "confirm_account_cash_flow",
+                     "confirm_holding_modes", "confirm_strategy_execution_state"]
             # Only local evidence/accounting operations authorized by the project.
             for tool in tools:
                 lines += [f'[mcp_servers."trading-copilot".tools.{tool}]',

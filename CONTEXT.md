@@ -10,6 +10,14 @@ _Avoid_: treating every symbol as a tradable stock.
 **Snapshot**: The evidence available for one decision cutoff, retaining observation times, sources, quality and expiry.
 _Avoid_: calling retrieval time the market price date.
 
+**Research signal**: A deterministic condition over validated completed-session bars, with evidence-bound reference trigger/invalidation levels. Its price basis is retained; it is not a live limit or stop order.
+
+**Execution snapshot**: A separate local IBKR read-only observation of account value, settled cash, positions, orders, recent fills, contracts and actual received quotes. End markers and coverage are required; it is not an atomic account lock or journal history reconstruction.
+
+**Manual trade card**: An immutable adopted-rule calculation of funded raw-price limits, whole shares, fees and risk checks. Explicit user Review and a fresh passing preflight precede the user's manual order. Card expiry does not cancel broker orders.
+
+**Cash-flow interval**: An explicitly confirmed net deposit/withdrawal amount between trustworthy broker observations, including zero. It adjusts prospective return/drawdown accounting without changing broker cash or journal holdings.
+
 **Decision**: An assessed research recommendation tied to evidence and the known portfolio state. It is not an order or a completed trade.
 _Avoid_: report, fill.
 

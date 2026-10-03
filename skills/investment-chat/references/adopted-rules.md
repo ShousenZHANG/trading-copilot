@@ -1,5 +1,11 @@
 # Adopted-rule execution
 
+For IBKR-funded manual USD stock/ETF cards, read
+[manual trade plans](manual-trade-plans.md). The procedure below is the legacy
+journal-funded ETF/RMB-gold evaluator; its configured cash is distinct from a
+fresh broker's settled cash. Default context omits raw operations and old order
+figures; it exposes historical status and requires reevaluation.
+
 1. Read `get_investment_context(sleeve="etf"|"gold")` for the requested book.
    Its `recommendations` are historical research views, including rows whose
    holdings are still current. They are not fresh executable orders: collect

@@ -357,7 +357,18 @@ def enrich(snapshot: dict, *, client=None) -> dict:
     as_of = snapshot["decision_at"]
     _time(as_of)
     tasks = []
-    equities = [symbol for symbol, item in snapshot["instruments"].items() if item["asset_class"] in {"stock", "etf"}]
+    equities = []
+    for symbol, item in snapshot["instruments"].items():
+        if item["asset_class"] == "etf" or (item["asset_class"] == "stock"
+                and item.get("identity_status") == "provider_confirmed"
+                and item.get("security_type") == "common_stock"):
+            equities.append(symbol)
+        elif item["asset_class"] == "stock":
+            snapshot.setdefault("research_issues", []).append({"instrument_id": symbol,
+                **_gap("identity", "identity_unverified", "ordinary stock identity must be confirmed before company research")})
+            for kind in ("news", "filings"):
+                item.setdefault("research", {})[kind] = {"status": "identity_unverified",
+                    "evidence_ids": [], "critical_evidence_eligible": False}
     for symbol in equities:
         tasks.append((symbol, "news", "finnhub", lambda s=symbol: [company_news(s, client, as_of=as_of)]))
     for series in ("DFII10", "DGS10", "DTWEXBGS", "CPIAUCSL"):

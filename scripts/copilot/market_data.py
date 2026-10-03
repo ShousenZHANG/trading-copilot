@@ -16,8 +16,21 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from .data_calendar import CalendarUnavailable, MarketCalendar, iso, parse_time, utc_now
-from .instruments import get_instrument, normalize_instrument
-from .providers import AlpacaProvider, HttpClient, NasdaqEquityProvider, NasdaqIndexProvider, ProviderError, SGEProvider, YahooProvider, finite_number
+from .instruments import get_instrument, get_research_instrument, normalize_instrument, normalize_research_instrument
+from .providers import AlpacaProvider, HttpClient, NasdaqEquityProvider, NasdaqIndexProvider, ProviderError, SGEProvider, YahooProvider, finite_number, is_supported_us_exchange
+
+
+INDICATOR_FORMULA_VERSION = "wilder-v2-relative"
+INDICATOR_MINIMUM_SAMPLES = {
+    "reference_close": 1, "sma20": 20, "sma50": 50, "sma200": 200,
+    "rsi14": 15, "atr14": 15, "atr14_percent": 15,
+    "distance_sma50_percent": 50, "distance_sma200_percent": 200,
+    "return_20_sessions": 21, "return_252_sessions": 253,
+    "high_252_sessions": 252, "low_252_sessions": 252,
+    "high_previous_20_sessions": 21, "low_previous_20_sessions": 21,
+    "average_volume_20_sessions": 20, "average_volume_previous_20_sessions": 21,
+    "volume_ratio_20_sessions": 21,
+}
 
 
 def snapshot_digest(snapshot: dict) -> str:
@@ -49,11 +62,18 @@ def compute_indicators(bars: list[dict], basis: str = "split_adjusted") -> dict:
     adjusted = basis == "total_return_adjusted"
     closes = [finite_number(bar["adjusted_close"] if adjusted else bar["close"], positive=True) for bar in bars]
     count = len(closes)
-    result = {"basis": basis, "sample_count": count, "formula_version": "wilder-v1",
+    result = {"basis": basis, "sample_count": count, "formula_version": INDICATOR_FORMULA_VERSION,
+              "reference_close": closes[-1] if closes else None,
               "sma20": None, "sma50": None, "sma200": None, "rsi14": None,
               "atr14": None, "return_20_sessions": None, "return_252_sessions": None,
+              "atr14_percent": None, "distance_sma50_percent": None,
+              "distance_sma200_percent": None,
+              "high_previous_20_sessions": None, "low_previous_20_sessions": None,
               "high_252_sessions": None, "low_252_sessions": None,
-              "average_volume_20_sessions": None, "missing": []}
+              "average_volume_20_sessions": None,
+              "average_volume_previous_20_sessions": None, "volume_ratio_20_sessions": None,
+              "volume_ratio_scope": "latest_volume_over_previous_20_completed_sessions",
+              "missing": []}
     for period in (20, 50, 200):
         if count >= period:
             result[f"sma{period}"] = sum(closes[-period:]) / period
@@ -82,11 +102,23 @@ def compute_indicators(bars: list[dict], basis: str = "split_adjusted") -> dict:
         result["atr14"] = atr
     else:
         result["missing"].append("atr14: need 15 bars with comparable OHLC")
+    if count:
+        if result["atr14"] is not None:
+            result["atr14_percent"] = result["atr14"] / closes[-1] * 100
+        for period in (50, 200):
+            average = result[f"sma{period}"]
+            if average is not None:
+                result[f"distance_sma{period}_percent"] = (closes[-1] / average - 1) * 100
     for period in (20, 252):
         if count > period:
             result[f"return_{period}_sessions"] = closes[-1] / closes[-period - 1] - 1
         else:
             result["missing"].append(f"return_{period}_sessions: need {period + 1} valid bars")
+    if count >= 21:
+        result["high_previous_20_sessions"] = max(closes[-21:-1])
+        result["low_previous_20_sessions"] = min(closes[-21:-1])
+    else:
+        result["missing"].append("prior close range: need 21 valid bars; current session excluded")
     if count >= 252:
         if has_ohlc:
             high_low = [(bar["high"] * (bar["adjusted_close"] / bar["close"] if adjusted else 1),
@@ -101,6 +133,22 @@ def compute_indicators(bars: list[dict], basis: str = "split_adjusted") -> dict:
     if count >= 20 and all("volume" in bar for bar in bars[-20:]):
         result["average_volume_20_sessions"] = sum(bar["volume"] for bar in bars[-20:]) / 20
         result["volume_unit"] = bars[-1].get("volume_unit", "shares")
+    if count >= 21 and all("volume" in bar for bar in bars[-21:]):
+        units = [bar.get("volume_unit", "shares") for bar in bars[-21:]]
+        if all(isinstance(unit, str) and unit for unit in units) and len(set(units)) == 1:
+            volumes = [finite_number(bar["volume"]) for bar in bars[-21:]]
+            if any(volume < 0 for volume in volumes):
+                raise ProviderError("malformed", "indicator volume must be nonnegative")
+            previous_average = sum(volumes[:-1]) / 20
+            result["average_volume_previous_20_sessions"] = previous_average
+            if previous_average > 0:
+                result["volume_ratio_20_sessions"] = volumes[-1] / previous_average
+            else:
+                result["missing"].append("volume_ratio_20_sessions: previous mean volume must be positive")
+        else:
+            result["missing"].append("volume_ratio_20_sessions: comparable volume units required")
+    else:
+        result["missing"].append("volume_ratio_20_sessions: need 21 bars with volume")
     if any(isinstance(value, (int, float)) and not math.isfinite(value) for value in result.values()):
         raise ProviderError("malformed", "indicator arithmetic overflow")
     return result
@@ -195,7 +243,8 @@ def collect_snapshot(instrument_ids: list[str], decision_at: str | None = None, 
                      *, providers: list | None = None, calendar=None, clock=utc_now,
                      cache_dir: str | Path | None = None, minimum_history: int = 260,
                      sge_history_bars: int = 280, close_tolerance: float = 0.001,
-                     max_collection_seconds: float = 110, time_fn=time.monotonic) -> dict:
+                     max_collection_seconds: float = 110, time_fn=time.monotonic,
+                     allow_us_stocks: bool = False) -> dict:
     """Collect current data. Inject providers/calendar/clock for offline contracts.
 
     Historical date queries are rejected: today's revised Yahoo/SGE history does
@@ -203,8 +252,11 @@ def collect_snapshot(instrument_ids: list[str], decision_at: str | None = None, 
     for historical evaluation. Comparison tolerance is 10 bps OR two cents;
     it validates closes only and is recorded for later live calibration.
     """
-    if not isinstance(instrument_ids, list) or not instrument_ids or len(instrument_ids) > 16:
-        raise ValueError("instrument_ids must contain 1 to 16 symbols")
+    if not isinstance(allow_us_stocks, bool):
+        raise ValueError("allow_us_stocks must be a boolean explicit research opt-in")
+    maximum_instruments = 25 if allow_us_stocks else 16
+    if not isinstance(instrument_ids, list) or not instrument_ids or len(instrument_ids) > maximum_instruments:
+        raise ValueError(f"instrument_ids must contain 1 to {maximum_instruments} symbols")
     if not math.isfinite(max_collection_seconds) or not 0 < max_collection_seconds <= 120:
         raise ValueError("max_collection_seconds must be positive and at most 120")
     budget_started = time_fn()
@@ -223,7 +275,8 @@ def collect_snapshot(instrument_ids: list[str], decision_at: str | None = None, 
     if providers is None:
         http = HttpClient(cache_dir, clock=clock, deadline=deadline, time_fn=time_fn)
         providers = [YahooProvider(http), AlpacaProvider(http), NasdaqIndexProvider(http), NasdaqEquityProvider(http), SGEProvider(http, history_bars=sge_history_bars)]
-    canonical = list(dict.fromkeys(normalize_instrument(value) for value in instrument_ids))
+    resolve = normalize_research_instrument if allow_us_stocks else normalize_instrument
+    canonical = list(dict.fromkeys(resolve(value) for value in instrument_ids))
     snapshot = {"schema_version": 1, "snapshot_id": "", "created_at": iso(started),
                 "decision_at": iso(decision), "valid_until": iso(decision + timedelta(hours=12)),
                 "horizon": horizon, "status": "blocked", "instruments": {}, "evidence": [], "issues": [],
@@ -232,7 +285,7 @@ def collect_snapshot(instrument_ids: list[str], decision_at: str | None = None, 
                     "single_yahoo_is_verified": False, "calendar_delay_minutes": 30,
                     "news_and_fundamentals": "separate_evidence_required"}}
     for symbol in canonical:
-        instrument = get_instrument(symbol)
+        instrument = get_research_instrument(symbol) if allow_us_stocks else get_instrument(symbol)
         item = {**instrument, "quality_status": "fail", "latest_session": None,
                 "expected_session": None, "price": None, "indicators": {},
                 "evidence_ids": [], "issues": [], "sources": []}
@@ -264,18 +317,30 @@ def collect_snapshot(instrument_ids: list[str], decision_at: str | None = None, 
                 if time_fn() >= deadline:
                     raise ProviderError("deadline_exceeded", "provider completed after the shared collection deadline")
                 source = _validate_source(fetched, instrument, expected, decision, calendar)
-                # Metadata-confirmed ETFs outside the small static registry must
-                # route later providers and research as ETFs, never company facts.
                 source_class = source.get("asset_class")
+                stock_research = instrument["asset_class"] == "stock"
+                if stock_research and source_class is not None and source_class != "stock":
+                    raise ProviderError("malformed", "stock research candidate is not a confirmed stock")
                 if source_class in {"stock", "etf"} and instrument["asset_class"] in {"stock", "etf"}:
                     if instrument.get("identity_status") in {"registered", "provider_confirmed"} and source_class != instrument["asset_class"]:
                         raise ProviderError("malformed", "providers disagree on confirmed stock/ETF identity")
                     instrument["asset_class"] = source_class
-                    instrument["identity_status"] = "provider_confirmed"
-                    item["asset_class"], item["identity_status"] = source_class, "provider_confirmed"
+                    if not stock_research:
+                        instrument["identity_status"] = "provider_confirmed"
+                        item["identity_status"] = "provider_confirmed"
+                    item["asset_class"] = source_class
+                if stock_research and source.get("security_type") == "common_stock":
+                    if (not is_supported_us_exchange(source.get("exchange"))
+                            or not isinstance(source.get("identity_source_url"), str)
+                            or not source["identity_source_url"].startswith("https://")):
+                        raise ProviderError("malformed", "common-stock identity lacks supported venue/provenance")
+                    instrument["identity_status"] = item["identity_status"] = "provider_confirmed"
+                    item["security_type"] = "common_stock"
                 evidence = _public_evidence(source)
                 snapshot["evidence"].append(evidence)
                 item["evidence_ids"].append(evidence["evidence_id"])
+                if stock_research and source.get("security_type") == "common_stock":
+                    item["identity_evidence_id"] = evidence["evidence_id"]
                 item["sources"].append({"provider": name, "upstream": source["upstream"], "status": "ok",
                                         "source_url": source["source_url"], "evidence_id": evidence["evidence_id"]})
                 successes.append(source)
@@ -316,6 +381,7 @@ def collect_snapshot(instrument_ids: list[str], decision_at: str | None = None, 
         item["quality_status"] = "unknown"
         item["quality_scope"] = "completed_session_close; internally_validated_history; deterministic_indicators"
         item["verification"] = {"primary_provider": primary["provider"],
+                                "primary_evidence_id": _public_evidence(primary)["evidence_id"],
                                 "history": "primary_source_checked_for_identity_dates_gaps_numeric_validity",
                                 "indicators": "deterministic_from_one_primary_series",
                                 "cross_provider_ohlcv": False}
@@ -370,6 +436,9 @@ def collect_snapshot(instrument_ids: list[str], decision_at: str | None = None, 
         if instrument["currency"] == "USD" and len(primary["bars"]) < minimum_history:
             item["quality_status"] = "unknown" if not conflict else "fail"
             item["issues"].append(f"insufficient_history: need {minimum_history} valid daily bars")
+        if instrument["asset_class"] == "stock" and item["identity_status"] != "provider_confirmed":
+            item["quality_status"] = "unknown" if not conflict else "fail"
+            item["issues"].append("common_stock_identity_confirmation_required")
         if instrument["calendar"] == "SGE":
             item["issues"].append("retail_product_sell_buyback_quotes_required_for_purchase_price")
             if len(primary["bars"]) < minimum_history:

@@ -34,6 +34,35 @@ A missing key is a visible gap, not a silent failure: `python scripts/copilot_cl
 
 Default: data/state/copilot.sqlite, shared by both clients in this checkout. Set process environment COPILOT_DB_PATH to use a different isolated journal. Restart the MCP server after changing it. Copies of this repository on different machines do not synchronize automatically.
 
+Default model tools return a sanitized holdings summary and bounded correction
+fields; raw operations remain in the local journal. `COPILOT_CONFIG_PATH` selects
+an alternative private configuration (also used by isolated runtime probes).
+
+## Quantitative research and optional manual cards
+
+`scan --horizon swing` researches the local `[advisor].research_universe` plus
+its benchmark. `snapshot AAPL --allow-us-stocks` explicitly enables
+provider-verified ordinary-stock research; ETF registry behavior stays strict.
+`signals <snapshot_id> --horizon long_term` computes reproducible conditions and
+evidence-bound reference levels, retaining their raw/adjusted price basis.
+
+Optional `[ibkr]` and `[advisor]` settings are documented in
+`config/user.example.toml`. Existing private configurations remain valid and
+broker collection stays disabled until configured locally. See [IBKR setup and
+live acceptance](IBKR.md) for the optional official SDK, local read-only session,
+actual order visibility and quote entitlement checks.
+
+`broker-snapshot`, `plan`, `confirm-review`, `preflight` and `get-plan` use the
+shared manual-card implementation. A card requires an admitted adopted rule,
+fresh complete broker evidence and confirmed fee assumptions. Review is a local
+user receipt, and preflight refreshes again; the user submits the order manually.
+Legacy admitted ETF rules and separately admitted advisor long-term/swing
+templates feed the funded compiler. See [stock/swing validation](STRATEGY_VALIDATION.md)
+for raw-history, freeze, human source-review and adoption inputs. Research
+does not itself create an admitted executable template. Unknown external flows
+between broker observations pause new risk until explicitly confirmed through
+`confirm-cash-flow`; total account NAV is never treated as available cash.
+
 `python scripts/copilot_cli.py backup <destination>` uses SQLite's backup API. Keep backups private. Legacy positions.md and research memory are never silently imported as confirmed transactions.
 
 ## Private watchlist

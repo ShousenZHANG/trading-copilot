@@ -68,6 +68,11 @@ def strict_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
 
 
+def public_response(value):
+    from .advisor import public_view
+    return public_view(value)
+
+
 def collect(instrument_ids: list[str], horizon: str = "daily", *, db_path=None,
             decision_at: str | None = None, research: bool = True, research_client=None,
             **dependencies) -> dict:
@@ -109,6 +114,208 @@ def context(instrument_ids: list[str] | None = None, *, db_path=None, as_of=None
     result["recommendations"] = [_recommendation_view(item, moment)
                                  for item in result["recommendations"]]
     return result
+
+
+def advisor_context(instrument_ids: list[str] | None = None, *, db_path=None, as_of=None,
+                    sleeve: str = "etf", now=None, config_path=None) -> dict:
+    """Model-facing default; internal sizing continues to use the full local context."""
+    from .advisor import context_summary
+    from .config import load_config
+    result = context_summary(context(instrument_ids, db_path=db_path, as_of=as_of,
+                                     sleeve=sleeve, now=now))
+    settings = load_config(config_path)
+    result["adopted_rules"] = {
+        "long_term": settings.advisor.long_term_rule_id or settings.etf.adopted_rule_id,
+        "swing": settings.advisor.swing_rule_id,
+    }
+    result["strategy_templates"] = {}
+    for mode, rule_id in result["adopted_rules"].items():
+        summary = {"rule_id": rule_id, "status": "not_adopted", "universe": []}
+        if rule_id:
+            try:
+                rule = adoption(rule_id, db_path=db_path)
+                spec = rule.get("spec", {}) if rule.get("kind") == "advisor_strategy" else rule
+                summary.update(status="stored_adoption_requires_current_validation", kind=rule.get("kind", "legacy_rule"),
+                               family=spec.get("family"), universe=spec.get("universe", []))
+            except KeyError:
+                summary["status"] = "adoption_pointer_unresolved"
+        result["strategy_templates"][mode] = summary
+    result["broker_enabled"] = settings.ibkr.enabled
+    result["execution_readiness"] = "requires_fresh_account_quote_and_adopted_rule"
+    return result
+
+
+def operation_context(operation_id: str, *, db_path=None) -> dict:
+    """Bounded local-record lookup for corrections; never returns raw transaction text."""
+    from .advisor import operation_summary
+    for state in context(db_path=db_path)["operations"]:
+        if state["operation_id"] == operation_id:
+            return operation_summary(state)
+    raise KeyError("operation not found")
+
+
+def broker_snapshot(instrument_ids: list[str] | None = None, *, config_path=None,
+                    db_path=None, now=None, transport=None) -> dict:
+    """Persist a read-only broker observation; return only its sanitized projection."""
+    from dataclasses import asdict
+    from .config import load_config
+    from .broker import collect_execution_snapshot
+    from .plan_store import save_snapshot
+    from .advisor import execution_summary
+    settings = load_config(config_path)
+    symbols = list(instrument_ids or settings.advisor.research_universe)
+    observed = collect_execution_snapshot(asdict(settings.ibkr), symbols, now=now, transport=transport)
+    save_snapshot(observed, db_path=database_path(db_path), now=now)
+    return execution_summary(observed)
+
+
+def _manual_policy(settings, mode):
+    from dataclasses import asdict
+    if mode not in {"long_term", "swing"}:
+        raise ValueError("manual plan mode must be long_term or swing")
+    rule_id = (settings.advisor.long_term_rule_id or settings.etf.adopted_rule_id
+               if mode == "long_term" else settings.advisor.swing_rule_id)
+    result = {**asdict(settings.advisor), "mode": mode, "adopted_rule_id": rule_id}
+    result["long_term_rule_id" if mode == "long_term" else "swing_rule_id"] = rule_id
+    return result
+
+
+def prepare_trade_plan(research_snapshot_id: str, execution_snapshot_id: str,
+                       mode: str = "long_term", *, config_path=None, db_path=None, now=None) -> dict:
+    """Local configuration supplies strategy and risk limits; model supplies only stored IDs."""
+    from .config import load_config
+    from .plan_store import create_plan, read_snapshot
+    path = database_path(db_path)
+    policy = _manual_policy(load_config(config_path), mode)
+    try:
+        rule = adoption(policy["adopted_rule_id"], db_path=path) if policy["adopted_rule_id"] else {}
+    except KeyError:
+        rule = {}  # A dangling local pointer is a blocked prerequisite, not an order.
+    plan = create_plan(execution_snapshot=read_snapshot(execution_snapshot_id, db_path=path),
+                       research_snapshot=snapshot(research_snapshot_id, db_path=path), adoption=rule,
+                       policy=policy, db_path=path, now=now)
+    return {"plan": public_response(plan), "message": render_trade_plan(plan)}
+
+
+def get_trade_plan(plan_id: str, *, config_path=None, db_path=None, now=None) -> dict:
+    from .plan_store import read_plan
+    plan = read_plan(plan_id, db_path=database_path(db_path), now=now)
+    if plan.get("orders"):
+        from .config import load_config
+        from .trade_plan import policy_binding
+        issues = []
+        try:
+            effective = _manual_policy(load_config(config_path), plan["mode"])
+            if policy_binding(effective) != plan.get("policy_binding"):
+                issues.append("current local configuration differs from the frozen card")
+            current_rule = adoption(plan["rule_id"], db_path=db_path)
+            if current_rule.get("kind") == "advisor_strategy":
+                from .advisor_strategy import verify_adoption
+                if not verify_adoption(current_rule):
+                    issues.append("adopted advisor template no longer matches current calculation code")
+        except (ValueError, KeyError, OSError) as exc:
+            issues.append("current configuration/adoption cannot be verified: " + type(exc).__name__)
+        if issues:
+            plan["historical_orders"] = plan.pop("orders", [])
+            plan.update(orders=[], review_state="needs_recompile", execution_scope="research_only",
+                        requires_review=True, requires_revalidation=True)
+            plan["issues"] = list(dict.fromkeys(plan.get("issues", []) + issues))
+    return {"plan": public_response(plan), "message": render_trade_plan(plan)}
+
+
+def confirm_plan_review(plan_id: str, statement: str, expected_version: int, outcome: str = "approve",
+                        *, config_path=None, db_path=None, now=None) -> dict:
+    from .plan_store import review_plan
+    if outcome == "approve":
+        current = get_trade_plan(plan_id, config_path=config_path, db_path=db_path, now=now)["plan"]
+        if current.get("review_state") != "awaiting_review" or current.get("status") != "ready_for_review":
+            raise ValueError("only a current ready card can receive a new approval")
+    plan = review_plan(plan_id, statement=statement, expected_version=expected_version,
+                       outcome=outcome, db_path=database_path(db_path), now=now)
+    return {"plan": public_response(plan), "message": render_trade_plan(plan)}
+
+
+def revalidate_trade_plan(plan_id: str, expected_version: int, *, config_path=None,
+                          db_path=None, now=None, transport=None) -> dict:
+    """Collect again immediately before manual action; a stale stored quote is not preflight."""
+    from .config import load_config
+    from .plan_store import read_plan, read_snapshot, revalidate_plan
+    path = database_path(db_path)
+    existing = read_plan(plan_id, db_path=path, now=now)
+    symbols = [order["instrument_id"] for order in existing.get("orders", [])]
+    if not symbols or existing.get("review_state") != "reviewed":
+        raise ValueError("preflight requires a fresh explicitly reviewed plan")
+    frozen_rule = adoption(existing["rule_id"], db_path=path)
+    universe = (frozen_rule.get("spec", {}).get("universe", [])
+                if frozen_rule.get("kind") == "advisor_strategy" else frozen_rule.get("universe", []))
+    symbols = sorted(set(symbols) | set(universe))
+    observed = broker_snapshot(symbols, config_path=config_path, db_path=path, now=now, transport=transport)
+    policy = _manual_policy(load_config(config_path), existing["mode"])
+    plan = revalidate_plan(plan_id, execution_snapshot=read_snapshot(observed["snapshot_id"], db_path=path),
+                           policy=policy, expected_version=expected_version, db_path=path, now=now)
+    return {"plan": public_response(plan), "message": render_trade_plan(plan)}
+
+
+def confirm_broker_cash_flow(previous_snapshot_id: str, execution_snapshot_id: str,
+                             net_external_flow_usd: str, statement: str, *, db_path=None, now=None) -> dict:
+    """An explicit user report distinguishes deposits/withdrawals from trading return."""
+    from .plan_store import record_cash_flow
+    return public_response(record_cash_flow(execution_snapshot_id, net_external_flow_usd, statement,
+                           previous_snapshot_id=previous_snapshot_id,
+                           db_path=database_path(db_path), now=now))
+
+
+def confirm_mode_allocations(execution_snapshot_id: str, allocations: dict, statement: str,
+                             expected_account_version: str, expected_version: int | None = None,
+                             *, entry_sessions: dict | None = None, entry_plan_ids: dict | None = None,
+                             db_path=None, now=None) -> dict:
+    """The user assigns held shares to investment modes; never inferred from ticker matches."""
+    from .plan_store import record_mode_allocations
+    return public_response(record_mode_allocations(execution_snapshot_id, allocations, statement,
+                           expected_account_version=expected_account_version, expected_version=expected_version,
+                           entry_sessions=entry_sessions, entry_plan_ids=entry_plan_ids,
+                           db_path=database_path(db_path), now=now))
+
+
+def confirm_strategy_execution_state(execution_snapshot_id: str, rule_id: str, mode: str,
+                                     statement: str, expected_account_version: str,
+                                     last_execution_session: str | None = None,
+                                     no_prior_executions: bool = False,
+                                     expected_version: int | None = None,
+                                     *, config_path=None, db_path=None, now=None) -> dict:
+    """Record the user's actual cadence facts, never deduce them from recent fills."""
+    from .config import load_config
+    from .plan_store import record_strategy_state
+    policy = _manual_policy(load_config(config_path), mode)
+    if rule_id != policy["adopted_rule_id"] or not rule_id:
+        raise ValueError("strategy state must name the currently configured adopted rule and mode")
+    return public_response(record_strategy_state(execution_snapshot_id, rule_id, mode, statement,
+        expected_account_version=expected_account_version, last_execution_session=last_execution_session,
+        no_prior_executions=no_prior_executions, expected_version=expected_version,
+        db_path=database_path(db_path), now=now))
+
+
+def render_trade_plan(plan: dict) -> str:
+    labels = {"ready_for_review": "待人工 Review", "blocked": "暂停交易方案", "no_trade": "本次不交易"}
+    lines = ["交易方案：" + labels.get(plan.get("status"), "状态待核对") + "；" + str(plan.get("mode", ""))]
+    state = plan.get("review_state")
+    if state and state not in {"awaiting_review", "reviewed"}:
+        lines[0] = "交易方案：暂停复用原交易数字；" + state
+    if state:
+        lines.append("复核状态：" + state)
+    for order in plan.get("orders", []):
+        side = "买入" if order["side"] == "buy" else "卖出"
+        lines.append(f"{order['instrument_id']}：{side} {order['quantity']} 股，USD 限价 {order['limit_price']}；预计费用 {order['estimated_fees']}")
+    if plan.get("issues"):
+        lines.append("缺口：" + "；".join(str(issue) for issue in plan["issues"][:4]))
+    if plan.get("revalidation"):
+        check = plan["revalidation"]
+        lines.append("提交前复核：" + str(check.get("status")) +
+                     ("；" + "；".join(str(issue) for issue in check.get("issues", [])[:3]) if check.get("issues") else ""))
+    if plan.get("valid_until"):
+        lines.append("方案有效至：" + str(plan["valid_until"]))
+    lines.append("人工下单前刷新复核；未提交任何订单。方案过期不会撤销券商订单。")
+    return "\n".join(lines)
 
 
 def _recommendation_view(decision: dict, moment: datetime) -> dict:
@@ -174,9 +381,10 @@ def snapshot(snapshot_id: str, *, db_path=None) -> dict:
 
 def snapshot_view(stored: dict, *, full: bool = False) -> dict:
     """Bound conversational payloads while retaining full immutable evidence in SQLite."""
+    from .advisor import public_view
+    result = public_view(stored)
     if full:
-        return stored
-    result = copy.deepcopy(stored)
+        return result
     for item in result.get("evidence", []):
         if isinstance(item.get("bars"), list):
             rows = item.pop("bars")
@@ -186,10 +394,51 @@ def snapshot_view(stored: dict, *, full: bool = False) -> dict:
     return result
 
 
+def analyze_signals(snapshot_id: str, instrument_ids: list[str] | None = None,
+                    horizon: str = "swing", *, db_path=None, now=None) -> dict:
+    from .signals import analyze
+    stored = snapshot(snapshot_id, db_path=db_path)
+    return analyze(stored, instrument_ids=instrument_ids, horizon=horizon, now=now)
+
+
+def research_scan(instrument_ids: list[str] | None = None, horizon: str = "swing", *,
+                  config_path=None, db_path=None, decision_at=None, **dependencies) -> dict:
+    """Discover within the configured candidate pool, retaining rejected/missing candidates."""
+    from .config import load_config
+    settings = load_config(config_path)
+    candidates = list(instrument_ids or settings.advisor.research_universe)
+    if not candidates or len(candidates) > 24:
+        raise ValueError("research scan needs 1 to 24 explicit candidates")
+    universe = list(dict.fromkeys([*candidates, settings.advisor.benchmark]))
+    stored = collect(universe, horizon, db_path=db_path, decision_at=decision_at,
+                     allow_us_stocks=True, **dependencies)
+    result = analyze_signals(stored["snapshot_id"], candidates, horizon, db_path=db_path,
+                             now=decision_at)
+    result["market_benchmark"] = settings.advisor.benchmark
+    result["benchmark_observation"] = analyze_signals(
+        stored["snapshot_id"], [settings.advisor.benchmark], horizon, db_path=db_path,
+        now=decision_at)
+    result["candidate_scope"] = "configured_pool; not an exhaustive whole-market search"
+    result["research_gaps"] = stored.get("research_issues", [])
+    result["context"] = advisor_context(db_path=db_path, config_path=config_path)
+    return result
+
+
 def review(snapshot_id: str, proposal: dict, *, db_path=None, now=None) -> dict:
     from .journal import record_recommendation
     from .policy import assess_proposal
     stored = snapshot(snapshot_id, db_path=db_path)
+    # Restore a locally stored quota identity only after the submitted public
+    # quote matches its complete sanitized projection. It never enters the
+    # model response and cannot be changed by a model-supplied account field.
+    submitted = proposal.get("retail_quote")
+    if isinstance(submitted, dict):
+        from .advisor import public_view
+        matches = [record.get("retail_quote") for record in stored.get("evidence", [])
+                   if record.get("evidence_id") == submitted.get("evidence_id")]
+        if len(matches) == 1 and isinstance(matches[0], dict) and submitted == public_view(matches[0]):
+            proposal = copy.deepcopy(proposal)
+            proposal["retail_quote"] = copy.deepcopy(matches[0])
     sleeve = "gold" if proposal.get("instrument_id") == "GOLD.CNY" else "etf"
     current = context(db_path=db_path, sleeve=sleeve, now=now)
     decision = assess_proposal(proposal, stored, current, now=now)
@@ -243,7 +492,7 @@ def render_decision(decision: dict, stored: dict) -> str:
     evidence_ids = set(decision.get("evidence_ids") or [])
     links = []
     for item in stored.get("evidence", []):
-        url = item.get("source_url", "")
+        url = item.get("source_url") or ""
         if item.get("evidence_id") in evidence_ids and url.startswith("https://"):
             link = f"[{item.get('provider', '来源')}]({url})"
             if link not in links:
@@ -329,6 +578,61 @@ def adoption(rule_id: str, *, db_path=None) -> dict:
     """Read back a stored adoption. Read-only: recording a new one is `adopt`."""
     from .journal import load_adoption
     return load_adoption(rule_id, db_path=database_path(db_path))
+
+
+def advisor_strategy_fingerprint(inputs: dict) -> dict:
+    """Inspect candidate bindings without inventing a historical lock or adopting."""
+    from .advisor_strategy import TemplateSpec, spec_hash, history_hash, runtime_fingerprint, cost_hash
+    spec = TemplateSpec(**inputs["spec"])
+    return {"kind": "advisor_strategy_fingerprint", "spec": spec.to_dict(),
+            "spec_hash": spec_hash(spec), "code_hash": runtime_fingerprint(),
+            "data_hash": history_hash(inputs["history_bundle"]),
+            "cost_hash": cost_hash(inputs.get("cost_model")),
+            "source_authenticated": False, "adopted": False,
+            "note": "Current hashes do not establish a historical lock, an unseen holdout or authentic market data."}
+
+
+def validate_advisor_strategy(inputs: dict, *, data_attestation: str | None = None, now=None) -> dict:
+    """Explicit offline hypothesis validation; never selects a live configuration pointer."""
+    from .advisor_strategy import TemplateSpec, validate_history
+    spec = TemplateSpec(**inputs["spec"])
+    expected = inputs["expected_sessions"]
+    if not isinstance(expected, dict):
+        raise ValueError("expected_sessions must map calendar years to session counts")
+    calendar_counts = {}
+    for year, count in expected.items():
+        if isinstance(year, bool) or (not isinstance(year, int) and
+                                      not (isinstance(year, str) and year.isdecimal())):
+            raise ValueError("expected_sessions years must be calendar integers")
+        normalized = int(year)
+        if normalized in calendar_counts:
+            raise ValueError("duplicate normalized calendar year")
+        calendar_counts[normalized] = count
+    return validate_history(spec, inputs["history_bundle"], freeze_manifest=inputs["freeze_manifest"],
+                            expected_sessions=calendar_counts, cost_model=inputs.get("cost_model"),
+                            data_attestation=data_attestation, now=now)
+
+
+def adopt_advisor_strategy(inputs: dict, confirmation: str, data_attestation: str, *, db_path=None) -> dict:
+    """CLI-only explicit adoption of a validated candidate; stock/swing rule pointer stays manual."""
+    from .advisor_strategy import TemplateSpec, build_adoption
+    from .journal import record_adoption
+    validation = validate_advisor_strategy(inputs, data_attestation=data_attestation)
+    candidate = build_adoption(TemplateSpec(**inputs["spec"]), validation, confirmation)
+    # The explicit statement is local evidence. Re-adopting the identical
+    # immutable strategy reuses its committed record rather than overwriting it.
+    try:
+        previous = adoption(candidate["rule_id"], db_path=db_path)
+    except KeyError:
+        previous = None
+    if previous is not None:
+        from .advisor_strategy import verify_adoption
+        if not verify_adoption(previous):
+            raise ValueError("existing strategy adoption is no longer valid")
+        candidate = previous
+    receipt = record_adoption(candidate, db_path=database_path(db_path))
+    return {"receipt": public_response(receipt), "rule": public_response(candidate),
+            "message": "已记录策略采用；当前配置指针需用户明确设置，本操作未提交订单。"}
 
 
 def _verify_brake_evidence(stored: dict, brake: dict | None) -> None:
@@ -544,8 +848,21 @@ def evaluate(*, snapshot_id: str, sleeve: str = "etf", config_path=None, db_path
     return result
 
 
-def capabilities() -> dict:
+def capabilities(*, config_path=None) -> dict:
     load_credentials()
+    from importlib.util import find_spec
+    from .config import load_config
+    settings = load_config(config_path)
     return {"schema_version": 1, "credentials_present": {k: bool(os.getenv(k)) for k in KEY_NAMES},
-            "state": "local_sqlite", "data_budget": "free_only",
+            "state": "local_sqlite", "data_budget": "free_research; optional_broker_entitlement",
+            "advisor": {"enabled": settings.advisor.enabled,
+                        "stock_scope": "provider_verified_common_stock; funded_cards_require_separate_adoption",
+                        "signals": "deterministic_completed_session_research",
+                        "manual_plans": "adopted_legacy_ETF_or_current_advisor_template; fresh_broker_prerequisites",
+                        "strategy_templates": ["long_term_trend", "swing_breakout"],
+                        "swing_scope": "separately_validated_adopted_template; confirmed_mode_lots",
+                        "historical_sources_authenticated": False},
+            "broker": {"enabled": settings.ibkr.enabled, "sdk_available": find_spec("ibapi") is not None,
+                       "connection_tested": False, "order_submission": False,
+                       "orders_scope_confirmed": settings.ibkr.orders_scope_confirmed},
             "note": "credential presence is not an entitlement or live data test"}

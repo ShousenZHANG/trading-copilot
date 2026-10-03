@@ -6,8 +6,8 @@ schema_version = 1
 # Bond and gold ETFs are rejected: the ETF sleeve holds equity ETFs and cash only.
 universe = ["SPY", "QQQ", "IWM", "VUG", "VTV", "VEA", "VWO", "XLK", "XLV", "XLF"]
 # CASH you can deploy into this sleeve, not its market value. Same quantity the
-# backtest engine calls start_cash. Set it by hand; the IBKR Flex sync that
-# would maintain it is not built.
+# backtest engine calls start_cash. This legacy journal evaluator uses the
+# manual value; the optional broker manual-plan path uses fresh settled cash.
 investable_cash_usd = 0
 # Structural cash reserve and drawdown tolerance. Placeholders until a rule is adopted.
 min_cash_reserve_pct = 0.15
@@ -42,3 +42,48 @@ timezone = "Australia/Sydney"
 # Daily scan after the US close (about 07:00 AEST during US daylight time).
 scan_time_local = "07:00"
 language = "zh"
+
+[advisor]
+enabled = true
+research_universe = ["QQQI", "JEPQ", "SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META"]
+benchmark = "^NDX"
+# Empty long_term falls back to etf.adopted_rule_id. Technical research does
+# not adopt a strategy. Stock and swing execution templates are not shipped.
+long_term_rule_id = ""
+swing_rule_id = ""
+cash_floor_pct = 0.05
+long_term_nav_cap_pct = 0.90
+swing_nav_cap_pct = 0.10
+max_swing_loss_pct = 0.005
+max_drawdown_pct = 0.10
+max_single_name_pct = 0.25
+max_sector_pct = 0.50
+max_trade_notional_pct = 0.10
+max_spread_pct = 0.005
+# Provisional one-way estimated fee/notional ceiling for new buys.
+max_fee_pct = 0.01
+quote_ttl_seconds = 60
+regular_hours_only = true
+allow_borrowing = false
+# Confirm the actual broker account fee schedule and a conservative fee
+# allowance locally before setting true. Zero defaults do not certify free trades.
+fee_model_confirmed = false
+commission_per_share_usd = 0
+min_commission_usd = 0
+other_cost_bps = 0
+
+[ibkr]
+enabled = false
+host = "127.0.0.1"
+port = 7497
+client_id = 71
+account_id = ""
+account_alias = "ibkr"
+paper = true
+timeout_seconds = 15
+quote_ttl_seconds = 60
+regular_hours_only = true
+# Verify that the API actually sees the user's working orders from all relevant
+# clients before confirming scope. reqAllOpenOrders is not universal visibility.
+orders_scope_confirmed = false
+market_data_feed = "unknown"

@@ -22,7 +22,7 @@ from urllib.parse import quote
 from unittest.mock import patch
 
 from copilot.data_calendar import CalendarUnavailable, MarketCalendar, iso, parse_time
-from copilot.instruments import get_instrument, normalize_instrument
+from copilot.instruments import get_instrument, get_research_instrument, normalize_instrument
 from copilot.market_data import collect_snapshot, compute_indicators, snapshot_digest, verify_snapshot
 from copilot.providers import HttpClient, NasdaqEquityProvider, NasdaqIndexProvider, ProviderError, SGEProvider, YahooProvider, parse_sge_daily, parse_sge_shau, safe_url
 
@@ -73,6 +73,28 @@ def snapshot(providers=None, symbols=None, **kwargs):
 
 
 class SnapshotContracts(unittest.TestCase):
+    def test_stock_research_is_explicit_and_requires_common_share_confirmation(self):
+        with self.assertRaises(ValueError):
+            snapshot(symbols=["AAPL"])
+        sources = [FixtureProvider(asset_class="stock"),
+                   FixtureProvider("nasdaq", "Nasdaq US market data", asset_class="stock",
+                                   security_type="common_stock", exchange="NASDAQ-GS",
+                                   identity_source_url="https://api.nasdaq.com/api/quote/AAPL/info")]
+        result = snapshot(sources, ["AAPL"], allow_us_stocks=True)
+        item = result["instruments"]["AAPL"]
+        self.assertEqual(item["quality_status"], "pass")
+        self.assertEqual(item["identity_status"], "provider_confirmed")
+        self.assertEqual(item["security_type"], "common_stock")
+        self.assertEqual(item["execution_scope"], "research_only")
+        self.assertFalse(item["adoption_eligible"])
+        unconfirmed = snapshot([FixtureProvider(asset_class="stock"),
+                                FixtureProvider("alpaca", "Alpaca SIP")], ["AAPL"],
+                               allow_us_stocks=True)["instruments"]["AAPL"]
+        self.assertEqual(unconfirmed["quality_status"], "unknown")
+        self.assertEqual(unconfirmed["identity_status"], "unconfirmed")
+        wrong = snapshot([FixtureProvider(asset_class="etf")], ["AAPL"], allow_us_stocks=True)
+        self.assertEqual(wrong["status"], "blocked")
+
     def test_batch_deadline_stops_later_providers_and_marks_unknown(self):
         elapsed, calls = [0.0], []
         class SlowProvider(FixtureProvider):
@@ -285,6 +307,54 @@ class SnapshotContracts(unittest.TestCase):
 
 
 class IndicatorContracts(unittest.TestCase):
+    def test_research_levels_exclude_the_latest_session_and_keep_the_price_basis(self):
+        records = [{"close": 2 * value, "adjusted_close": value} for value in range(90, 110)]
+        records.append({"close": 400, "adjusted_close": 200})
+        result = compute_indicators(records, "total_return_adjusted")
+        self.assertEqual(result["high_previous_20_sessions"], 109)
+        self.assertEqual(result["low_previous_20_sessions"], 90)
+        self.assertEqual(result["reference_close"], 200)
+        self.assertIsNone(compute_indicators(records[-20:], "total_return_adjusted")["high_previous_20_sessions"])
+
+    def test_missing_and_mismatched_units_are_not_numeric_defaults(self):
+        result = compute_indicators([{"close": 100}])
+        for field in ("atr14_percent", "distance_sma50_percent", "distance_sma200_percent", "volume_ratio_20_sessions"):
+            self.assertIsNone(result[field])
+        mixed = [{"close": 100, "volume": 10, "volume_unit": "shares"} for _ in range(21)]
+        mixed[-1]["volume_unit"] = "contracts"
+        self.assertIsNone(compute_indicators(mixed)["volume_ratio_20_sessions"])
+        for value in (-1, float("nan"), float("inf")):
+            mixed[-1]["volume_unit"] = "shares"
+            mixed[-1]["volume"] = value
+            with self.subTest(value=value), self.assertRaises(ProviderError):
+                compute_indicators(mixed)
+
+    def test_volume_ratio_excludes_the_current_session(self):
+        records = [{"close": 100, "volume": 10} for _ in range(20)]
+        records.append({"close": 100, "volume": 100})
+        result = compute_indicators(records)
+        self.assertEqual(result["average_volume_previous_20_sessions"], 10)
+        self.assertEqual(result["volume_ratio_20_sessions"], 10)
+        self.assertEqual(result["volume_ratio_scope"], "latest_volume_over_previous_20_completed_sessions")
+        self.assertIsNone(compute_indicators(records[-20:])["volume_ratio_20_sessions"])
+        zero = [{"close": 100, "volume": 0} for _ in range(21)]
+        self.assertIsNone(compute_indicators(zero)["volume_ratio_20_sessions"])
+        records[-2].pop("volume")
+        self.assertIsNone(compute_indicators(records)["volume_ratio_20_sessions"])
+
+    def test_relative_metrics_use_the_indicator_basis_not_the_raw_quote(self):
+        records = [{"close": 200, "adjusted_close": 100, "open": 200,
+                    "high": 202, "low": 198} for _ in range(200)]
+        adjusted = compute_indicators(records, "total_return_adjusted")
+        split = compute_indicators(records, "split_adjusted")
+        self.assertEqual(adjusted["reference_close"], 100)
+        self.assertEqual(split["reference_close"], 200)
+        for result in (adjusted, split):
+            self.assertEqual(result["atr14_percent"], 2)
+            self.assertEqual(result["distance_sma50_percent"], 0)
+            self.assertEqual(result["distance_sma200_percent"], 0)
+        self.assertNotEqual(adjusted["formula_version"], "wilder-v1")
+
     def test_wilder_uptrend_and_flat_prices(self):
         result = compute_indicators(history(), "total_return_adjusted")
         self.assertEqual(result["rsi14"], 100)
@@ -333,6 +403,30 @@ class SGEParserContracts(unittest.TestCase):
 
 
 class ProviderContracts(unittest.TestCase):
+    def test_nasdaq_stock_research_checks_common_share_type_before_prices(self):
+        class Client:
+            def __init__(self, stock_type):
+                self.stock_type = stock_type
+            def get(self, url, provider, headers=None):
+                if "/info?" in url:
+                    payload = {"data": {"symbol": "AAPL", "assetClass": "STOCKS",
+                                        "stockType": self.stock_type, "exchange": "NASDAQ-GS",
+                                        "primaryData": {"lastSalePrice": "$127.9"}}}
+                else:
+                    payload = {"status": {"rCode": 200}, "data": {"symbol": "AAPL", "totalRecords": 1, "tradesTable": {
+                        "headers": {"date": "Date", "close": "Close/Last"},
+                        "rows": [{"date": "09/04/2026", "close": "$127.9"}]}}}
+                return {"body": json.dumps(payload), "source_url": url, "retrieved_at": iso(NOW)}
+        for kind in ("Common Stock", "Ordinary Shares"):
+            source = NasdaqEquityProvider(Client(kind)).fetch(get_research_instrument("AAPL"),
+                                                            "2025-01-01", "2026-09-05", NOW)
+            self.assertEqual(source["security_type"], "common_stock")
+            self.assertEqual(source["asset_class"], "stock")
+        for kind in ("ADR", "Preferred Stock", "Warrant", None):
+            with self.subTest(kind=kind), self.assertRaisesRegex(ProviderError, "ordinary"):
+                NasdaqEquityProvider(Client(kind)).fetch(get_research_instrument("AAPL"),
+                                                       "2025-01-01", "2026-09-05", NOW)
+
     def test_yahoo_refresh_clears_process_cache_and_keeps_explicit_adjustment(self):
         calls = []
         yf, yf_data = ModuleType("yfinance"), ModuleType("yfinance.data")

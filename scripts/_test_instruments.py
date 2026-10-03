@@ -3,13 +3,59 @@ from __future__ import annotations
 
 import sys
 import unittest
+import copy
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from copilot.instruments import ETF_REGISTRY, get_instrument, normalize_instrument
+from copilot.instruments import ETF_REGISTRY, get_instrument, get_research_instrument, normalize_instrument, verify_stock_identity
+from _test_market_data import FixtureProvider, NOW, snapshot
+from copilot.market_data import snapshot_digest
 
 
 class RegistryContracts(unittest.TestCase):
+    def test_verified_stock_identity_binds_the_saved_nasdaq_record(self):
+        sources = [FixtureProvider(asset_class="stock"), FixtureProvider(
+            "nasdaq", "Nasdaq US market data", asset_class="stock", security_type="common_stock",
+            security_type_source_value="Common Stock", exchange="NASDAQ-GS",
+            source_url="https://api.nasdaq.com/api/quote/AAPL/historical?assetclass=stocks",
+            identity_source_url="https://api.nasdaq.com/api/quote/AAPL/info?assetclass=stocks",
+            identity_retrieved_at=NOW.isoformat())]
+        stored = snapshot(sources, ["AAPL"], allow_us_stocks=True)
+        identity = verify_stock_identity(stored, "AAPL")
+        self.assertEqual(identity["instrument_id"], "AAPL")
+        self.assertEqual(identity["security_type"], "common_stock")
+        self.assertEqual(identity["execution_scope"], "research_only")
+        for changed in ("missing_instruments", "missing_evidence", "future_identity"):
+            invalid = copy.deepcopy(stored)
+            if changed == "missing_instruments":
+                invalid["instruments"] = None
+            elif changed == "missing_evidence":
+                invalid["evidence"] = None
+            else:
+                invalid["evidence"][1]["identity_retrieved_at"] = "2099-01-01T00:00:00Z"
+            invalid["snapshot_id"] = snapshot_digest(invalid)
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                verify_stock_identity(invalid, "AAPL")
+        stored["instruments"]["AAPL"]["identity_evidence_id"] = stored["instruments"]["AAPL"]["evidence_ids"][0]
+        stored["snapshot_id"] = snapshot_digest(stored)
+        with self.assertRaisesRegex(ValueError, "Nasdaq"):
+            verify_stock_identity(stored, "AAPL")
+
+    def test_stock_research_identity_does_not_expand_the_etf_registry(self):
+        for symbol in ("AAPL", "NVDA", "BRK-B", "ABCD"):
+            item = get_research_instrument(symbol.lower())
+            self.assertEqual(item["instrument_id"], symbol)
+            self.assertEqual(item["asset_class"], "stock")
+            self.assertEqual(item["identity_status"], "unconfirmed")
+            self.assertEqual(item["execution_scope"], "research_only")
+            self.assertFalse(item["adoption_eligible"])
+            self.assertNotIn(symbol, ETF_REGISTRY)
+            with self.assertRaises(ValueError):
+                get_instrument(symbol)
+        self.assertEqual(get_research_instrument("QQQ"), get_instrument("QQQ"))
+        with self.assertRaises(ValueError):
+            get_research_instrument("AAPL.US")
+
     def test_whitelisted_etf_is_registered_etf(self):
         for symbol in ("QQQ", "QQQM", "SPY", "VTI", "QQQI", "JEPQ", "JEPI", "IOO"):
             item = get_instrument(symbol)

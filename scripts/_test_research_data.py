@@ -69,7 +69,20 @@ class ResearchTests(unittest.TestCase):
         self.addCleanup(self.environment.stop)
 
     def snapshot(self, asset_class="stock"):
-        return {"decision_at": AS_OF, "status": "partial", "instruments": {"AAPL": {"asset_class": asset_class, "quality_status": "fail"}}, "evidence": []}
+        return {"decision_at": AS_OF, "status": "partial", "instruments": {"AAPL": {
+            "asset_class": asset_class, "quality_status": "fail",
+            "identity_status": "provider_confirmed", "security_type": "common_stock"}}, "evidence": []}
+
+    def test_unconfirmed_stock_identity_does_not_fetch_company_research(self):
+        os.environ["SEC_USER_AGENT"] = "Test test@example.invalid"
+        os.environ["FINNHUB_API_KEY"] = "fake-news-secret"
+        stored = self.snapshot()
+        stored["instruments"]["AAPL"]["identity_status"] = "unconfirmed"
+        client = Client()
+        result = research.enrich(stored, client=client)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(result["instruments"]["AAPL"]["research"]["filings"]["status"], "identity_unverified")
+        self.assertEqual(result["instruments"]["AAPL"]["research"]["news"]["status"], "identity_unverified")
 
     def fred(self, client=None, series="DFII10", **kwargs):
         os.environ["FRED_API_KEY"] = "fake-fred-secret"

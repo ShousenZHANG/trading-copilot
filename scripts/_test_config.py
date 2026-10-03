@@ -245,8 +245,9 @@ class ContextFacadeContracts(unittest.TestCase):
         function = copy.deepcopy(next(node for node in tree.body
                                       if isinstance(node, ast.FunctionDef) and node.name == "get_investment_context"))
         function.decorator_list = []
-        namespace = {"service": SimpleNamespace(context=lambda instruments, **kwargs:
-                         service.context(instruments, db_path=self.db, **kwargs))}
+        namespace = {"service": SimpleNamespace(advisor_context=lambda instruments, **kwargs:
+                         service.advisor_context(instruments, db_path=self.db,
+                                                 config_path=Path(self.temp.name) / "absent.toml", **kwargs))}
         exec(compile(ast.Module(body=[function], type_ignores=[]), "mcp-context-fixture", "exec"), namespace)
         context = namespace["get_investment_context"](sleeve="gold")
         self.assertTrue(context["portfolio_complete"])

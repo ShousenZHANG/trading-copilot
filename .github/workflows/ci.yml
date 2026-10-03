@@ -158,6 +158,9 @@ jobs:
               "evals/scorer.py", "evals/stockbench/backtest_engine.py",
               "mcps/finnhub_mcp.py", "mcps/akshare_mcp.py",
               "mcps/copilot_mcp.py", "scripts/copilot/service.py",
+              "scripts/copilot/advisor.py", "scripts/copilot/signals.py",
+              "scripts/copilot/advisor_strategy.py",
+              "scripts/copilot/broker.py", "scripts/copilot/trade_plan.py", "scripts/copilot/plan_store.py",
               ".codex/config.toml", ".codex-plugin/plugin.json", "AGENTS.md",
               ".claude-plugin/plugin.json", "README.md", "DISCLAIMER.md",
               "config/user.example.toml",
@@ -165,6 +168,15 @@ jobs:
               ".agents/skills/investment-chat/references/adopted-rules.md",
               "skills/investment-chat/references/adopted-rules.md",
               "docs/adr/0008-gold-sleeve-evidence-and-admission.md",
+              "docs/IBKR.md", "docs/adr/0009-manual-advisor-plans.md",
+              "docs/STRATEGY_VALIDATION.md",
+              ".claude/skills/investment-chat/references/advisor-templates.md",
+              ".agents/skills/investment-chat/references/advisor-templates.md",
+              "skills/investment-chat/references/advisor-templates.md",
+              ".claude/skills/investment-chat/references/manual-trade-plans.md",
+              ".agents/skills/investment-chat/references/manual-trade-plans.md",
+              "skills/investment-chat/references/manual-trade-plans.md",
+              ".claude/skills/investment-chat/references/research-signals.md",
           ]
           # Compare exact relative paths: skills/... must not be satisfied by
           # the canonical .claude/skills/... copy when a generated copy is absent.

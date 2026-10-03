@@ -332,6 +332,8 @@ class YahooProvider:
         is_index = instrument["asset_class"] == "index"
         if is_index != (kind == "INDEX"):
             raise ProviderError("malformed", "Yahoo asset type does not match instrument registry")
+        if instrument["asset_class"] == "stock" and kind != "EQUITY":
+            raise ProviderError("not_covered", "Yahoo did not confirm a stock research candidate")
         bars = []
         for stamp, row in frame.iterrows():
             session = stamp.date().isoformat()
@@ -536,6 +538,10 @@ class NasdaqEquityProvider:
             identity = json.loads(info_response["body"]).get("data") or {}
             if identity.get("symbol") != symbol or identity.get("assetClass") not in {"ETF", "STOCKS"}:
                 raise ProviderError("malformed", "Nasdaq did not confirm equity identity")
+            if instrument["asset_class"] == "stock":
+                security_type = str(identity.get("stockType", "")).strip().upper()
+                if identity.get("assetClass") != "STOCKS" or security_type not in {"COMMON STOCK", "ORDINARY SHARES"}:
+                    raise ProviderError("not_covered", "Nasdaq did not confirm ordinary common-stock research identity")
             exchange = str(identity.get("exchange", "")).upper()
             if not is_supported_us_exchange(exchange):
                 raise ProviderError("not_covered", unsupported_exchange_detail(exchange))
@@ -576,6 +582,9 @@ class NasdaqEquityProvider:
                 "status": "ok", "retrieved_at": response["retrieved_at"], "available_at": None, "published_at": None,
                 "cache_status": "live", "feed": "nasdaq_public_us_equity_close", "identity_source_url": info_url,
                 "identity_retrieved_at": info_response["retrieved_at"],
+                "exchange": exchange,
+                **({"security_type": "common_stock", "security_type_source_value": identity["stockType"]}
+                   if instrument["asset_class"] == "stock" else {}),
                 "comparison_scope": "latest_completed_USD_close_only; no_split_session; historical_adjustment_unknown"}
 
 
