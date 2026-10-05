@@ -26,7 +26,9 @@ class RuntimeLauncherTests(unittest.TestCase):
         (runtime / "copilot-runtime.json").write_text(json.dumps({
             "schema_version": 1, "python": "ibkr-venv/Scripts/python.exe",
         }), encoding="utf-8")
-        return interpreter
+        # Hosted Windows TEMP may use an 8.3 alias (RUNNER~1). The production
+        # confinement check resolves that alias before choosing the executable.
+        return interpreter.resolve()
 
     def test_without_local_manifest_keeps_the_existing_uv_script_runtime(self):
         with tempfile.TemporaryDirectory(prefix="copilot-runtime-test-") as directory:
