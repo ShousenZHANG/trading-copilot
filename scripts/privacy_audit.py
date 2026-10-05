@@ -20,6 +20,7 @@ _ACCOUNT = re.compile(r"\b(?:DU|U|F)\d{6,12}\b")
 _EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE = re.compile(r"(?:phone|mobile|telephone|手机号|联系电话)[\"']?\s*[=:：]\s*[\"']?(\+?\d[\d ()-]{7,}\d)", re.I)
 _ADDRESS = re.compile(r"(?:home_address|residential_address|住址|家庭地址)[\"']?\s*[=:：]\s*[\"']?([^\n\"']{6,})", re.I)
+_INTERVIEW_CHOICE = re.compile(r"\bQ[0-9]{1,3}\s*=\s*[A-Z]\b", re.I)
 _CREDENTIALS = {
     "private_key_header": re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"),
     "github_access_token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{60,255})\b"),
@@ -74,6 +75,7 @@ def _safe_path(path: str, literals: tuple[str, ...]) -> str:
     safe = _EMAIL.sub("[email]", safe)
     safe = _PHONE.sub("[phone]", safe)
     safe = _ADDRESS.sub("[residential-address]", safe)
+    safe = _INTERVIEW_CHOICE.sub("[interview-answer]", safe)
     for pattern in _CREDENTIALS.values():
         safe = pattern.sub("[credential]", safe)
     for literal in literals:
@@ -138,6 +140,8 @@ def _text_findings(path: str, text: str, literals: tuple[str, ...]) -> list[dict
             categories.add("contact_phone")
         if any(_ADDRESS.search(variant) for variant in variants):
             categories.add("residential_address")
+        if any(_INTERVIEW_CHOICE.search(variant) for variant in variants):
+            categories.add("personal_interview_choice")
         categories.update(category for category, pattern in _CREDENTIALS.items()
                           if any(pattern.search(variant) for variant in variants))
         if any(literal.casefold() in variant.casefold() for literal in literals for variant in variants):

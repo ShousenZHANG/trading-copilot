@@ -61,6 +61,20 @@ class PrivacyAuditTests(unittest.TestCase):
         contents = "contact@example.com contact@example.invalid\nC:/Users/<USER>/project\n"
         self.assertEqual(self.tree({"README.md": contents})["status"], "pass")
 
+    def test_interview_answer_attribution_is_private_in_text_and_filenames(self):
+        marker = "Q" + "47" + "=B"
+        for files in ({"docs/design.md": "Decision (" + marker + ")."},
+                      {"docs/" + marker + ".md": "Public technical contract."}):
+            for report in (self.tree(files), self.archive(files)):
+                self.assertEqual(report["status"], "fail")
+                self.assertTrue(any(item["category"] == "personal_interview_choice"
+                                    for item in report["findings"]))
+                self.assertNotIn(marker, json.dumps(report))
+
+    def test_market_quarters_and_unanswered_faq_labels_are_public(self):
+        text = "2026 Q1 earnings; Q4 2025 results.\nQ17: How are signals calculated?\n"
+        self.assertEqual(self.tree({"docs/research.md": text})["status"], "pass")
+
     def test_synthetic_broker_values_only_allowed_in_named_tests(self):
         synthetic = "U" + "1234567"
         self.assertEqual(self.tree({"scripts/_test_fixture.py": synthetic})["status"], "pass")
