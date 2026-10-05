@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 
-from . import metrics
+from . import metrics, sessions
 from .engine import Result
 
 MIN_YEARS = 15.0
@@ -156,6 +156,8 @@ def assess(result: Result, *, sessions_by_year: dict[int, int],
                  f"(curve starts {curve_start})")
 
     # Rule 3: costs must actually have been charged. Not in WAIVABLE.
+    if result.rebalance_count <= 0 or result.traded_notional <= 0:
+        fail("execution", "no completed nonzero trade was simulated; an all-cash history cannot validate an executable rule")
     if result.total_costs <= 0 and result.rebalance_count > 0:
         fail("costs", "no transaction costs were charged; rule 3 requires net-of-cost results")
 
@@ -175,15 +177,30 @@ def assess(result: Result, *, sessions_by_year: dict[int, int],
     elif oos_years < MIN_OUT_OF_SAMPLE_YEARS:
         fail("out_of_sample",
              f"out-of-sample segment is {oos_years:.2f} years, rule 5 requires at least "
-             f"{MIN_OUT_OF_SAMPLE_YEARS}")
+              f"{MIN_OUT_OF_SAMPLE_YEARS}")
+
+    sleeve = "gold" if result.universe == ("GOLD.CNY",) else "etf"
+    excluded_years = tuple(year for year in sessions_by_year if f"stress_{year}" in waivers)
+    full_coverage = sessions.coverage([when for when, _ in result.curve], sleeve=sleeve,
+                                      excluded_years=excluded_years)
+    oos_coverage = sessions.coverage([when for when, _ in out_of_sample], sleeve=sleeve,
+                                   start=max(OUT_OF_SAMPLE_START, result.curve[0][0]) if result.curve else None)
+    for scope, coverage in (("history", full_coverage), ("out-of-sample", oos_coverage)):
+        if coverage["status"] != "pass":
+            fail("coverage", scope + " session coverage failed: " + "; ".join(coverage["issues"]))
 
     # Rule 2: report every metric, pass or fail.
-    drawdown = metrics.max_drawdown(result.curve)
+    initial_value = result.initial_cash
+    drawdown = metrics.max_drawdown(result.curve, initial_value=initial_value)
     report_metrics = {
         "years": round(years, 2),
-        "cagr": round(metrics.cagr(result.curve), 6),
-        "annual_volatility": round(metrics.annual_volatility(result.curve), 6),
-        "sharpe": round(metrics.sharpe(result.curve), 6),
+        "initial_cash": initial_value,
+        "metric_basis": "initial_cash_including_entry_costs" if initial_value is not None else "first_recorded_nav",
+        "coverage_policy": sessions.COVERAGE_POLICY_VERSION,
+        "session_coverage": full_coverage,
+        "cagr": round(metrics.cagr(result.curve, initial_value=initial_value), 6),
+        "annual_volatility": round(metrics.annual_volatility(result.curve, initial_value=initial_value), 6),
+        "sharpe": round(metrics.sharpe(result.curve, initial_value=initial_value), 6),
         "max_drawdown": round(drawdown.depth, 6),
         "drawdown_peak": drawdown.peak_date.isoformat() if drawdown.peak_date else None,
         "drawdown_trough": drawdown.trough_date.isoformat() if drawdown.trough_date else None,
@@ -198,6 +215,7 @@ def assess(result: Result, *, sessions_by_year: dict[int, int],
                            for y in sorted(sessions_by_year)},
         "out_of_sample": {
             "from": OUT_OF_SAMPLE_START.isoformat(),
+            "session_coverage": oos_coverage,
             "years": round(oos_years, 2) if len(out_of_sample) > 1 else None,
             "cagr": round(metrics.cagr(out_of_sample), 6) if len(out_of_sample) > 1 else None,
             "max_drawdown": round(metrics.max_drawdown(out_of_sample).depth, 6)

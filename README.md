@@ -61,14 +61,23 @@ Neither Review nor card expiry places or cancels broker orders.
 
 Snapshots retain source lineage, timestamps and bars. Assessed decisions and actual operations have different records. Decimal accounting, idempotent retries, pending duplicate checks, corrections and reversals preserve history. Portfolio completeness and unknown fees stay visible; USD/CNY totals are not mixed without valid conversion.
 
-Conversation and /gold produce concise answers from one validated snapshot. Order quantities and limit prices come from the policy engine evaluating rules you adopt in config/user.toml (see ADR-0004); nothing here promises a return.
+Conversation and /gold produce concise answers from validated evidence. Order quantities and limit prices come from the shared compiler: either an adopted strategy or an explicitly confirmed one-off ETF instruction. Neither path promises a return. See [the two paths and opening holdings](docs/adr/0010-user-directed-calculations-and-opening-holdings.md).
 
 Private state lives in gitignored data/state, data/runs and data/decisions. Back up a live journal with `python scripts/copilot_cli.py backup <destination>`. Credentials and private state are excluded from release archives.
 
 `/watchlist` stores personal choices in gitignored data/watchlist.local.md;
 data/watchlist.md is a public supported example. For engine orders, follow the
 [configuration, adoption, coverage and evaluation walkthrough](docs/INSTALL.md#adopt-a-rule-and-request-engine-orders).
-Research works without an adopted rule. There is no unattended scan runner or broker integration.
+Research works without an adopted rule. IBKR integration is read-only; there is no unattended scan runner or automatic order submission.
+
+Version 0.6.0 adds confirmed opening holdings, one-off ETF budgets/target shares,
+issuer/exchange QQQI/JEPQ distribution research, explicit withholding/FX scenarios
+and constrained income comparisons. Research targets are not executable orders.
+Run `python scripts/copilot_runtime.py cli doctor` for prerequisite gaps in the
+selected local runtime (including the optional IBKR SDK).
+See [workflow and release acceptance](docs/DELIVERY.md) for commands and limits.
+Legacy adoption schema 4 requires recomputation with initial-cost and continuous
+calendar coverage checks; older records remain readable but cannot fund new cards.
 
 ## Development
 

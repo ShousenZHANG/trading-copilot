@@ -48,3 +48,28 @@ idempotency_key; old events remain in the journal.
 
 Use context/receipts to report executed, pending, intent, reversed or duplicate
 states accurately. Missing historical holdings and unpriced fees remain visible.
+
+## Opening holdings
+
+If current broker holdings predate the journal and historic fill details are
+unknown, obtain the user's explicit confirmation of the observed current
+holdings, then call `confirm_opening_holdings`. Supply the stored broker
+`execution_snapshot_id`, current `expected_account_version`, context's
+`expected_portfolio_version` (string), original `statement`, stable
+`source_message_id` and `idempotency_key`. Do not invent historic fills or basis.
+Quotes need not be live to establish quantities; account and positions evidence
+must be complete, current and correctly bound. The committed receipt provides
+the `operation_id` of this opening balance.
+
+Subsequent actual fills use `opening_balance_id` equal to that operation ID.
+Their timestamps must follow the opening observation. A fill already included
+in the opening holdings must not be added again. Use the opening tool's
+`event_type="correct"` or `"reverse"`, `operation_id` and `expected_version`
+for explicit user amendments; do not replace an opening once later fills would
+be counted twice. Unknown basis remains unknown, and an opening never proves
+complete historical trading performance or advances a strategy rebalance date.
+
+When the user supplies a fee for the same earlier fill, correct that original
+operation/version. A separate record with amended fees is a suspected duplicate
+and cannot add shares until identity is resolved. Explicitly different real
+fills retain the existing distinct-confirmation path.

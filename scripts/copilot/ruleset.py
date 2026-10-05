@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import asdict, is_dataclass
 from typing import Any, Mapping, Sequence
 
@@ -57,8 +58,10 @@ from typing import Any, Mapping, Sequence
 # aware bands. Schema 3 also binds cadence to actual nonzero executions;
 # a zero-quantity attempt does not advance the rebalance interval. Earlier
 # admission metrics cannot establish the evidence for this calculation.
+# Schema 4 additionally requires real session coverage, a nonzero fill and
+# metrics anchored to pre-entry-cost cash. Old evidence is read-only.
 # The journal retains old records; execution surfaces require this version.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 #: The sleeves that may be adopted. Each one brings its own universe check and
 #: its own exchange calendar; adding a name here without both is the bug the
 #: old "only the ETF sleeve exists" comment warned about, because a sleeve with
@@ -288,6 +291,7 @@ def build_adoption(*, sleeve: str, result, cost_model: Mapping[str, Any],
     from .backtest import admission as admission_gate
     from .backtest import goldrules as goldrules_module
     from .backtest import universe as universe_tiers
+    from .backtest.sessions import COVERAGE_POLICY_VERSION
 
     if sleeve not in SLEEVES:
         raise ValueError(f"sleeve must be one of {SLEEVES}, got {sleeve!r}")
@@ -355,12 +359,18 @@ def build_adoption(*, sleeve: str, result, cost_model: Mapping[str, Any],
         raise ValueError("adopted integer_shares does not match the actual backtest integer_shares")
     expected_execution = {"execution_price": "same_bar_close",
                           "signal_cutoff": "includes_current_bar",
-                          "rebalance_cadence": "completed_nonzero_trades"}
+                          "rebalance_cadence": "completed_nonzero_trades",
+                          "metric_basis": "initial_cash_including_entry_costs",
+                          "coverage_policy": COVERAGE_POLICY_VERSION}
     actual_execution = getattr(result, "execution_assumptions", None)
     if (not isinstance(actual_execution, dict)
             or any(actual_execution.get(key) != value for key, value in expected_execution.items())):
         raise ValueError("execution evidence does not match the current adoptable backtest; "
-                         "rerun it with the current engine before adoption")
+                          "rerun it with the current engine before adoption")
+    initial_cash = getattr(result, "initial_cash", None)
+    if (isinstance(initial_cash, bool) or not isinstance(initial_cash, (int, float))
+            or not math.isfinite(initial_cash) or initial_cash <= 0):
+        raise ValueError("initial_cash evidence is missing or invalid; rerun the current engine before adoption")
 
     _refuse_an_unexecutable_rule(family, cleaned_parameters, symbols, cleaned_targets,
                                  float(cash_floor_pct))

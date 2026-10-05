@@ -1,6 +1,9 @@
 # Manual trade cards
 
-For a concrete USD stock/ETF order, run:
+For a concrete adopted-strategy USD stock/ETF order, run the steps below.
+An explicitly user-directed finite ETF allocation instead enters through
+[one-off allocation](one-off-allocation.md), then rejoins Review and preflight.
+Run `get_execution_readiness` to collect independent missing requirements.
 
 1. Fresh research and `analyze_market_signals`/`assess_investment_proposal`.
 2. `collect_broker_snapshot` for the candidate/adopted universe. Inspect every

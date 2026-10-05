@@ -16,6 +16,34 @@ permissions:
   contents: read
 
 jobs:
+  windows:
+    name: Windows public workflow contracts
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v10.0.1
+      - name: Portable runtime and manual workflow
+        run: |
+          python -m unittest discover -s scripts -p '_test_copilot_runtime.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s scripts -p '_test_directed_plan.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s scripts -p '_test_opening_balance.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s scripts -p '_test_income.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s scripts -p '_test_cash_ledger.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s scripts -p '_test_readiness.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/sync_runtimes.py --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/mcp_handshake.py --all --timeout 300
+
   test:
     name: test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -40,6 +68,9 @@ jobs:
 
       - name: Shared core behavioral contracts
         run: python -m unittest discover -s scripts -p '_test_*.py'
+
+      - name: Current advisor scenario replay
+        run: python evals/advisor_workflow/runner.py --out data/runs/ci-advisor-workflow.json
 
       # The explicit list is checked against real code interfaces. Mentioning
       # a flag in a docstring must not dispatch a dev-only third-party script.
@@ -86,6 +117,15 @@ jobs:
       # the SDK, without a network and without a running process.
       - name: Every shipped MCP server completes a JSON-RPC handshake
         run: python scripts/mcp_handshake.py --all --timeout 300
+
+      - name: Script dependency locks match manifests
+        run: |
+          uv lock --check --script mcps/copilot_mcp.py
+          uv lock --check --script mcps/finnhub_mcp.py
+          uv lock --check --script mcps/akshare_mcp.py
+          uv lock --check --script mcps/yahoo_mcp.py
+          uv lock --check --script scripts/copilot_cli.py
+          uv lock --check --script scripts/copilot_probe.py
 
       - name: Pinned calendars and real MCP tool persistence
         run: |
@@ -137,6 +177,9 @@ jobs:
       - name: Build release zip
         run: python scripts/package_release.py
 
+      - name: Clean extracted installation
+        run: python scripts/verify_release.py
+
       - name: Assert shipped payload
         run: |
           python - <<'PY'
@@ -161,6 +204,11 @@ jobs:
               "scripts/copilot/advisor.py", "scripts/copilot/signals.py",
               "scripts/copilot/advisor_strategy.py",
               "scripts/copilot/broker.py", "scripts/copilot/trade_plan.py", "scripts/copilot/plan_store.py",
+              "scripts/copilot/manual_intent.py", "scripts/copilot/opening_balance.py",
+              "scripts/copilot/readiness.py", "scripts/copilot/income.py", "scripts/copilot/income_sources.py",
+              "scripts/copilot/cash_ledger.py",
+              "scripts/copilot/backtest/session_calendar.json", "scripts/copilot/backtest/sessions.py",
+              "mcps/yahoo_mcp.py", "mcps/yahoo_mcp.py.lock", "docs/DELIVERY.md",
               ".codex/config.toml", ".codex-plugin/plugin.json", "AGENTS.md",
               ".claude-plugin/plugin.json", "README.md", "DISCLAIMER.md",
               "config/user.example.toml",

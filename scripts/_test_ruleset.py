@@ -22,6 +22,7 @@ from copilot import sizing
 from copilot.backtest import engine as bt_engine
 from copilot.backtest import frame as frame_mod
 from copilot.backtest import rules as rule_families
+from copilot.backtest import sessions
 
 
 def admitted_result(family="momentum_top_n", parameters=None, days=5200):
@@ -47,15 +48,11 @@ def _cached_admitted_result(family, parameter_items, days):
     # rotation and clears the limit at 21.25% a name.
     symbols = ["IWM", "IVV", "QQQ", "SPY", "VTI"]
     start = date(2005, 1, 3)
-    dates, closes, day = [], [], start
-    i = 0
-    while len(dates) < days:
-        if day.weekday() < 5:
-            dates.append(day)
-            closes.append([100.0 + i * 0.01, 100.0 + i * 0.02, 100.0 + i * 0.015,
-                           100.0 + i * 0.012, 100.0 + i * 0.018])
-            i += 1
-        day += timedelta(days=1)
+    dates = sessions.sessions_between("etf", start, date(2026, 10, 2))[:days]
+    if len(dates) != days:
+        raise ValueError("fixture requested dates outside the frozen XNYS reference")
+    closes = [[100.0 + i * 0.01, 100.0 + i * 0.02, 100.0 + i * 0.015,
+               100.0 + i * 0.012, 100.0 + i * 0.018] for i in range(len(dates))]
     frame = frame_mod.build(dates=dates, symbols=symbols, closes=closes)
     rule = rule_families.MomentumTopN(
         tuple(symbols), top_n=int(parameters["top_n"]),
@@ -68,12 +65,14 @@ def _cached_admitted_result(family, parameter_items, days):
 
 class RuleIdentity(unittest.TestCase):
     def test_new_execution_semantics_have_a_new_adoption_identity(self):
-        self.assertEqual(ruleset.SCHEMA_VERSION, 3)
+        self.assertEqual(ruleset.SCHEMA_VERSION, 4)
         # Captured from the schema-1 implementation before the sizing/bands
         # repair: the same configuration must not reuse its old evidence ID.
         self.assertNotEqual(ruleset.rule_id(**self.material()), "rule-5abfee10fbcbed84")
         # Schema 2 advanced cadence even when its rebalance traded zero.
         self.assertNotEqual(ruleset.rule_id(**self.material()), "rule-9a04ea6eda9af9b3")
+        # Schema 3 accepted sparse/zero-fill evidence and omitted entry costs.
+        self.assertNotEqual(ruleset.rule_id(**self.material()), "rule-ebba7974e9ada9da")
 
     def material(self, **overrides):
         base = dict(
@@ -151,7 +150,9 @@ class AdoptionRecord(unittest.TestCase):
     def test_old_or_different_execution_evidence_cannot_be_adopted(self):
         for changed in ({"rebalance_cadence": "rebalance_attempts"},
                         {"execution_price": "next_session_close"},
-                        {"signal_cutoff": "unknown"}):
+                        {"signal_cutoff": "unknown"},
+                        {"metric_basis": "first_recorded_nav"},
+                        {"coverage_policy": "stress_year_counts_only"}):
             with self.subTest(changed=changed):
                 _, _, result = admitted_result()
                 result.execution_assumptions.update(changed)
@@ -162,6 +163,12 @@ class AdoptionRecord(unittest.TestCase):
         _, _, result = admitted_result()
         result.execution_assumptions = {}
         with self.assertRaisesRegex(ValueError, "execution evidence"):
+            self.build(result=result)
+
+    def test_missing_initial_cash_cannot_reuse_curve_only_evidence(self):
+        _, _, result = admitted_result()
+        result.initial_cash = None
+        with self.assertRaisesRegex(ValueError, "initial_cash evidence"):
             self.build(result=result)
 
     def test_execution_settings_must_match_the_actual_backtest(self):

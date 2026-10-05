@@ -87,7 +87,11 @@ def generated_files(*, root: Path = ROOT, config: dict | None = None) -> dict[Pa
                      "get_operation_context", "analyze_market_signals", "scan_investment_opportunities",
                      "collect_broker_snapshot", "prepare_manual_trade_plan", "get_manual_trade_plan",
                      "confirm_manual_plan_review", "revalidate_manual_trade_plan", "confirm_account_cash_flow",
-                     "confirm_holding_modes", "confirm_strategy_execution_state"]
+                     "confirm_holding_modes", "confirm_strategy_execution_state",
+                     "get_execution_readiness", "confirm_manual_allocation_intent",
+                     "prepare_directed_trade_plan", "confirm_opening_holdings",
+                     "collect_income_evidence", "analyze_income_evidence", "compare_income_portfolios",
+                     "record_distribution_receipt", "get_distribution_receipts"]
             # Only local evidence/accounting operations authorized by the project.
             for tool in tools:
                 lines += [f'[mcp_servers."trading-copilot".tools.{tool}]',

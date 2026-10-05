@@ -4,12 +4,10 @@
   "_conventions": "No `cmd /c` wrapper: it is Windows-only, and cmd re-parses the argv so a `<` in a version pin turns into a shell redirect. No absolute paths: a relative `--script` path resolves against the project root on every OS. Keys are plain names -- a leading underscore is NOT a disable switch, Claude Code launches every key it finds.",
   "mcpServers": {
     "yahoo-finance": {
-      "_doc": "Free, no API key. Primary market-data source. `--with mcp<2` is load-bearing: the upstream package imports mcp.server.fastmcp, which mcp 2.x deleted.",
-      "command": "uvx",
+      "_doc": "Free, no API key. Pinned upstream entrypoint and transitive script lock; keep tested MCP v1.",
+      "command": "uv",
       "args": [
-        "--with",
-        "mcp<2",
-        "yahoo-finance-mcp"
+        "run", "--no-project", "--quiet", "--locked", "--script", "mcps/yahoo_mcp.py"
       ]
     },
     "finnhub": {

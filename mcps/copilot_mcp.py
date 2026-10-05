@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp[cli]>=1.2.0,<2", "yfinance==1.7.0", "exchange-calendars==4.13.2", "tzdata==2026.3"]
+# dependencies = ["mcp[cli]==1.30.0", "yfinance==1.7.0", "exchange-calendars==4.13.2", "tzdata==2026.3"]
 # ///
 """Conversation tools backed by the shared, local evidence and operation journal."""
 from pathlib import Path
@@ -95,7 +95,8 @@ def confirm_manual_plan_review(plan_id: str, statement: str, expected_version: i
                                 outcome: str = "approve") -> dict:
     """Record the user's explicit Review of this card/version, never infer approval.
 
-    Supply the user's actual statement only after they approve this plan.
+    Supply the actual user statement and matching outcome approve/reject/cancel.
+    A refusal never becomes approve; do not rewrite the user's words to gain approval.
     This is a local receipt; the user still trades manually after fresh preflight.
     """
     return service.confirm_plan_review(plan_id, statement, expected_version, outcome)
@@ -181,6 +182,99 @@ def record_investment_operation(operation: dict, idempotency_key: str) -> dict:
 def get_data_capabilities() -> dict:
     """Check credential presence without revealing values. Does not prove live entitlement."""
     return service.capabilities()
+
+
+@mcp.tool()
+def get_execution_readiness(execution_snapshot_id: str | None = None,
+                            research_snapshot_id: str | None = None,
+                            route: str = 'strategy', instrument_ids: list[str] | None = None) -> dict:
+    """Read all prerequisites at once; never authorize orders.
+
+    Act on named checks: intent awaits human confirmation, drawdown is computed
+    by the plan compiler, income evidence is advisory. Overall needs_evidence
+    does not require historical strategy adoption on the user_directed route.
+    """
+    return service.execution_readiness(execution_snapshot_id=execution_snapshot_id,
+        research_snapshot_id=research_snapshot_id, route=route, instrument_ids=instrument_ids)
+
+
+@mcp.tool()
+def collect_income_evidence(instrument_ids: list[str]) -> dict:
+    """Store official issuer/exchange QQQI/JEPQ distribution events; incomplete coverage stays visible."""
+    return service.collect_distributions(instrument_ids)
+
+
+@mcp.tool()
+def analyze_income_evidence(snapshot_id: str, parameters: dict | None = None) -> dict:
+    """Analyze stored distributions, raw NAV total return and explicit withholding/FX scenarios.
+
+    parameters optionally includes prices, nav_history, withholding_scenarios,
+    fx_scenarios. Unknown tax and future payouts are never guessed.
+    """
+    return service.income_report(snapshot_id, parameters)
+
+
+@mcp.tool()
+def compare_income_portfolios(snapshot_id: str, parameters: dict) -> dict:
+    """Compare bounded integer holdings under explicit income objectives. Research only, no orders.
+
+    parameters requires prices, budget_usd, cost_model (per_share_usd, minimum_usd,
+    other_cost_bps), constraints (cash_floor_pct, weight_bounds by symbol min/max).
+    Optional objective, withholding_scenarios, fx_scenarios, nav_history, existing_holdings.
+    Never treats highest historic distributions as the highest future total return.
+    """
+    return service.income_report(snapshot_id, parameters, compare=True)
+
+
+@mcp.tool()
+def record_distribution_receipt(receipt: dict, idempotency_key: str) -> dict:
+    """Record actual user-reported credited cash, not announcements. Requires original human statement.
+
+    receipt: statement/source_message_id/opening_balance_id/instrument_id/payment_date/
+    currency/net_amount; gross_amount and withholding_amount remain null if unknown.
+    Corrections/reversals require event_type, operation_id and expected_version.
+    Does not change broker cash, holdings or external deposit/withdrawal declarations.
+    """
+    return service.record_distribution_receipt(receipt,idempotency_key)
+
+
+@mcp.tool()
+def get_distribution_receipts() -> dict:
+    """Read sanitized committed distribution receipt history and versions."""
+    return service.distribution_receipts()
+
+
+@mcp.tool()
+def confirm_manual_allocation_intent(execution_snapshot_id: str, research_snapshot_id: str,
+                                     intent: dict, statement: str, expected_account_version: str) -> dict:
+    """Record the human's actual one-off ETF targets/budget, sales and limits. No invented confirmation.
+
+    intent: kind buy_budget_usd or target_shares, targets symbol->decimal string,
+    allowed_sells list, risk_limits containing cash_floor_pct, max_single_name_pct,
+    max_trade_notional_pct and long_term_nav_cap_pct. This does not adopt a strategy.
+    """
+    return service.confirm_manual_intent(execution_snapshot_id, research_snapshot_id,
+        intent, statement, expected_account_version)
+
+
+@mcp.tool()
+def prepare_directed_trade_plan(intent_id: str) -> dict:
+    """Compute a one-off manual ETF card from a saved explicit intent and fresh stored snapshots.
+
+    No alpha validation claim. Follow with actual human Review and fresh preflight.
+    """
+    return service.prepare_directed_plan(intent_id)
+
+
+@mcp.tool()
+def confirm_opening_holdings(execution_snapshot_id: str, statement: str, source_message_id: str,
+                             idempotency_key: str, expected_account_version: str,
+                             expected_portfolio_version: str, event_type: str = 'record',
+                             operation_id: str | None = None, expected_version: int | None = None) -> dict:
+    """Record/correct/reverse explicitly confirmed broker opening holdings; never invent historical fills or tax basis."""
+    return service.confirm_opening_balance(execution_snapshot_id, statement, source_message_id,
+        idempotency_key, expected_account_version, expected_portfolio_version,
+        event_type, operation_id, expected_version)
 
 
 @mcp.tool()

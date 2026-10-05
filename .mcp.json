@@ -1,11 +1,9 @@
 {
   "mcpServers": {
     "yahoo-finance": {
-      "command": "uvx",
+      "command": "uv",
       "args": [
-        "--with",
-        "mcp<2",
-        "yahoo-finance-mcp"
+        "run", "--no-project", "--quiet", "--locked", "--script", "mcps/yahoo_mcp.py"
       ]
     },
     "finnhub": {

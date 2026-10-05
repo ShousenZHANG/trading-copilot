@@ -14,7 +14,13 @@ _Avoid_: calling retrieval time the market price date.
 
 **Execution snapshot**: A separate local IBKR read-only observation of account value, settled cash, positions, orders, recent fills, contracts and actual received quotes. End markers and coverage are required; it is not an atomic account lock or journal history reconstruction.
 
-**Manual trade card**: An immutable adopted-rule calculation of funded raw-price limits, whole shares, fees and risk checks. Explicit user Review and a fresh passing preflight precede the user's manual order. Card expiry does not cancel broker orders.
+**Manual trade card**: An immutable adopted-strategy or explicitly user-directed calculation of funded raw-price limits, whole shares, fees and risk checks. Explicit user Review and a fresh passing preflight precede the user's manual order. Card expiry does not cancel broker orders.
+
+**One-off allocation intent**: An explicit user-confirmed budget or target holding with permitted sales, risk limits, account version and evidence expiry. It is not strategy adoption, an optimum-price claim or a standing mandate.
+
+**Opening balance**: Confirmed broker-observed quantities at an observation cutoff, separately versioned from historical fills. Unknown basis remains unknown and the event never advances strategy cadence.
+
+**Distribution event**: An issuer/exchange announcement with amount kind, ex/record/pay dates and source timing. It does not establish a user's entitlement, actual cash receipt or final tax classification.
 
 **Cash-flow interval**: An explicitly confirmed net deposit/withdrawal amount between trustworthy broker observations, including zero. It adjusts prospective return/drawdown accounting without changing broker cash or journal holdings.
 

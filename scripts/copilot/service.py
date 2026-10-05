@@ -141,7 +141,7 @@ def advisor_context(instrument_ids: list[str] | None = None, *, db_path=None, as
                 summary["status"] = "adoption_pointer_unresolved"
         result["strategy_templates"][mode] = summary
     result["broker_enabled"] = settings.ibkr.enabled
-    result["execution_readiness"] = "requires_fresh_account_quote_and_adopted_rule"
+    result["execution_readiness"] = execution_readiness(config_path=config_path, db_path=db_path, now=now)
     return result
 
 
@@ -197,6 +197,107 @@ def prepare_trade_plan(research_snapshot_id: str, execution_snapshot_id: str,
     return {"plan": public_response(plan), "message": render_trade_plan(plan)}
 
 
+def confirm_manual_intent(execution_snapshot_id: str, research_snapshot_id: str,
+                          intent: dict, statement: str, expected_account_version: str,
+                          *, db_path=None, now=None) -> dict:
+    from .manual_intent import record_intent
+    return public_response(record_intent(execution_snapshot_id, research_snapshot_id, intent, statement,
+        expected_account_version=expected_account_version, db_path=database_path(db_path), now=now))
+
+
+def collect_distributions(instrument_ids: list[str], *, db_path=None, now=None, transport=None) -> dict:
+    from .income import collect_income_snapshot
+    from .plan_store import _transaction
+    result=collect_income_snapshot(instrument_ids, now=now, transport=transport)
+    with _transaction(database_path(db_path)) as connection:
+        connection.execute('INSERT OR IGNORE INTO advisor_income_snapshots VALUES (?,?)',
+                           (result['snapshot_id'], strict_json(result)))
+    return public_response(result)
+
+
+def income_report(snapshot_id: str, parameters: dict | None = None, *, compare=False, db_path=None, now=None) -> dict:
+    from .income import analyze_income, compare_income_allocations
+    from .plan_store import _transaction
+    with _transaction(database_path(db_path)) as connection:
+        row=connection.execute('SELECT payload FROM advisor_income_snapshots WHERE snapshot_id=?',(snapshot_id,)).fetchone()
+    if not row:
+        raise ValueError('stored income evidence snapshot not found')
+    inputs=dict(parameters or {})
+    allowed={'prices','nav_history','withholding_scenarios','fx_scenarios'}
+    if compare:
+        allowed|={'budget_usd','cost_model','constraints','objective','existing_holdings'}
+    if set(inputs)-allowed:
+        raise ValueError('unknown income parameters; use stored evidence and explicit documented scenarios')
+    calculate=compare_income_allocations if compare else analyze_income
+    return public_response(calculate(json.loads(row['payload']),**inputs,now=now))
+
+
+def record_distribution_receipt(receipt: dict, idempotency_key: str, *, db_path=None, now=None) -> dict:
+    from .cash_ledger import record_distribution
+    return public_response(record_distribution(receipt,idempotency_key,db_path=database_path(db_path),now=now))
+
+
+def distribution_receipts(*, db_path=None, as_of=None) -> dict:
+    from .cash_ledger import get_distributions
+    return public_response({'receipts':get_distributions(db_path=database_path(db_path),as_of=as_of),
+        'broker_cash_modified':False,'holdings_modified':False})
+
+
+def execution_readiness(*, config_path=None, db_path=None, execution_snapshot_id=None,
+                        research_snapshot_id=None, route='strategy', instrument_ids=None, now=None):
+    from importlib.util import find_spec
+    from .config import load_config
+    from .readiness import diagnose
+    import sqlite3
+    from contextlib import closing
+    settings=load_config(config_path)
+    path=database_path(db_path)
+    def read_only(table, column, identity):
+        if not identity or not path.is_file():
+            return None
+        # Table/column are fixed internal literals; the supplied identity is bound.
+        try:
+            with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)) as connection:
+                row=connection.execute(f'SELECT payload FROM {table} WHERE {column}=?',(identity,)).fetchone()
+            return json.loads(row[0]) if row else None
+        except (sqlite3.Error,ValueError):
+            return None
+    identity=settings.advisor.long_term_rule_id or settings.etf.adopted_rule_id
+    rule=read_only('adopted_rules','rule_id',identity)
+    execution=read_only('advisor_execution_snapshots','snapshot_id',execution_snapshot_id)
+    research=read_only('evidence_snapshots','snapshot_id',research_snapshot_id)
+    result=diagnose(settings, execution=execution,research=research,rule=rule,
+        symbols=instrument_ids,route=route,now=now,sdk_available=find_spec('ibapi') is not None)
+    for label,requested,loaded in (('execution_snapshot',execution_snapshot_id,execution),('research_snapshot',research_snapshot_id,research)):
+        if requested and loaded is None:
+            result['checks'].append(dict(check=label,status='blocked',detail='Referenced local evidence unavailable',next_action='Collect and persist new evidence'))
+            result['blockers'].append(label)
+            result['status']='blocked'
+    return public_response(result)
+
+
+def prepare_directed_plan(intent_id: str, *, config_path=None, db_path=None, now=None) -> dict:
+    from .manual_intent import read_intent, effective_policy
+    from .plan_store import create_plan, read_snapshot
+    from .config import load_config
+    path = database_path(db_path)
+    intent = read_intent(intent_id, db_path=path)
+    policy = effective_policy(_manual_policy(load_config(config_path), 'long_term'), intent)
+    plan = create_plan(execution_snapshot=read_snapshot(intent['execution_snapshot_id'], db_path=path),
+        research_snapshot=snapshot(intent['research_snapshot_id'], db_path=path),
+        adoption=intent, policy=policy, db_path=path, now=now)
+    return {"plan": public_response(plan), "message": render_trade_plan(plan)}
+
+
+def _plan_rule_policy(plan, settings, db_path):
+    base = _manual_policy(settings, plan['mode'])
+    if plan.get('plan_kind') == 'user_directed':
+        from .manual_intent import read_intent, effective_policy
+        rule = read_intent(plan['rule_id'], db_path=database_path(db_path))
+        return rule, effective_policy(base, rule)
+    return adoption(plan['rule_id'], db_path=db_path), base
+
+
 def get_trade_plan(plan_id: str, *, config_path=None, db_path=None, now=None) -> dict:
     from .plan_store import read_plan
     plan = read_plan(plan_id, db_path=database_path(db_path), now=now)
@@ -205,14 +306,17 @@ def get_trade_plan(plan_id: str, *, config_path=None, db_path=None, now=None) ->
         from .trade_plan import policy_binding
         issues = []
         try:
-            effective = _manual_policy(load_config(config_path), plan["mode"])
+            current_rule, effective = _plan_rule_policy(plan, load_config(config_path), db_path)
             if policy_binding(effective) != plan.get("policy_binding"):
                 issues.append("current local configuration differs from the frozen card")
-            current_rule = adoption(plan["rule_id"], db_path=db_path)
             if current_rule.get("kind") == "advisor_strategy":
                 from .advisor_strategy import verify_adoption
                 if not verify_adoption(current_rule):
                     issues.append("adopted advisor template no longer matches current calculation code")
+            elif current_rule.get('kind') != 'user_directed':
+                from .ruleset import SCHEMA_VERSION
+                if current_rule.get('schema_version') != SCHEMA_VERSION:
+                    issues.append('legacy adoption requires current cost/calendar admission recomputation')
         except (ValueError, KeyError, OSError) as exc:
             issues.append("current configuration/adoption cannot be verified: " + type(exc).__name__)
         if issues:
@@ -245,15 +349,26 @@ def revalidate_trade_plan(plan_id: str, expected_version: int, *, config_path=No
     symbols = [order["instrument_id"] for order in existing.get("orders", [])]
     if not symbols or existing.get("review_state") != "reviewed":
         raise ValueError("preflight requires a fresh explicitly reviewed plan")
-    frozen_rule = adoption(existing["rule_id"], db_path=path)
+    frozen_rule, policy = _plan_rule_policy(existing, load_config(config_path), path)
     universe = (frozen_rule.get("spec", {}).get("universe", [])
                 if frozen_rule.get("kind") == "advisor_strategy" else frozen_rule.get("universe", []))
     symbols = sorted(set(symbols) | set(universe))
     observed = broker_snapshot(symbols, config_path=config_path, db_path=path, now=now, transport=transport)
-    policy = _manual_policy(load_config(config_path), existing["mode"])
     plan = revalidate_plan(plan_id, execution_snapshot=read_snapshot(observed["snapshot_id"], db_path=path),
                            policy=policy, expected_version=expected_version, db_path=path, now=now)
     return {"plan": public_response(plan), "message": render_trade_plan(plan)}
+
+
+def confirm_opening_balance(execution_snapshot_id: str, statement: str, source_message_id: str,
+                            idempotency_key: str, expected_account_version: str,
+                            expected_portfolio_version: str, event_type: str = 'record',
+                            operation_id: str | None = None, expected_version: int | None = None,
+                            *, db_path=None, now=None) -> dict:
+    from .opening_balance import record_opening_balance
+    return public_response(record_opening_balance(execution_snapshot_id, statement, source_message_id,
+        idempotency_key, expected_account_version=expected_account_version,
+        expected_portfolio_version=expected_portfolio_version, event_type=event_type,
+        operation_id=operation_id, expected_version=expected_version, db_path=database_path(db_path), now=now))
 
 
 def confirm_broker_cash_flow(previous_snapshot_id: str, execution_snapshot_id: str,
@@ -858,7 +973,10 @@ def capabilities(*, config_path=None) -> dict:
             "advisor": {"enabled": settings.advisor.enabled,
                         "stock_scope": "provider_verified_common_stock; funded_cards_require_separate_adoption",
                         "signals": "deterministic_completed_session_research",
-                        "manual_plans": "adopted_legacy_ETF_or_current_advisor_template; fresh_broker_prerequisites",
+                        "manual_plans": "adopted_strategy_or_explicit_user_directed_ETF_intent; fresh_broker_prerequisites",
+                        "opening_holdings": "confirmed_broker_bound_quantities_unknown_historical_basis",
+                        "income_research": "QQQI_JEPQ_issuer_exchange_events; explicit_tax_FX_scenarios; no_order_authorization",
+                        "readiness": "get_execution_readiness_or_cli_doctor; nonmutating_multiple_blockers",
                         "strategy_templates": ["long_term_trend", "swing_breakout"],
                         "swing_scope": "separately_validated_adopted_template; confirmed_mode_lots",
                         "historical_sources_authenticated": False},

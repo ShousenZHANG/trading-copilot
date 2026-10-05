@@ -129,7 +129,9 @@ class JournalTests(unittest.TestCase):
 
     def test_negated_reversal_and_hypothetical_correction_cannot_change_holding(self):
         receipt = self.record()
-        for event_type, statement in [("reverse", "不要撤销这笔记录"), ("correct", "如果更正价格为600"), ("reverse", "建议撤销这条记录")]:
+        for event_type, statement in [("reverse", "不要撤销这笔记录"), ("correct", "如果更正价格为600"), ("reverse", "建议撤销这条记录"),
+                                      ("correct", "I refuse to correct this record"), ("reverse", "我拒绝撤销这条记录"),
+                                      ("reverse", "My broker reversed this record"), ("correct", "I have not yet corrected this record")]:
             with self.subTest(statement=statement), self.assertRaises(ValueError):
                 self.record({"event_type": event_type, "operation_id": receipt["operation_id"], "expected_version": 1, "statement": statement, "source_message_id": "amend-msg", "price": "600"}, event_type + statement)
         self.assertEqual(self.context()["holdings"][0]["gross_cost_basis"], "5000")
@@ -150,6 +152,47 @@ class JournalTests(unittest.TestCase):
         resolved = self.record({"event_type": "complete", "operation_id": second["operation_id"], "expected_version": 1, "statement": "这是另一笔成交，确实又买了10股。", "source_message_id": "distinct-msg", "distinct_confirmation": True}, "distinct")
         self.assertEqual(resolved["status"], "executed")
         self.assertEqual(self.context()["holdings"][0]["quantity"], "20")
+
+    def test_fee_supplement_requires_reconciliation_without_new_shares(self):
+        first = self.record()
+        supplement = self.record(self.operation(fees="1", source_message_id="fee-message",
+            statement="I already bought 10 QQQ at 500 USD on September 4; this is the same fill with commission 1 USD."), "fee-supplement")
+        self.assertEqual(supplement["status"], "pending_duplicate")
+        self.assertEqual(supplement["duplicate_candidates"], [first["operation_id"]])
+        self.assertEqual(self.context()["holdings"][0]["quantity"], "10")
+        corrected = self.record({"event_type": "correct", "operation_id": first["operation_id"],
+            "expected_version": 1, "statement": "更正手续费为1美元", "source_message_id": "fee-correct", "fees": "1"}, "fee-correct")
+        self.assertEqual(corrected["status"], "executed")
+        self.assertEqual(self.context()["holdings"][0]["quantity"], "10")
+        self.assertEqual(self.context()["holdings"][0]["cost_basis_including_fees"], "5001")
+
+    def test_fee_difference_does_not_override_explicit_distinct_or_external_identity(self):
+        self.record(self.operation(external_trade_id="fill-one"), "first")
+        other = self.record(self.operation(external_trade_id="fill-two", fees="1", source_message_id="different-exec"), "other")
+        self.assertEqual(other["status"], "executed")
+        self.assertEqual(self.context()["holdings"][0]["quantity"], "20")
+        with self.assertRaises(journal.JournalConflict):
+            self.record(self.operation(external_trade_id="fill-one", fees="2", source_message_id="same-exec"), "same-id-conflict")
+
+    def test_late_external_id_follows_explicit_duplicate_link_to_canonical_fill(self):
+        first = self.record()
+        supplement = self.record(self.operation(external_trade_id="late-fill-id", fees="1",
+            source_message_id="late-details"), "late-details")
+        self.assertEqual(supplement["status"], "pending_duplicate")
+        linked = self.record({"event_type": "complete", "operation_id": supplement["operation_id"],
+            "expected_version": 1, "duplicate_of": first["operation_id"],
+            "statement": "这两条记录是同一笔成交，重复了。", "source_message_id": "link-late-id"}, "link-late-id")
+        self.assertEqual(linked["status"], "duplicate_linked")
+        corrected = self.record({"event_type": "correct", "operation_id": first["operation_id"],
+            "expected_version": 1, "external_trade_id": "late-fill-id", "fees": "1",
+            "statement": "更正手续费和成交编号", "source_message_id": "canonical-details"}, "canonical-details")
+        retry = self.record(self.operation(external_trade_id="late-fill-id", fees="1",
+            source_message_id="later-external-report"), "later-external-report")
+        self.assertEqual(corrected["operation_id"], retry["operation_id"])
+        self.assertTrue(retry["external_duplicate"])
+        holding = self.context()["holdings"][0]
+        self.assertEqual(holding["quantity"], "10")
+        self.assertEqual(holding["cost_basis_including_fees"], "5001")
 
     def test_pending_duplicate_linked_without_second_holding(self):
         first = self.record()

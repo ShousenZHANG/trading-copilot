@@ -1,5 +1,18 @@
 # Evaluation tools and their evidence boundaries
 
+Current advisor workflow contracts and sanitized tool trace:
+
+```bash
+python evals/advisor_workflow/runner.py --out data/runs/advisor-workflow.json
+```
+
+This runs actual current core/service functions against isolated synthetic
+fixtures (denied confirmations, unknown funding, expired quotes, openings,
+fee corrections, concurrent cards and changed preflight state). It records
+scenario outcomes, tool result hashes, prompt/tool/code hashes and Python
+version. `model=null` and `model_accuracy=not_measured` are deliberate: passing
+the program contract suite is not a score for model answers or investment alpha.
+
 This directory contains offline scoring tools and a legacy signal-replay
 adapter. It does not establish the current copilot's investment accuracy or
 future returns. Tests validate implementation behavior, not strategy alpha.

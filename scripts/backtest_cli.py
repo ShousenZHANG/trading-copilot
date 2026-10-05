@@ -159,8 +159,17 @@ def verify_universe(symbols: Iterable[str] | None = None) -> int:
 def verify_calendars() -> int:
     """Assert the hardcoded session counts against exchange-calendars."""
     import exchange_calendars as xcals
-    xnys = xcals.get_calendar("XNYS")
+    from copilot.backtest import sessions
+    reference = sessions.calendar_details("etf")
+    xnys = xcals.get_calendar("XNYS", start=reference["range_start"], end=reference["range_end"])
     problems = 0
+    frozen = sessions.sessions_between("etf", date.fromisoformat(reference["range_start"]),
+                                      date.fromisoformat(reference["range_end"]))
+    observed_dates = tuple(stamp.date() for stamp in xnys.sessions)
+    matches = frozen == observed_dates
+    problems += int(not matches)
+    print(f"  {'ok' if matches else 'DRIFT'} XNYS full reference: {len(frozen)} frozen / "
+          f"{len(observed_dates)} calendar sessions, through {reference['range_end']}")
     for year, expected in sorted(admission.STRESS_SESSIONS.items()):
         observed = len(xnys.sessions_in_range(f"{year}-01-01", f"{year}-12-31"))
         status = "ok " if observed == expected else "DRIFT"
@@ -243,8 +252,9 @@ def _evaluate_neighbour(frame, base_rule, neighbour_params: dict[str, float], *,
         neighbour_rule = base_rule.with_parameters(neighbour_params)
         result = engine.run(frame, rule=neighbour_rule, start_cash=start_cash,
                             cost_model=engine.CostModel(), cash_floor_pct=cash_floor_pct)
-        return {"parameters": neighbour_params, "cagr": round(metrics.cagr(result.curve), 6),
-                "max_drawdown": round(metrics.max_drawdown(result.curve).depth, 6)}
+        return {"parameters": neighbour_params,
+                "cagr": round(metrics.cagr(result.curve, initial_value=result.initial_cash), 6),
+                "max_drawdown": round(metrics.max_drawdown(result.curve, initial_value=result.initial_cash).depth, 6)}
     except ValueError as exc:
         return {"parameters": neighbour_params, "error": str(exc)}
 
@@ -256,7 +266,7 @@ def run_family(frame, rule, *, start_cash: float, cash_floor_pct: float,
     result = engine.run(frame, rule=rule, start_cash=start_cash,
                         cost_model=engine.CostModel(), cash_floor_pct=cash_floor_pct)
     report = admission.assess(result, sessions_by_year=admission.STRESS_SESSIONS)
-    base_cagr = metrics.cagr(result.curve)
+    base_cagr = metrics.cagr(result.curve, initial_value=result.initial_cash)
     neighbours = [_evaluate_neighbour(frame, rule, neighbour, start_cash=start_cash,
                                       cash_floor_pct=cash_floor_pct)
                  for neighbour in sensitivity_grid(result.parameters)]
@@ -373,11 +383,8 @@ def _synthetic_series(symbol: str, *, start: date = date(2000, 1, 3),
     real -- argument parsing, load_universe, every rule family, JSON
     serialization -- without a live Yahoo request.
     """
-    dates, d = [], start
-    while d < end:
-        if d.weekday() < 5:
-            dates.append(d)
-        d += timedelta(days=1)
+    from copilot.backtest.sessions import sessions_between
+    dates = list(sessions_between("etf", start, end - timedelta(days=1)))
     closes = tuple(100.0 + i * 0.01 for i in range(len(dates)))
     return history.Series(symbol=symbol, dates=tuple(dates), split_adjusted=closes,
                           split_and_dividend_adjusted=closes, dropped_bars=0)

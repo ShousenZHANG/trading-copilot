@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp[cli]>=1.2.0,<2", "yfinance==1.7.0", "exchange-calendars==4.13.2", "tzdata==2026.3"]
+# dependencies = ["mcp[cli]==1.30.0", "yfinance==1.7.0", "exchange-calendars==4.13.2", "tzdata==2026.3"]
 # ///
 """Real MCP tool/restart smoke test. All writes use a temporary fixture database."""
 from __future__ import annotations

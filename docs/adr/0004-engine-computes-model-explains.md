@@ -2,6 +2,10 @@
 
 Status: accepted, 2026-09-19. Clauses 3 and 6 amended by [ADR-0005](0005-verified-data-constraints.md).
 
+Execution observations/Review are extended by [ADR-0009](0009-manual-advisor-plans.md).
+[ADR-0010](0010-user-directed-calculations-and-opening-holdings.md) adds explicitly
+user-directed calculations without treating them as validated strategies.
+
 ## Context
 
 Until 0.4.0 the plugin ran a fourteen-agent research pipeline whose prose was

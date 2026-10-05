@@ -55,7 +55,14 @@ def _validated(curve: Curve) -> list[tuple[date, float]]:
     return curve
 
 
-def max_drawdown(curve: Curve) -> Drawdown:
+def _anchor(initial_value: float | None) -> float | None:
+    if initial_value is not None and (isinstance(initial_value, bool)
+            or not math.isfinite(initial_value) or initial_value <= 0):
+        raise ValueError("initial_value must be finite and positive")
+    return initial_value
+
+
+def max_drawdown(curve: Curve, *, initial_value: float | None = None) -> Drawdown:
     """Deepest peak-to-trough fall, with the days from peak to recovery.
 
     `duration_days` runs peak to recovery when recovery happened, peak to the
@@ -64,12 +71,14 @@ def max_drawdown(curve: Curve) -> Drawdown:
     whether someone abandons a strategy.
     """
     curve = _validated(curve)
-    if len(curve) < 2:
+    initial_value = _anchor(initial_value)
+    if not curve or (len(curve) < 2 and initial_value is None):
         return Drawdown(0.0, None, None, None, 0)
-    peak_value, peak_date = curve[0][1], curve[0][0]
+    peak_value, peak_date = initial_value if initial_value is not None else curve[0][1], curve[0][0]
     best = Drawdown(0.0, None, None, None, 0)
-    for when, value in curve[1:]:
-        if value > peak_value:
+    best_peak_value = peak_value
+    for when, value in (curve if initial_value is not None else curve[1:]):
+        if value >= peak_value:
             peak_value, peak_date = value, when
             continue
         depth = (peak_value - value) / peak_value
@@ -80,12 +89,13 @@ def max_drawdown(curve: Curve) -> Drawdown:
         # curve[1:], not curve[0:], because bar 0 seeded peak_value/peak_date
         # already -- comparing it to itself is a zero-depth no-op that would
         # otherwise tie against the initial sentinel too.)
-        if depth >= best.depth:
+        if depth > 0 and depth >= best.depth:
             best = Drawdown(depth, peak_date, when, None, 0)
+            best_peak_value = peak_value
     if best.peak_date is None:
         return best
     recovery = next((w for w, v in curve
-                     if w > best.trough_date and v >= _value_at(curve, best.peak_date)), None)
+                     if w > best.trough_date and v >= best_peak_value), None)
     end = recovery or curve[-1][0]
     return Drawdown(best.depth, best.peak_date, best.trough_date, recovery,
                     (end - best.peak_date).days)
@@ -98,35 +108,38 @@ def _value_at(curve: Curve, when: date) -> float:
     raise KeyError(when)
 
 
-def cagr(curve: Curve) -> float:
+def cagr(curve: Curve, *, initial_value: float | None = None) -> float:
     curve = _validated(curve)
+    initial_value = _anchor(initial_value)
     if len(curve) < 2:
         return 0.0
     years = (curve[-1][0] - curve[0][0]).days / DAYS_PER_YEAR
     if years <= 0 or curve[0][1] <= 0:
         return 0.0
-    return (curve[-1][1] / curve[0][1]) ** (1 / years) - 1
+    return (curve[-1][1] / (initial_value if initial_value is not None else curve[0][1])) ** (1 / years) - 1
 
 
-def daily_returns(curve: Curve) -> list[float]:
+def daily_returns(curve: Curve, *, initial_value: float | None = None) -> list[float]:
     curve = _validated(curve)
-    return [(curve[i][1] / curve[i - 1][1]) - 1 for i in range(1, len(curve))]
+    initial_value = _anchor(initial_value)
+    entry = [curve[0][1] / initial_value - 1] if curve and initial_value is not None else []
+    return entry + [(curve[i][1] / curve[i - 1][1]) - 1 for i in range(1, len(curve))]
 
 
-def annual_volatility(curve: Curve) -> float:
+def annual_volatility(curve: Curve, *, initial_value: float | None = None) -> float:
     curve = _validated(curve)
-    returns = daily_returns(curve)
+    returns = daily_returns(curve, initial_value=initial_value)
     if len(returns) < 2:
         return 0.0
     return statistics.stdev(returns) * math.sqrt(TRADING_DAYS_PER_YEAR)
 
 
-def sharpe(curve: Curve) -> float:
+def sharpe(curve: Curve, *, initial_value: float | None = None) -> float:
     curve = _validated(curve)
-    vol = annual_volatility(curve)
+    vol = annual_volatility(curve, initial_value=initial_value)
     if vol == 0:
         return 0.0
-    return (cagr(curve) - RISK_FREE_RATE) / vol
+    return (cagr(curve, initial_value=initial_value) - RISK_FREE_RATE) / vol
 
 
 def annual_turnover(*, traded_notional: float, average_value: float, years: float) -> float:

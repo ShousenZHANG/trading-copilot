@@ -105,6 +105,22 @@ REQUIRED_ARTIFACT_FILES = [
     "scripts/mcp_env.py",
     "scripts/self_tests.py",
     "scripts/copilot/backtest/execution_sensitivity.py",
+    "scripts/copilot/manual_intent.py",
+    "scripts/copilot/opening_balance.py",
+    "scripts/copilot/income.py",
+    "scripts/copilot/income_sources.py",
+    "scripts/copilot/readiness.py",
+    "scripts/copilot/cash_ledger.py",
+    "scripts/copilot/backtest/session_calendar.json",
+    "scripts/copilot/backtest/sessions.py",
+    "mcps/yahoo_mcp.py",
+    "mcps/yahoo_mcp.py.lock",
+    "mcps/copilot_mcp.py.lock",
+    "mcps/finnhub_mcp.py.lock",
+    "mcps/akshare_mcp.py.lock",
+    "scripts/copilot_cli.py.lock",
+    "scripts/copilot_probe.py.lock",
+    "docs/adr/0010-user-directed-calculations-and-opening-holdings.md",
     ".claude-plugin/plugin.json",
     ".codex-plugin/plugin.json",
     ".codex/config.toml",
@@ -306,7 +322,12 @@ def build(version: str, stamp: str | None) -> Path:
                     print(f"  !! LEAK GUARD blocked: {rel}", file=sys.stderr)
                     skipped += 1
                     continue
-                zf.write(f, arcname=arcname)
+                # Stable bytes across checkout timestamps and OS permissions.
+                info = zipfile.ZipInfo(arcname, date_time=(2020, 1, 1, 0, 0, 0))
+                info.create_system = 3
+                info.external_attr = 0o100644 << 16
+                info.compress_type = zipfile.ZIP_DEFLATED
+                zf.writestr(info, f.read_bytes(), compresslevel=9)
                 added += 1
 
     print(f"Built {out.relative_to(ROOT)}  ({added} files, {skipped} skipped)")

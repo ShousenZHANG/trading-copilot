@@ -29,22 +29,37 @@ def _affirmation(statement, purpose):
     """
     if not isinstance(statement, str) or not statement.strip():
         return False
-    if re.search(r'["“”‘’「」『』?？]|如果|假如|假设|可能|建议|他说|她说|朋友|别人|引用|举例|模拟|测试', statement):
+    if re.search(r'["\'“”‘’「」『』?？]|如果|假如|假设|可能|建议|他说|她说|朋友|别人|引用|举例|模拟|测试|除非|只要|是否|请(?:确认|批准|同意)|(?:待|等).{0,8}(?:确认|批准|审核)|(?:会|将|先).{0,12}(?:再确认|再批准|再同意)', statement):
         return False
-    if re.search(r'\b(?:if|would|could|should|hypothetical|example|said|says|told|quote|test|pretend)\b', statement, re.I):
+    if re.search(r'\b(?:if|unless|until|assuming|provided|maybe|perhaps|might|would|could|should|hypothetical|example|said|says|told|quote|test|pretend|please)\b|\b(?:the user|someone|on behalf|as long as|when|once)\b', statement, re.I):
         return False
-    if re.search(r'(?:计划|打算|准备|想要).{0,6}(?:确认|批准|同意|通过|review|复核|核对|分配|放弃|取消)|\b(?:plan|planning|want|intend)\b.{0,20}\b(?:approve|confirm|agree|review|cancel|assign)\b', statement, re.I):
+    if re.search(r'(?:券商|银行|模型|系统|代理|助手)[^，。；,:;!?]{0,8}(?:确认|批准|同意|通过|更正|修改|撤销|收到|到账)|\b(?:broker|bank|advisor|agent|model|assistant|he|she|they)\b.*\b(?:approv(?:e|es|ed)|confirm(?:s|ed)?|accept(?:s|ed)?|correct(?:s|ed)?|revers(?:e|es|ed)|receiv(?:e|es|ed))\b', statement, re.I):
+        return False
+    if re.search(r'(?:计划|打算|准备|想要).{0,6}(?:确认|批准|同意|通过|review|复核|核对|分配|放弃|取消|更正|修改|撤销)|\b(?:plan|planning|want|intend)\b.{0,20}\b(?:approve|confirm|agree|review|cancel|assign|correct|reverse)\b', statement, re.I):
+        return False
+    if re.search(r'(?:会|将|以后|稍后)[^，。；,:;!?]{0,12}(?:确认|批准|同意|收到|到账|更正|修改|撤销)|\b(?:will|going\s+to)\b.{0,30}\b(?:approve|confirm|agree|receive|credited|assign|cancel|correct|reverse)\b', statement, re.I):
         return False
     positive = {
         'approve': r'确认|同意|批准|通过|\b(?:approve(?:d)?|confirm(?:ed)?|agree(?:d)?|accept(?:ed)?)\b',
-        'reject': r'拒绝|不批准|不同意|\b(?:reject|decline)\b',
+        'reject': r'拒绝|不(?:予|再|会)?批准|不同意|\b(?:reject|decline)\b|\b(?:refuse\s+to|do\s+not|will\s+not)\s+approve\b',
         'cancel': r'放弃|取消.*(?:计划|复核)|\b(?:cancel|abandon)\b',
         'cash_flow': r'确认|\bconfirm(?:ed)?\b',
         'allocation': r'确认|分配|\b(?:confirm(?:ed)?|allocat(?:e|ed)|assign(?:ed)?)\b',
+        'distribution': r'我[^，。；,:;!?]{0,24}(?:已(?:经)?(?:实际)?收到|已(?:经)?实际到账)|\bI\s+(?:have\s+)?(?:actually\s+|already\s+)?received\b|\bI\s+confirm\b.{0,80}\b(?:actually received|has been credited|has settled)\b',
+        'correct': r'更正|修正|改为|改成|写错|记错|修改|填错|应为|错了|正确|\b(?:correct(?:ed)?|correction|amend(?:ed)?|amendment|mistake|change)\b',
+        'reverse': r'撤销|作废|取消.*记录|删除.*记录|重复|\b(?:reverse(?:d)?|void(?:ed)?|revoke|duplicate|delete\s+.*record|cancel\s+.*record)\b',
     }[purpose]
-    if purpose!='reject' and re.search(r'(?:不|未|没|尚未|还没|并未|不能|拒绝)\s*(?:想|愿意|打算|准备|已|完成)?\s*(?:确认|同意|批准|通过|review|复核|核对|分配|放弃|取消)', statement, re.I):
+    verbs = r'确认|同意|批准|通过|接受|认可|review|复核|核对|分配|放弃|取消|拒绝|收到|到账|更正|修正|修改|撤销|作废|删除|改为|改成|写错|记错'
+    if purpose=='reject' and re.search(r'(?:不|未|没)[^，。；,:;!?]{0,8}(?:拒绝|否决)|\brefus(?:e|ed|ing)\b.*\b(?:reject|decline)\b', statement, re.I):
         return False
-    if re.search(r"\b(?:not|never|haven't|hasn't|didn't|don't|won't|cannot|can't)\b(?:\W+\w+){0,3}\W+(?:approve(?:d)?|agree(?:d)?|confirm(?:ed)?|review(?:ed)?|allocat(?:e|ed)|assign(?:ed)?|cancel(?:led|ed)?|abandon(?:ed)?)\b", statement, re.I):
+    if purpose!='reject' and re.search(r'(?:不|未|没|尚未|还没|并未|不能|拒绝)[^，。；,:;!?]{0,12}(?:'+verbs+r')', statement, re.I):
+        return False
+    denial = r'拒绝|不接受|不同意|不批准|\b(?:refus(?:e|ed|ing)|declin(?:e|ed|ing)|reject(?:ed|ing)?|disagree|withhold|deny|retract' + ('' if purpose=='reverse' else '|revoke') + r')\b'
+    if purpose!='reject' and re.search(denial, statement, re.I):
+        return False
+    if purpose!='reject' and re.search(r"\b(?:not|never|haven't|hasn't|didn't|don't|won't|cannot|can't)\b(?:\W+\w+){0,8}\W+(?:approve(?:d)?|approval|agree(?:d)?|confirm(?:ed)?|review(?:ed)?|accept(?:ed)?|consent|grant|authoriz(?:e|ed)|allocat(?:e|ed)|assign(?:ed)?|cancel(?:led|ed)?|abandon(?:ed)?|reject(?:ed)?|decline(?:d)?|correct(?:ed)?|amend(?:ed)?|reverse(?:d)?|void(?:ed)?|received)\b", statement, re.I):
+        return False
+    if purpose=='reject' and re.search(r"\b(?:not|never|haven't|hasn't|didn't|don't|won't|cannot|can't)\b(?:\W+\w+){0,8}\W+(?:reject(?:ed)?|decline(?:d)?)\b", statement, re.I):
         return False
     return bool(re.search(positive, statement, re.I))
 
@@ -66,6 +81,10 @@ def _transaction(db_path):
           plan_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL,
           version INTEGER NOT NULL, review_state TEXT NOT NULL,
           payload TEXT NOT NULL, inputs TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS advisor_manual_intents (
+          intent_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS advisor_income_snapshots (
+          snapshot_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS advisor_manual_reviews (
           event_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, version INTEGER NOT NULL,
           created_at TEXT NOT NULL, payload TEXT NOT NULL,
@@ -327,7 +346,8 @@ def _nav_usd(snapshot, now):
     currency = snapshot['account'].get('nav_currency')
     if currency != 'USD':
         fx = snapshot.get('fx_rates', {}).get(f'{currency}.USD', {})
-        if fx.get('status') not in {'ready', 'ok'} or fx.get('actual_data_type') != 1 or now >= timestamp(fx.get('valid_until')):
+        if (fx.get('status') not in {'ready', 'ok'} or fx.get('actual_data_type') != 1
+                or now >= timestamp(fx.get('valid_until')) or timestamp(fx.get('received_at')) > now):
             raise ValueError('NAV FX coverage is unknown')
         nav *= decimal(fx.get('rate'), 'NAV FX', minimum=decimal('.00000001'))
     return nav
@@ -606,9 +626,18 @@ def revalidate_plan(plan_id, *, execution_snapshot, policy, expected_version, db
                     comparable = lambda orders: [{k: o[k] for k in fields} for o in orders]
                     if fresh['status'] != 'ready_for_review' or comparable(fresh['orders']) != comparable(plan['orders']):
                         state, issues = 'needs_recompile', ['current quote/risk/strategy no longer produces the reviewed orders']+fresh['issues']
+        # Another observation may already have retired this binding. Replaying
+        # an older still-fresh snapshot must not report pass while _view hides
+        # its orders. Compare inside this same write transaction.
+        visible = _view(connection, plan_id, now)
+        if state in {'reviewed', 'awaiting_review'} and visible['review_state'] not in {'reviewed', 'awaiting_review'}:
+            state = visible['review_state']
+            issues.append('latest stored account/ownership evidence invalidates this reviewed binding')
+        if state == 'awaiting_review':
+            issues.append('explicit human Review is still required')
         _event(connection, row, state, now, {'execution_snapshot_id': execution_snapshot.get('snapshot_id'), 'issues': issues})
         result = _view(connection, plan_id, now)
-        result['revalidation'] = {'status': 'pass' if state in {'reviewed', 'awaiting_review'} else 'blocked', 'issues': issues}
+        result['revalidation'] = {'status': 'pass' if result['review_state']=='reviewed' and not issues else 'blocked', 'issues': issues}
         if 'fresh' in locals():
             result['revalidation']['current_risk'] = fresh.get('risk')
         return result

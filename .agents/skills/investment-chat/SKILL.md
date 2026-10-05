@@ -1,6 +1,6 @@
 ---
 name: investment-chat
-description: Analyze US stocks, ETFs, Nasdaq benchmarks and RMB investment gold with current evidence and deterministic signals; prepare adopted-rule manual trade cards, record user-reported fills and retrieve sanitized holdings. Use for investment conversations, not repository development.
+description: Analyze stocks, ETFs, Nasdaq benchmarks and RMB gold with current evidence and quantitative signals; compare income distributions, prepare adopted-strategy or user-directed manual trade cards, and record confirmed holdings, fills and cash receipts. Use for investment conversations, not repository development.
 ---
 
 # Investment advisor
@@ -17,6 +17,8 @@ stay local; default tools return necessary sanitized facts.
    for RMB gold. Identify actual holdings, pending records and adopted rules.
    A reported total account value is not available cash. Journal coverage and a
    broker observation are separate facts; a snapshot never creates journal fills.
+   Existing holdings without historical fills can use the explicit opening
+   balance path in [operation recording](references/operations.md).
 2. Collect a new `collect_market_snapshot` for the requested horizon. Registered
    ETFs retain their registry identity. Ordinary US stocks require
    `allow_us_stocks=true` and provider-confirmed common-share identity; a ticker
@@ -25,7 +27,7 @@ stay local; default tools return necessary sanitized facts.
 3. Call `analyze_market_signals` on that saved snapshot. Read signal status,
    direction, trigger/invalidation, reference price basis, counter-evidence and
    research coverage. Those levels describe completed-session research;
-   executable prices and shares come from a separate adopted-rule compiler.
+   executable prices and shares come from a separate funded compiler.
 4. Research the thesis and its strongest opposing evidence using the snapshot's
    financials, filings, news and macro records. For missing sections, say unknown
    and use the available providers or current primary sources. Newly retrieved
@@ -39,6 +41,13 @@ stay local; default tools return necessary sanitized facts.
    [manual trade cards](references/manual-trade-plans.md) and run the funded
    compiler. Report exact order figures only when that returned card permits it.
    Missing prerequisites mean a named gap and a research/no-trade answer.
+
+For an explicitly requested finite ETF budget or rebalance, read
+[one-off allocation](references/one-off-allocation.md). It preserves historical
+strategy gates while computing the user's confirmed instruction. For dividends,
+monthly income or QQQI/JEPQ comparisons, read
+[income analysis](references/income-analysis.md). Run `get_execution_readiness`
+to report independent missing requirements together before a trading-card setup.
 
 For opportunity discovery, read [research signals](references/research-signals.md)
 and call `scan_investment_opportunities`. Its explicit candidate pool is bounded;

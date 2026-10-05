@@ -13,6 +13,7 @@ from datetime import date
 from typing import Protocol, Sequence
 
 from .frame import PriceFrame
+from .sessions import COVERAGE_POLICY_VERSION
 from ..sizing import plan_orders
 
 WEIGHT_TOLERANCE = 1e-6
@@ -131,6 +132,9 @@ class Result:
     integer_shares: bool | None = None
     execution_assumptions: dict = field(default_factory=dict)
     rebalance_attempt_count: int = 0
+    # Pre-cost cash at the first traded session, not a fabricated earlier bar.
+    # None preserves the old curve-only contract of hand-built metric fixtures.
+    initial_cash: float | None = None
 
     @property
     def average_value(self) -> float:
@@ -190,16 +194,20 @@ def _execute_at_close(*, targets: dict[str, float], prices: dict[str, float],
 def run(frame: PriceFrame, *, rule: Rule, start_cash: float, cost_model: CostModel,
         cash_floor_pct: float, integer_shares: bool = True) -> Result:
     """Trade at each bar's close, paying costs on the traded notional."""
+    if not math.isfinite(start_cash) or start_cash <= 0:
+        raise ValueError("start_cash must be finite and positive")
     if not 0.0 <= cash_floor_pct < 1.0:
         raise ValueError(f"cash_floor_pct must be in [0, 1), got {cash_floor_pct}")
     result = Result(rule_name=rule.name, parameters=dict(rule.parameters), universe=frame.symbols,
                     targets=(dict(rule.targets) if getattr(rule, "targets", None) is not None else None),
                     cost_model=asdict(cost_model), cash_floor_pct=float(cash_floor_pct),
-                    integer_shares=integer_shares)
+                    integer_shares=integer_shares, initial_cash=float(start_cash))
     result.execution_assumptions = {
         "execution_price": "same_bar_close", "signal_cutoff": "includes_current_bar",
         "price_basis": frame.price_basis,
         "rebalance_cadence": "completed_nonzero_trades",
+        "metric_basis": "initial_cash_including_entry_costs",
+        "coverage_policy": COVERAGE_POLICY_VERSION,
         "cash_reserve": "fraction_of_pretrade_NAV_reserved_before_trade_costs",
         "disclosures": [
             "Signals may use the current close and trade at that close; the next executable time, gaps and fill availability are not modeled.",

@@ -72,6 +72,26 @@ def main() -> int:
     adopt_strategy.add_argument("--history-attestation-file", required=True, help="actual user's history/source/holdout review statement")
     adopt_strategy.add_argument("--confirmation-file", required=True, help="actual user's explicit adoption statement, after reviewing the validation")
     sub.add_parser("capabilities")
+    doctor = sub.add_parser('doctor', help='read-only complete prerequisite report; no connection or mutation')
+    doctor.add_argument('--execution-snapshot-id')
+    doctor.add_argument('--research-snapshot-id')
+    doctor.add_argument('--route', choices=('strategy','user_directed'), default='strategy')
+    intent = sub.add_parser('confirm-intent', help='persist the actual user one-off allocation confirmation')
+    intent.add_argument('--input', default='-')
+    directed = sub.add_parser('directed-plan', help='calculate a snapshot-bound one-off manual card')
+    directed.add_argument('intent_id')
+    opening = sub.add_parser('opening-balance', help='explicit confirmed opening holdings, not fabricated fills')
+    opening.add_argument('--input', default='-')
+    distributions=sub.add_parser('income-snapshot',help='collect and store official distribution evidence')
+    distributions.add_argument('instruments',nargs='+')
+    receipt=sub.add_parser('record-distribution',help='record actual user-reported distribution cash; no fill or deposit inferred')
+    receipt.add_argument('--input',default='-')
+    receipt.add_argument('--idempotency-key',required=True)
+    sub.add_parser('distribution-receipts',help='read sanitized actual distribution receipt history')
+    for command in ('income-report','income-compare'):
+        income=sub.add_parser(command,help='deterministic income research; no executable orders')
+        income.add_argument('snapshot_id')
+        income.add_argument('--input',default='-',help='explicit scenario/calculation JSON parameters')
     resolve = sub.add_parser("resolve", help="normalize one instrument against the shared registry")
     resolve.add_argument("--input", default="-", help="JSON with instrument_id, from a file or stdin")
     ctx = sub.add_parser("context")
@@ -166,6 +186,24 @@ def main() -> int:
                 Path(args.history_attestation_file).read_text(encoding="utf-8-sig"), db_path=args.db)
         elif args.command == "capabilities":
             result = service.capabilities(config_path=args.config_path)
+        elif args.command == 'doctor':
+            result = service.execution_readiness(db_path=args.db,config_path=args.config_path,
+                execution_snapshot_id=args.execution_snapshot_id,research_snapshot_id=args.research_snapshot_id,route=args.route)
+        elif args.command == 'confirm-intent':
+            result = service.confirm_manual_intent(**read_object(args.input),db_path=args.db)
+        elif args.command == 'directed-plan':
+            result = service.prepare_directed_plan(args.intent_id,db_path=args.db,config_path=args.config_path)
+        elif args.command == 'opening-balance':
+            result = service.confirm_opening_balance(**read_object(args.input),db_path=args.db)
+        elif args.command == 'income-snapshot':
+            result = service.collect_distributions(args.instruments,db_path=args.db)
+        elif args.command == 'record-distribution':
+            result = service.record_distribution_receipt(read_object(args.input),args.idempotency_key,db_path=args.db)
+        elif args.command == 'distribution-receipts':
+            result = service.distribution_receipts(db_path=args.db)
+        elif args.command in {'income-report','income-compare'}:
+            result = service.income_report(args.snapshot_id,read_object(args.input),
+                compare=args.command=='income-compare',db_path=args.db)
         elif args.command == "resolve":
             from copilot.instruments import normalize_instrument
             result = {"instrument_id": normalize_instrument(read_object(args.input)["instrument_id"])}
@@ -181,7 +219,9 @@ def main() -> int:
         elif args.command == "config":
             from copilot.config import as_dict, load_config
             from copilot.advisor import public_view
-            result = public_view(as_dict(load_config(args.path)))
+            if args.path and args.config_path and Path(args.path).resolve()!=Path(args.config_path).resolve():
+                raise ValueError('conflicting --path and --config-path; specify one configuration')
+            result = public_view(as_dict(load_config(args.path or args.config_path)))
         elif args.command == "declare-coverage":
             # The currency follows from the sleeve rather than being a second
             # flag. There is exactly one currency per book -- the ETF sleeve is

@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 
 PRIVATE_FIELDS = frozenset({
     "account_id", "account_number", "acctNumber", "acct_number", "account_key",
-    "holding_key", "external_trade_id", "source_message_id", "statement",
+    "holding_key", "external_trade_id", "external_payment_id", "source_message_id", "statement",
     "original_statement", "operation_ids", "execution_id", "order_key", "perm_id",
     "local_path", "path", "email_to", "confirmation", "data_attestation", "history_attestation",
 })
@@ -81,6 +81,10 @@ def operation_summary(state):
     result = {key: copy.deepcopy(state[key]) for key in
               ("operation_id", "version", "status", "missing_fields", "duplicate_candidates") if key in state}
     operation = state.get("operation", {})
+    if operation.get('record_kind')=='opening_balance':
+        result['operation']=public_view({key:copy.deepcopy(operation[key]) for key in
+            ('record_kind','execution_snapshot_id','snapshot_id','account_version','observed_as_of','positions','opening_balance_id') if key in operation})
+        return result
     result["operation"] = {key: copy.deepcopy(operation[key]) for key in
                            ("instrument_id", "side", "quantity", "unit", "price", "price_basis",
                             "currency", "occurred_at", "fees", "execution_status", "purity", "weight_grams")

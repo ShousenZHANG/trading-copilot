@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#   "mcp[cli]>=1.2.0,<2",   # 2.x removed mcp.server.fastmcp (FastMCP -> MCPServer)
+#   "mcp[cli]==1.30.0",   # Keep tested v1; v2 removed mcp.server.fastmcp.
 #   "httpx>=0.27.0",
 # ]
 # ///

@@ -495,7 +495,14 @@ def _normalize(raw, settings, symbols, moment):
                                      "reservation_basis": "open_buy_limit_orders_excludes_fees" if not unknown else "unknown",
                                      "available": net, "available_basis": "settled_cash_net_open_orders"}
         if gross is None or settled is None or unknown:
-            result["issues"].append("cash_or_reservation_unknown:" + currency)
+            # An unused foreign ledger is not USD buying power. Retain its
+            # uncertainty without blocking a fully observed USD-funded plan.
+            dependency = currency == 'USD' or any(o['currency']==currency and o['side']=='buy'
+                and o['status'] not in _TERMINAL for o in result['orders'])
+            field = 'issues' if dependency or unknown else 'warnings'
+            result.setdefault(field, []).append("cash_or_reservation_unknown:" + currency)
+        if gross is not None and Decimal(_money(gross)) < 0:
+            result['issues'].append('negative_currency_cash:' + currency)
     if "USD" not in result["cash"]:
         result["issues"].append("USD_cash_missing")
     contracts = raw.get("contracts", {})

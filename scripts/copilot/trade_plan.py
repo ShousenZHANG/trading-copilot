@@ -237,6 +237,10 @@ def compile_plan(*, execution_snapshot, research_snapshot, adoption, policy, now
     Only locally loaded, content-addressed adopted rules may supply targets.
     ``policy`` is confirmed local configuration, not a model proposal.
     """
+    if adoption.get('kind') == 'user_directed':
+        from .manual_intent import compile_directed_plan
+        return compile_directed_plan(execution_snapshot=execution_snapshot,
+            research_snapshot=research_snapshot, adoption=adoption, policy=policy, now=now)
     now = timestamp(now or datetime.now(timezone.utc), 'now')
     snapshot = execution_snapshot
     result = dict(schema_version=SCHEMA_VERSION, policy_version=POLICY_VERSION,

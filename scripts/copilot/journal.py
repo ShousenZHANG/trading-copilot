@@ -214,10 +214,8 @@ def _confirmation(statement: str, side: Any) -> bool:
 
 
 def _amendment_confirmation(statement: str, event_type: str) -> bool:
-    if re.search(r"[\"“”「」]|不要|别撤销|别修改|不修改|不撤销|如果|假如|假设|建议|\b(?:if|would|recommend|suggest|don't|not)\b", statement, re.I):
-        return False
-    pattern = r"撤销|取消.*记录|删除.*记录|重复|\b(?:reverse|revoke|duplicate|delete\s+.*record|cancel\s+.*record)\b" if event_type == "reverse" else r"更正|修正|改为|改成|写错|记错|修改|填错|应为|错了|正确|\b(?:correct|correction|amend|amendment|mistake|change)\b"
-    return bool(re.search(pattern, statement, re.I))
+    from .plan_store import _affirmation
+    return _affirmation(statement, event_type)
 
 
 _TRADE_FIELDS = (
@@ -291,23 +289,43 @@ def _states(connection: sqlite3.Connection, as_of: Any = None) -> list[dict]:
 
 
 def _portfolio_version(states: list[dict]) -> str:
-    active = [{"operation_id": state["operation_id"], "version": state["version"], "status": state["status"], "operation": {key: state["operation"].get(key) for key in _TRADE_FIELDS}} for state in states if state.get("had_execution")]
+    active = [{"operation_id": state["operation_id"], "version": state["version"], "status": state["status"],
+               "operation": (state["operation"] if state.get("had_opening_balance") else
+                             {key: state["operation"].get(key) for key in _TRADE_FIELDS})}
+              for state in states if state.get("had_execution") or state.get("had_opening_balance")]
     return _hash(sorted(active, key=lambda state: state["operation_id"]))
 
 
 def _holdings(states: list[dict]) -> list[dict]:
     buckets: dict[str, dict] = {}
-    active = [state for state in states if state["status"] == "executed"]
-    active.sort(key=lambda state: (_stamp(state["operation"]["occurred_at"]), state["first_sequence"]))
+    active = [state for state in states if state["status"] in {"executed", "opening_balance"}]
+    active.sort(key=lambda state: (_stamp(state["operation"].get("observed_as_of") if state["status"] == "opening_balance"
+                                         else state["operation"]["occurred_at"]), state["first_sequence"]))
+    reversed_openings = {state["operation"].get("account_id") for state in states
+                         if state.get("had_opening_balance") and state["status"] == "reversed"}
     with localcontext() as context:
         context.prec = 50
         for state in active:
             trade = state["operation"]
+            if state["status"] == "opening_balance":
+                for position in trade["positions"]:
+                    identity = dict(instrument_id=position["instrument_id"], account_id=trade["account_id"],
+                                    currency=position["currency"], unit="share")
+                    key = _hash(identity)
+                    bucket = buckets.setdefault(key, dict(identity, holding_key=key, quantity=Decimal(0),
+                        gross_cost_basis=None, cost_basis_including_fees=None, opening_balance_required=False,
+                        fees_unknown=True, operation_ids=[], opening_balance_recorded=True,
+                        con_id=position["con_id"], broker_average_cost=position.get("broker_average_cost")))
+                    bucket["quantity"] += Decimal(position["quantity"])
+                    bucket["operation_ids"].append(state["operation_id"])
+                continue
             identity = {key: trade.get(key) for key in ("instrument_id", "account_id", "currency", "unit")}
             if trade["instrument_id"] == "GOLD.CNY":
                 identity.update({key: trade.get(key) for key in ("merchant", "product_id", "purity", "weight_grams")})
             key = _hash(identity)
             bucket = buckets.setdefault(key, dict(identity, holding_key=key, quantity=Decimal(0), gross_cost_basis=Decimal(0), cost_basis_including_fees=Decimal(0), opening_balance_required=False, fees_unknown=False, operation_ids=[]))
+            if trade.get("account_id") in reversed_openings:
+                bucket.update(opening_balance_required=True, gross_cost_basis=None, cost_basis_including_fees=None)
             quantity, price = Decimal(trade["quantity"]), Decimal(trade["price"])
             total = price if trade["price_basis"] == "total" else quantity * price
             bucket["operation_ids"].append(state["operation_id"])
@@ -345,7 +363,7 @@ def _holdings(states: list[dict]) -> list[dict]:
             for field in ("quantity", "gross_cost_basis", "cost_basis_including_fees"):
                 if bucket[field] is not None:
                     bucket[field] = _number(bucket[field])
-            bucket["cost_method"] = "weighted_average_observed_trades"
+            bucket["cost_method"] = "unknown_opening_basis" if bucket.get("opening_balance_recorded") else "weighted_average_observed_trades"
             result.append(bucket)
     return result
 
@@ -360,6 +378,21 @@ def _rebuild_projection(connection: sqlite3.Connection) -> str:
 
 def _trade_fingerprint(operation: dict) -> dict:
     return {key: operation.get(key) for key in _TRADE_FIELDS if key not in {"external_trade_id"}}
+
+
+def _economic_trade_fingerprint(operation: dict) -> dict:
+    """A fee supplement is not evidence of a second economic execution.
+
+    External IDs still use the complete facts fingerprint: changing known fees
+    there requires a versioned correction, never silently rewriting a fill.
+    """
+    return {key: value for key, value in _trade_fingerprint(operation).items() if key != "fees"}
+
+
+def _same_broker_account(account_id: object, account_key: str) -> bool:
+    """Match a local legacy broker ID to its existing sanitized broker identity."""
+    return isinstance(account_id, str) and (account_id == account_key or
+        "acct-" + hashlib.sha256(account_id.encode()).hexdigest()[:24] == account_key)
 
 
 def record_operation(operation: dict, idempotency_key: str, *, db_path: Any = None, now: Any = None) -> dict:
@@ -396,6 +429,8 @@ def record_operation(operation: dict, idempotency_key: str, *, db_path: Any = No
                 if row is None:
                     raise KeyError("operation does not exist")
                 previous = json.loads(row["state"])
+                if previous.get("had_opening_balance"):
+                    raise ValueError("opening observations must use record_opening_balance for corrections/reversals")
                 if operation["expected_version"] != previous["version"]:
                     raise JournalConflict(f"expected version {operation['expected_version']}; current version is {previous['version']}")
                 if previous["status"] in {"reversed", "duplicate_linked"}:
@@ -406,6 +441,26 @@ def record_operation(operation: dict, idempotency_key: str, *, db_path: Any = No
                 raise ValueError("record cannot supply an existing operation_id/version")
             payload = dict(previous["operation"]) if previous else {}
             payload.update({key: value for key, value in operation.items() if key not in {"event_type", "operation_id", "expected_version"}})
+            if payload.get("record_kind") == "opening_balance":
+                raise ValueError("opening observations require the dedicated broker-bound interface")
+            opening_id = payload.get("opening_balance_id")
+            if opening_id is not None:
+                existing_fill_binding = bool(previous and previous.get("had_execution") and
+                                             previous["operation"].get("opening_balance_id") == opening_id)
+                opening = next((s for s in _states(connection) if s["operation_id"] == opening_id
+                                and s.get("had_opening_balance") and
+                                (s["status"] == "opening_balance" or existing_fill_binding)), None)
+                if opening is None:
+                    raise ValueError("opening_balance_id must reference a current opening observation")
+                account = opening["operation"]["account_id"]
+                if payload.get("account_id") is not None and not _same_broker_account(payload["account_id"], account):
+                    raise JournalConflict("trade account differs from its opening observation")
+                payload["account_id"] = account
+            elif payload.get("account_id") is not None:
+                for opening in _states(connection):
+                    if opening["status"] == "opening_balance" and _same_broker_account(payload["account_id"], opening["operation"]["account_id"]):
+                        payload["account_id"] = opening["operation"]["account_id"]
+                        break
             # Every new event must retain the current, actual message evidence.
             if not operation.get("statement") or not operation.get("source_message_id"):
                 raise ValueError("each event requires statement and source_message_id")
@@ -419,6 +474,13 @@ def record_operation(operation: dict, idempotency_key: str, *, db_path: Any = No
                 # or correcting it need not repeat 'I bought' in every sentence.
                 confirmed_before = bool(previous and (previous.get("had_execution") or ("execution_confirmation" not in previous.get("missing_fields", []) and previous["operation"]["execution_status"] == "executed")))
                 payload, status, missing = _normalize(payload, recorded_at, confirmation=not confirmed_before)
+                if status == "executed" and payload.get("instrument_id") != "GOLD.CNY":
+                    openings = [s for s in _states(connection) if s["status"] == "opening_balance"]
+                    if openings and payload.get("account_id") is None:
+                        raise JournalConflict("select opening_balance_id before recording an unbound-account fill")
+                    for opening in openings:
+                        if opening["operation"]["account_id"] == payload.get("account_id") and _clock(payload["occurred_at"]) <= _clock(opening["operation"]["observed_as_of"]):
+                            raise JournalConflict("fill predates or overlaps the opening observation; it is already included in that balance")
                 if previous and previous.get("had_execution") and status != "executed":
                     raise JournalConflict("a confirmed trade must remain complete; use reverse to cancel its projection")
             operation_id = previous["operation_id"] if previous else "op_" + uuid.uuid4().hex
@@ -444,7 +506,7 @@ def record_operation(operation: dict, idempotency_key: str, *, db_path: Any = No
                     other = candidate["operation"]
                     if ext_id and other.get("external_trade_id") and ext_id != other["external_trade_id"]:
                         continue
-                    if _trade_fingerprint(other) == _trade_fingerprint(payload):
+                    if _economic_trade_fingerprint(other) == _economic_trade_fingerprint(payload):
                         candidates.append(candidate["operation_id"])
                 if candidates:
                     statement = payload["statement"]
@@ -460,6 +522,15 @@ def record_operation(operation: dict, idempotency_key: str, *, db_path: Any = No
                 statement = operation["statement"]
                 if not re.search(r"重复|同一笔|同一条|\b(?:duplicate|same\s+(?:trade|fill|operation))\b", statement, re.I) or re.search(r"不是重复|不是同一|不要|如果|假设|建议|\b(?:not|if|would|suggest|recommend)\b", statement, re.I):
                     raise ValueError("duplicate linking requires the user's explicit same-trade confirmation")
+                canonical = next((s for s in _states(connection) if s["operation_id"] == duplicate_of), None)
+                if canonical is None or canonical["status"] != "executed":
+                    raise JournalConflict("duplicate target must remain a current executed fill")
+                # A later report may supply the execution ID before the canonical
+                # fill does. Keep events immutable, but bind the unique external
+                # identity to the explicitly selected canonical operation.
+                if ext_id and account:
+                    connection.execute("UPDATE external_trades SET operation_id=? WHERE account_id=? AND external_trade_id=? AND operation_id=?",
+                                       (duplicate_of, account, ext_id, operation_id))
                 status, missing = "duplicate_linked", []
             first_sequence = previous["first_sequence"] if previous else connection.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM journal_events").fetchone()[0]
             state = {"operation_id": operation_id, "version": version, "status": status, "missing_fields": missing, "operation": payload, "duplicate_candidates": candidates, "had_execution": status == "executed" or bool(previous and previous.get("had_execution")), "first_sequence": first_sequence, "recorded_at": recorded_at}
@@ -574,7 +645,9 @@ def get_context(instrument_ids: Any = None, as_of: Any = None, *, sleeve: str = 
             portfolio_version = _portfolio_version(states)
             holdings = [item for item in _holdings(states) if not instruments or item["instrument_id"] in instruments]
             sleeve_holdings = [item for item in holdings if _sleeve_of(item) == sleeve]
-            matching = [state for state in states if not instruments or state["operation"].get("instrument_id") in instruments]
+            matching = [state for state in states if not instruments or state["operation"].get("instrument_id") in instruments
+                        or (state.get("had_opening_balance") and any(p["instrument_id"] in instruments
+                            for p in state["operation"].get("positions", [])))]
             # Newest first, and the LIMIT is applied AFTER the instrument filter:
             # limiting in SQL first would return the newest rows overall and then
             # filter them away, so asking for one symbol could come back empty

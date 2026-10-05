@@ -24,6 +24,7 @@ from copilot.backtest import frame as frame_mod
 from copilot.backtest import history
 from copilot.backtest import metrics
 from copilot.backtest import rules
+from copilot.backtest import sessions
 from copilot.backtest import universe
 
 
@@ -395,6 +396,22 @@ class Metrics(unittest.TestCase):
     def curve(self, values, start=date(2020, 1, 2)):
         return [(start + timedelta(days=i), v) for i, v in enumerate(values)]
 
+    def test_primary_report_includes_initial_entry_costs_without_inventing_a_date(self):
+        symbols = ("QQQ", "SPY", "IWM", "VUG")
+        frame = frame_mod.build(dates=(date(2000, 1, 3), date(2023, 1, 3)),
+                                symbols=symbols, closes=((100.,) * 4,) * 2)
+        result = engine.run(frame, rule=rules.FixedWeightBands({symbol: .25 for symbol in symbols}),
+                            start_cash=10000., cost_model=engine.CostModel(), cash_floor_pct=.15)
+        report = admission.assess(result, sessions_by_year=admission.STRESS_SESSIONS)
+        self.assertAlmostEqual(result.total_costs, 4.84)
+        self.assertAlmostEqual(result.curve[-1][1], 9995.16)
+        self.assertEqual(report.metrics["cagr"], -.000021)
+        self.assertEqual(report.metrics["max_drawdown"], .000484)
+        self.assertEqual(result.initial_cash, 10000.)
+        self.assertEqual([point[0] for point in result.curve], list(frame.dates))
+        returns = metrics.daily_returns(result.curve, initial_value=result.initial_cash)
+        self.assertAlmostEqual(returns[0], -.000484)
+
     def test_max_drawdown_finds_peak_trough_and_duration(self):
         dd = metrics.max_drawdown(self.curve([100, 120, 60, 80, 130]))
         self.assertAlmostEqual(dd.depth, 0.5)
@@ -421,10 +438,16 @@ class Metrics(unittest.TestCase):
         self.assertAlmostEqual(dd.depth, 0.5)
         self.assertIsNone(dd.recovery_date)
         self.assertEqual(dd.trough_date, date(2020, 1, 5))
+        self.assertEqual(dd.peak_date, date(2020, 1, 4))
+        self.assertEqual(dd.duration_days, 1)
 
     def test_flat_curve_has_zero_drawdown(self):
         dd = metrics.max_drawdown(self.curve([100, 100, 100]))
         self.assertEqual(dd.depth, 0.0)
+        self.assertEqual(dd.duration_days, 0)
+        self.assertIsNone(dd.peak_date)
+        self.assertIsNone(dd.trough_date)
+        self.assertIsNone(dd.recovery_date)
 
     def test_cagr_matches_a_hand_computed_doubling(self):
         curve = [(date(2010, 1, 4), 100.0), (date(2020, 1, 3), 200.0)]
@@ -1058,9 +1081,9 @@ class RuleFamilies(unittest.TestCase):
 class AdmissionGate(unittest.TestCase):
     def passing_result(self):
         r = engine.Result(rule_name="demo", parameters={"a": 1.0, "b": 2.0})
-        start, value = date(2005, 1, 3), 100.0
-        for i in range(21 * 252):
-            when = start + timedelta(days=int(i * 365.25 / 252))
+        value = 100.0
+        dates = sessions.sessions_between("etf", date(2005, 1, 1), date(2026, 10, 2))[:21 * 252]
+        for when in dates:
             value *= 1.0003 if when.year not in (2008, 2020, 2022) else 0.9995
             r.curve.append((when, value))
         r.traded_notional, r.total_costs, r.rebalance_count = 5000.0, 50.0, 21
@@ -1069,6 +1092,69 @@ class AdmissionGate(unittest.TestCase):
     def test_a_long_result_covering_all_three_windows_passes(self):
         report = admission.assess(self.passing_result(), sessions_by_year=admission.STRESS_SESSIONS)
         self.assertTrue(report.admitted, report.failures)
+
+    def test_an_all_cash_zero_fill_history_is_not_adoptable(self):
+        result = self.passing_result()
+        result.rebalance_count = 0
+        result.total_costs = 0.0
+        result.traded_notional = 0.0
+        report = admission.assess(result, sessions_by_year=admission.STRESS_SESSIONS)
+        self.assertFalse(report.admitted)
+        self.assertTrue(any("nonzero trade" in failure for failure in report.failures), report.failures)
+
+    def test_missing_nonstress_years_cannot_be_counted_as_full_history(self):
+        result = self.passing_result()
+        endpoints = {result.curve[0][0], result.curve[-1][0]}
+        result.curve = [(when, value) for when, value in result.curve
+                        if when.year in {2008, 2020, 2022} or when in endpoints]
+        report = admission.assess(result, sessions_by_year=admission.STRESS_SESSIONS)
+        self.assertFalse(report.admitted)
+        self.assertTrue(any("coverage" in failure for failure in report.failures), report.failures)
+
+    def test_explicit_stress_waiver_is_visible_in_full_coverage(self):
+        result = self.passing_result()
+        result.curve = [(when, value) for when, value in result.curve if when.year != 2008]
+        report = admission.assess(result, sessions_by_year=admission.STRESS_SESSIONS,
+                                  waivers=bxn.Q29_WAIVER)
+        self.assertTrue(report.admitted, report.failures)
+        self.assertEqual(report.metrics["session_coverage"]["excluded_years"], [2008])
+        self.assertTrue(any("2008" in failure for failure in report.failures))
+
+    def test_missing_oos_month_withholds_admission_and_names_its_coverage(self):
+        result = self.passing_result()
+        result.curve = [(when, value) for when, value in result.curve
+                        if (when.year, when.month) != (2021, 5)]
+        report = admission.assess(result, sessions_by_year=admission.STRESS_SESSIONS)
+        self.assertFalse(report.admitted)
+        coverage = report.metrics["out_of_sample"]["session_coverage"]
+        self.assertEqual(coverage["status"], "fail")
+        self.assertTrue(any("2021-05" in failure for failure in coverage["issues"]))
+
+    def test_calendar_range_is_unknown_and_cannot_be_waived_into_adoption(self):
+        result = self.passing_result()
+        result.curve.append((date(2027, 1, 4), result.curve[-1][1]))
+        report = admission.assess(result, sessions_by_year=admission.STRESS_SESSIONS,
+                                  waivers={"span": "explicit historical exception"})
+        self.assertFalse(report.admitted)
+        self.assertEqual(report.metrics["session_coverage"]["status"], "unknown")
+
+    def test_a_missing_nonstress_session_is_not_hidden_by_an_annual_ratio(self):
+        result = self.passing_result()
+        result.curve = [(when, value) for when, value in result.curve if when != date(2015, 2, 2)]
+        report = admission.assess(result, sessions_by_year=admission.STRESS_SESSIONS)
+        coverage = report.metrics["session_coverage"]
+        self.assertGreaterEqual(coverage["years"]["2015"]["ratio"], .99)
+        self.assertFalse(report.admitted)
+        self.assertEqual(coverage["missing_count"], 1)
+        self.assertTrue(any("2015-02 monthly" in failure for failure in coverage["issues"]))
+
+    def test_frozen_calendar_contains_real_exceptional_exchange_closures(self):
+        self.assertEqual(sessions.sessions_between("etf", date(2001, 9, 10), date(2001, 9, 18)),
+                         (date(2001, 9, 10), date(2001, 9, 17), date(2001, 9, 18)))
+        self.assertEqual(sessions.sessions_between("etf", date(2012, 10, 29), date(2012, 10, 31)),
+                         (date(2012, 10, 31),))
+        self.assertEqual(sessions.sessions_between("etf", date(2025, 1, 9), date(2025, 1, 10)),
+                         (date(2025, 1, 10),))
 
     def test_a_short_backtest_fails_rule_one(self):
         r = engine.Result(rule_name="short", parameters={})
@@ -1079,7 +1165,9 @@ class AdmissionGate(unittest.TestCase):
 
     def test_a_missing_stress_window_fails(self):
         r = self.passing_result()
-        r.curve = [(w, v) for w, v in r.curve if w.year != 2008]
+        # The real proxy begins after the GFC; it does not have an interior
+        # outage that a calendar waiver could hide.
+        r.curve = [(w, v) for w, v in r.curve if w >= date(2009, 9, 18)]
         report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS)
         self.assertFalse(report.admitted)
         self.assertTrue(any("2008" in f for f in report.failures))
@@ -1125,7 +1213,7 @@ class AdmissionGate(unittest.TestCase):
 
     def test_a_waiver_records_its_reason_and_does_not_hide_the_failure(self):
         r = self.passing_result()
-        r.curve = [(w, v) for w, v in r.curve if w.year != 2008]
+        r.curve = [(w, v) for w, v in r.curve if w >= date(2009, 9, 18)]
         report = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS,
                                   waivers={"stress_2008": "ADR-0006 clause 5: BXN starts 2009-09-18"})
         self.assertTrue(report.admitted)
@@ -1222,7 +1310,8 @@ class AdmissionGate(unittest.TestCase):
         long_segment.curve = base + [(date(2019, 1, 6), 150.0), (date(2022, 1, 6), 180.0)]
         long_segment.total_costs, long_segment.rebalance_count = 10.0, 1
         report2 = admission.assess(long_segment, sessions_by_year={})
-        self.assertTrue(report2.admitted, report2.failures)
+        self.assertFalse(any("segment is" in failure for failure in report2.failures))
+        self.assertFalse(report2.admitted, "a sparse three-year endpoint pair is not complete OOS evidence")
 
     def test_a_blank_waiver_reason_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "reason"):
@@ -1260,7 +1349,7 @@ class AdmissionGate(unittest.TestCase):
         # flips `admitted`. Prove both halves for bxn.Q29_WAIVER specifically, not
         # just that admitted becomes True.
         r = self.passing_result()
-        r.curve = [(w, v) for w, v in r.curve if w.year != 2008]
+        r.curve = [(w, v) for w, v in r.curve if w >= date(2009, 9, 18)]
         without_waiver = admission.assess(r, sessions_by_year=admission.STRESS_SESSIONS)
         self.assertFalse(without_waiver.admitted)
         self.assertTrue(any("2008" in f for f in without_waiver.failures))
@@ -1603,18 +1692,16 @@ class CliContract(unittest.TestCase):
 def gold_frame(*, start=date(2016, 12, 19), bars=2360, start_price=262.76, step=0.29):
     """A deterministic stand-in for the vendored SGE series.
 
-    Weekday-spaced and monotonically rising: the point is calendar coverage and
+    Recorded SGE sessions and artificial rising prices: calendar coverage and
     plumbing, not a realistic price path. A test that needs real prices should
     read goldhistory.load() instead.
     """
     from copilot.backtest.frame import build
-    dates, closes, day, i = [], [], start, 0
-    while len(dates) < bars:
-        if day.weekday() < 5:
-            dates.append(day)
-            closes.append([start_price + i * step])
-            i += 1
-        day += timedelta(days=1)
+    end = date.fromisoformat(sessions.calendar_details("gold")["range_end"])
+    dates = sessions.sessions_between("gold", start, end)[:bars]
+    if len(dates) != bars:
+        raise ValueError("fixture requested dates outside the frozen SGE reference")
+    closes = [[start_price + i * step] for i in range(len(dates))]
     return build(dates=dates, symbols=["GOLD.CNY"], closes=closes)
 
 
