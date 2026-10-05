@@ -36,6 +36,7 @@ _PRIVATE_PREFIXES = ("data/state/", "data/runs/", "data/audit/", "data/decisions
 _PRIVATE_NAMES = frozenset((".env", ".credentials.json", "settings.local.json", "positions.md",
                             "trading_memory.md", "watchlist.local.md", "privacy-denylist.json"))
 _PRIVATE_EXACT = frozenset(("config/user.toml", "docs/strategy.md", "docs/strategy-checklist.md"))
+_WINDOWS_DEVICE = re.compile(r"(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)", re.I)
 
 
 def _private_path(path: str) -> bool:
@@ -49,6 +50,13 @@ def _private_path(path: str) -> bool:
 
 def _normal_path(path: str) -> str | None:
     normalized = path.replace("\\", "/")
+    # Reject aliases rather than silently normalizing them: Windows extraction
+    # trims trailing dots/spaces and treats device names/ADS specially. Inspect
+    # raw components before PurePosixPath can collapse a single-dot component.
+    raw_parts = normalized.split("/")
+    if any(component.endswith((".", " ")) or _WINDOWS_DEVICE.match(component)
+           or re.search(r'[<>"|?*\x00-\x1f]', component) for component in raw_parts):
+        return None
     parts = PurePosixPath(normalized).parts
     if not parts or normalized.startswith("/") or ":" in normalized or ".." in parts:
         return None
@@ -56,9 +64,16 @@ def _normal_path(path: str) -> str | None:
 
 
 def _safe_path(path: str, literals: tuple[str, ...]) -> str:
+    # casefold may expand characters (e.g. one character into two), so a
+    # regex span replacement with re.I is not equivalent to the match gate.
+    # Hide the entire location whenever the same gate matches a private value.
+    if any(literal.casefold() in path.casefold() for literal in literals):
+        return "[private-path]"
     safe = _HOME.sub("[user-home]", path)
     safe = _ACCOUNT.sub("[account-id]", safe)
     safe = _EMAIL.sub("[email]", safe)
+    safe = _PHONE.sub("[phone]", safe)
+    safe = _ADDRESS.sub("[residential-address]", safe)
     for pattern in _CREDENTIALS.values():
         safe = pattern.sub("[credential]", safe)
     for literal in literals:
@@ -236,14 +251,16 @@ def scan_archive(archive: Path, *, denylist_path: Path | None = None) -> dict:
         with zipfile.ZipFile(archive) as bundle:
             total = 0
             seen = set()
+            if bundle.comment:
+                _add(report, "[archive-comment]", "archive_metadata_comment")
             for member in bundle.infolist():
-                if member.is_dir():
-                    continue
                 path = _normal_path(member.filename)
                 if path is None:
                     _add(report, "[unsafe-path]", "unsafe_archive_path")
                     continue
                 _location_findings(report, path, literals)
+                if member.comment:
+                    _add(report, path, "archive_metadata_comment", literals)
                 # Releases have one trading-copilot[-version] root; support bare
                 # files as well so dropping the root cannot bypass path guards.
                 parts = path.split("/", 1)
@@ -252,11 +269,13 @@ def scan_archive(archive: Path, *, denylist_path: Path | None = None) -> dict:
                     _add(report, path, "duplicate_archive_path", literals)
                     continue
                 seen.add(relative.casefold())
-                if _private_path(relative):
+                if _private_path(relative + "/" if member.is_dir() else relative):
                     _add(report, path, "private_file", literals)
                     continue
                 if (member.external_attr >> 16) & 0o170000 == 0o120000:
                     _add(report, path, "symlink_or_external_path", literals)
+                    continue
+                if member.is_dir():
                     continue
                 total += member.file_size
                 if member.file_size > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:

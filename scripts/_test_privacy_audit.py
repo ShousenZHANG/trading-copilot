@@ -97,7 +97,7 @@ class PrivacyAuditTests(unittest.TestCase):
                            denylist=dict(schema_version=1, literals=[literal]))
         self.assertEqual(report["status"], "fail")
         self.assertNotIn(literal, json.dumps(report))
-        self.assertTrue(all("[private-literal]" in finding["path"] for finding in report["findings"]))
+        self.assertTrue(all(finding["path"] == "[private-path]" for finding in report["findings"]))
 
     def test_json_unicode_escaping_does_not_hide_an_email(self):
         contact = "private.person" + "@" + "contact-domain.org"
@@ -249,6 +249,91 @@ class PrivacyAuditTests(unittest.TestCase):
         report = self.tree({"README.md": literal}, denylist=dict(schema_version=1, literals=[literal]))
         self.assertEqual(report["status"], "fail")
         self.assertEqual(report["findings"], [dict(path="README.md", line=1, category="private_denylist_match")])
+
+    def test_phone_and_address_filenames_never_echo_the_values(self):
+        number = "+61" + " 412 345 678"
+        address = "17" + " Private Avenue"
+        for name, sensitive in (("docs/phone=" + number + ".txt", number),
+                                ("docs/home_" + "address=" + address + ".txt", address),
+                                ("data/state/phone=" + number + ".sqlite", number),
+                                ("data/state/home_" + "address=" + address + ".sqlite", address)):
+            with self.subTest(kind="private" if name.startswith("data/") else "public"):
+                report = self.archive({"trading-copilot/" + name: "public fixture"})
+                self.assertEqual(report["status"], "fail")
+                self.assertNotIn(sensitive, json.dumps(report))
+                self.assertTrue(all("[" in finding["path"] for finding in report["findings"]))
+
+    def test_windows_trailing_dot_or_space_zip_aliases_are_rejected(self):
+        from package_release import REQUIRED_ARTIFACT_FILES, _audit_zip
+        for name in ("config/user.toml.", "config/user.toml ", "config./user.toml",
+                     "data/state /journal.json", "data/state/journal.sqlite. "):
+            with self.subTest(path=name), tempfile.TemporaryDirectory() as directory:
+                archive = Path(directory) / "fixture.zip"
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    for required in REQUIRED_ARTIFACT_FILES:
+                        bundle.writestr("trading-copilot/" + required,
+                                        "{}" if required.endswith(".json") else "")
+                    bundle.writestr("trading-copilot/" + name, "public fixture")
+                report = scan_archive(archive)
+                self.assertTrue(any(finding["category"] == "unsafe_archive_path"
+                                    for finding in report["findings"]))
+                self.assertTrue(any("unsafe_archive_path" in problem for problem in _audit_zip(archive)))
+
+    def test_windows_device_names_and_ads_paths_fail_before_reading(self):
+        for name in ("docs/CON.txt", "docs/nul", "docs/COM1.json", "docs/lpt9.txt",
+                     "docs/COM¹.txt", "docs/CONOUT$", "docs/public.md:private", "docs/./README.md",
+                     "docs/directory. /", "docs/NUL/"):
+            with self.subTest(path=name):
+                report = self.archive({"trading-copilot/" + name: "public fixture"})
+                self.assertEqual(report["findings"][0]["category"], "unsafe_archive_path")
+                self.assertEqual(report["text_files_scanned"], 0)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows archive extraction alias contract")
+    def test_actual_windows_extraction_trims_the_rejected_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "fixture.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("trading-copilot/config/user.toml.", "synthetic fixture")
+            self.assertEqual(scan_archive(archive)["findings"][0]["category"], "unsafe_archive_path")
+            with zipfile.ZipFile(archive) as bundle:
+                # Demonstrate the OS-specific alias only inside this temp root;
+                # production scanners reject it before extraction.
+                bundle.extractall(root / "isolated-extraction")
+            self.assertTrue((root / "isolated-extraction/trading-copilot/config/user.toml").is_file())
+
+    def test_archive_and_member_comments_are_rejected_without_echo(self):
+        from package_release import REQUIRED_ARTIFACT_FILES, _audit_zip
+        contact = "private.person" + "@" + "contact-domain.org"
+        for archive_comment in (True, False):
+            with self.subTest(archive_comment=archive_comment), tempfile.TemporaryDirectory() as directory:
+                archive = Path(directory) / "fixture.zip"
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    for name in REQUIRED_ARTIFACT_FILES:
+                        bundle.writestr("trading-copilot/" + name, "{}" if name.endswith(".json") else "")
+                    if archive_comment:
+                        bundle.comment = contact.encode("utf-8")
+                    else:
+                        member = zipfile.ZipInfo("trading-copilot/docs/public.md")
+                        member.comment = contact.encode("utf-8")
+                        bundle.writestr(member, "public")
+                report = scan_archive(archive)
+                self.assertEqual(report["status"], "fail")
+                self.assertTrue(any(finding["category"] == "archive_metadata_comment"
+                                    for finding in report["findings"]))
+                self.assertNotIn(contact, json.dumps(report))
+                problems = _audit_zip(archive)
+                self.assertTrue(any("archive_metadata_comment" in problem for problem in problems))
+                self.assertNotIn(contact, json.dumps(problems))
+
+    def test_unicode_casefold_denylist_match_hides_the_whole_path(self):
+        literal = "STRASSE-user"
+        report = self.tree({"docs/straße-user.md": "public"},
+                           denylist=dict(schema_version=1, literals=[literal]))
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(report["findings"], [dict(path="[private-path]", line=None,
+                                                  category="private_denylist_match")])
+        self.assertNotIn("straße", json.dumps(report, ensure_ascii=False))
 
 
 if __name__ == "__main__":
