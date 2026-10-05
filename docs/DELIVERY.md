@@ -1,4 +1,4 @@
-# 0.6.0 delivery and acceptance
+# Delivery and acceptance
 
 This release extends the manual advisor workflow. It does not place orders,
 adopt a personal strategy, change private risk preferences or certify returns.
@@ -57,6 +57,10 @@ same source and compare SHA-256; checkout timestamps must not change the bytes.
 GitHub release assets contain the ZIP and its checksum. Tags identify the exact
 commit. No `.env`, personal config, state, raw broker observations or local audit
 outputs belong in Git or the release package.
+
+Content privacy checks also run on tracked files and on the actual archive.
+Use the optional private denylist for instance-specific literals, and review
+research prose separately. See [publication privacy](PUBLICATION_PRIVACY.md).
 
 ## Verification and remaining live evidence
 

@@ -76,6 +76,10 @@ and constrained income comparisons. Research targets are not executable orders.
 Run `python scripts/copilot_runtime.py cli doctor` for prerequisite gaps in the
 selected local runtime (including the optional IBKR SDK).
 See [workflow and release acceptance](docs/DELIVERY.md) for commands and limits.
+
+Version 0.6.1 adds content privacy gates for tracked code and release archives.
+See [publication privacy](docs/PUBLICATION_PRIVACY.md) for private instance data,
+synthetic examples and historical cleanup requirements.
 Legacy adoption schema 4 requires recomputation with initial-cost and continuous
 calendar coverage checks; older records remain readable but cannot fund new cards.
 

@@ -1,11 +1,10 @@
 {
   "name": "trading-copilot",
   "displayName": "Trading Copilot",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Rule-driven long-term ETF and Chinese gold accumulation: verified free-data snapshots, backtested rules the user adopts, deterministic orders, local journal. No return is promised.",
   "author": {
-    "name": "Trading Copilot contributors",
-    "email": "contributors@example.invalid"
+    "name": "Trading Copilot contributors"
   },
   "license": "MIT",
   "keywords": [

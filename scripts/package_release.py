@@ -33,6 +33,7 @@ USAGE
     python scripts/package_release.py --version 0.2.0
     python scripts/package_release.py --stamp 2026-06-01   # date suffix
     python scripts/package_release.py --self-test          # audit unit tests
+    python scripts/package_release.py --privacy-denylist <local-private-json>
 
 Output: dist/trading-copilot-<version>.zip
 """
@@ -101,6 +102,7 @@ INCLUDE_PATHS = [
 # Files a plugin-directory listing (and a first-run user) expects to find.
 # The build fails if any of these are absent from the finished zip.
 REQUIRED_ARTIFACT_FILES = [
+    "scripts/privacy_audit.py",
     "scripts/copilot_runtime.py",
     "scripts/mcp_env.py",
     "scripts/self_tests.py",
@@ -253,9 +255,12 @@ def _forbidden_archive_name(name: str) -> bool:
     return False
 
 
-def _audit_zip(out: Path) -> list[str]:
+def _audit_zip(out: Path, *, privacy_denylist: Path | None = None) -> list[str]:
     """Post-build verification: no secrets, no personal state, listing complete."""
-    problems: list[str] = []
+    from privacy_audit import scan_archive, sanitize_message
+    privacy = scan_archive(out, denylist_path=privacy_denylist)
+    problems = [f"{finding['path']}:{finding['line'] or '-'}: privacy {finding['category']}"
+                for finding in privacy["findings"]]
     with zipfile.ZipFile(out) as zf:
         names = zf.namelist()
         for name in names:
@@ -272,7 +277,7 @@ def _audit_zip(out: Path) -> list[str]:
         for required in REQUIRED_ARTIFACT_FILES:
             if required not in present:
                 problems.append(f"missing required listing file: {required}")
-    return problems
+    return [sanitize_message(problem, denylist_path=privacy_denylist) for problem in problems]
 
 
 def plugin_version() -> str:
@@ -285,12 +290,26 @@ def plugin_version() -> str:
     return "0.0.0"
 
 
-def build(version: str, stamp: str | None) -> Path:
+def build(version: str, stamp: str | None, *, privacy_denylist: Path | None = None) -> Path:
+    from privacy_audit import scan_archive, scan_tree
     from sync_runtimes import generated_files
     drift = [str(p.relative_to(ROOT)) for p, content in generated_files().items()
              if not p.exists() or p.read_text(encoding="utf-8") != content]
     if drift:
         raise ValueError("runtime drift before packaging; run scripts/sync_runtimes.py: " + ", ".join(drift))
+    selected = []
+    for included in INCLUDE_PATHS:
+        base = ROOT / included
+        if base.exists():
+            for source in _iter_files(base):
+                relative = source.relative_to(ROOT).as_posix()
+                if not _excluded(relative) and not _forbidden_archive_name("trading-copilot/" + relative):
+                    selected.append(relative)
+    privacy = scan_tree(ROOT, paths=selected, denylist_path=privacy_denylist)
+    if privacy["status"] != "pass":
+        locations = [f"{finding['path']}:{finding['line'] or '-'}: {finding['category']}"
+                     for finding in privacy["findings"]]
+        raise ValueError("privacy audit before packaging failed: " + "; ".join(locations))
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
     suffix = f"-{stamp}" if stamp else ""
@@ -330,6 +349,14 @@ def build(version: str, stamp: str | None) -> Path:
                 zf.writestr(info, f.read_bytes(), compresslevel=9)
                 added += 1
 
+    # Audit the bytes actually written too: do not trust the earlier worktree
+    # scan if a selected file changes during the build.
+    written = scan_archive(out, denylist_path=privacy_denylist)
+    if written["status"] != "pass":
+        out.unlink(missing_ok=True)
+        locations = [f"{finding['path']}:{finding['line'] or '-'}: {finding['category']}"
+                     for finding in written["findings"]]
+        raise ValueError("privacy audit of packaged bytes failed: " + "; ".join(locations))
     print(f"Built {out.relative_to(ROOT)}  ({added} files, {skipped} skipped)")
     return out
 
@@ -458,18 +485,23 @@ def main() -> int:
     ap.add_argument("--version", default=None, help="override version (default: from plugin.json)")
     ap.add_argument("--stamp", default=None, help="optional date suffix, e.g. 2026-06-01")
     ap.add_argument("--self-test", action="store_true", help="run built-in audit unit tests")
+    ap.add_argument("--privacy-denylist", type=Path, help="explicit private exact-match privacy JSON")
     args = ap.parse_args()
 
     if args.self_test:
         return _self_test()
 
     version = args.version or plugin_version()
-    out = build(version, args.stamp)
+    try:
+        out = build(version, args.stamp, privacy_denylist=args.privacy_denylist)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
     # Post-build verification. This is the security control the module docstring
     # and the README advertise: no secrets, no personal state, no missing
     # required file. A non-empty problem list fails the release.
-    problems = _audit_zip(out)
+    problems = _audit_zip(out, privacy_denylist=args.privacy_denylist)
     if problems:
         print("ERROR: release audit failed:", file=sys.stderr)
         for p in problems:

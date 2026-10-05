@@ -449,6 +449,17 @@ def check_private_state_not_tracked() -> None:
         err(f"private state is tracked by git: {tracked}")
 
 
+def check_public_content_privacy() -> None:
+    from privacy_audit import scan_tree
+
+    report = scan_tree(ROOT)
+    for finding in report.get("findings", []):
+        err(f"privacy: {finding['path']}:{finding.get('line', 0)} "
+            f"[{finding['category']}]")
+    if report.get("status") != "pass" and not report.get("findings"):
+        err("public content privacy scan could not complete")
+
+
 def main() -> int:
     check_plugin_manifest(ROOT / ".claude-plugin" / "plugin.json")
     check_json(ROOT / ".mcp.json")
@@ -460,6 +471,7 @@ def main() -> int:
     check_docs()
     check_workflows()
     check_private_state_not_tracked()
+    check_public_content_privacy()
 
     for warning in warnings:
         print(f"warning: {warning}", file=sys.stderr)

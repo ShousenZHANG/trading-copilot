@@ -66,6 +66,9 @@ jobs:
       - name: Repo health check
         run: python scripts/check.py
 
+      - name: Public source content privacy
+        run: python scripts/privacy_audit.py
+
       - name: Shared core behavioral contracts
         run: python -m unittest discover -s scripts -p '_test_*.py'
 

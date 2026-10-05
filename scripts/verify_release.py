@@ -11,11 +11,11 @@ import zipfile
 from pathlib import Path
 
 
-def verify(archive):
+def verify(archive, *, privacy_denylist=None):
     from copilot.service import KEY_NAMES
     from package_release import _audit_zip
     # Use the same archive leak/required-artifact audit before extracting.
-    problems=_audit_zip(archive)
+    problems=_audit_zip(archive, privacy_denylist=privacy_denylist)
     if problems:
         raise ValueError('; '.join(problems))
     with tempfile.TemporaryDirectory(prefix='copilot-clean-release-') as directory:
@@ -53,8 +53,9 @@ def main():
     from package_release import ROOT, plugin_version
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('archive',nargs='?',type=Path,default=ROOT/'dist'/f'trading-copilot-{plugin_version()}.zip')
+    parser.add_argument('--privacy-denylist',type=Path,help='explicit private exact-match privacy JSON')
     args=parser.parse_args()
-    print(json.dumps(verify(args.archive),ensure_ascii=False))
+    print(json.dumps(verify(args.archive,privacy_denylist=args.privacy_denylist),ensure_ascii=False))
     return 0
 
 
