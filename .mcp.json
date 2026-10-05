@@ -28,7 +28,8 @@
         "--no-project",
         "--quiet",
         "--script",
-        "mcps/copilot_mcp.py"
+        "scripts/copilot_runtime.py",
+        "mcp"
       ]
     }
   }

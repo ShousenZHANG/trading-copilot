@@ -101,6 +101,7 @@ INCLUDE_PATHS = [
 # Files a plugin-directory listing (and a first-run user) expects to find.
 # The build fails if any of these are absent from the finished zip.
 REQUIRED_ARTIFACT_FILES = [
+    "scripts/copilot_runtime.py",
     "scripts/mcp_env.py",
     "scripts/self_tests.py",
     "scripts/copilot/backtest/execution_sensitivity.py",

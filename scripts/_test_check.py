@@ -2,6 +2,7 @@
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -141,6 +142,19 @@ class SelfTestListContracts(unittest.TestCase):
 
 
 class ActiveDocumentationContracts(unittest.TestCase):
+    def test_missing_mcp_launcher_is_a_missing_shared_runtime_component(self):
+        import check
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in (".codex-plugin/plugin.json", "mcps/copilot_mcp.py", "scripts/copilot/service.py"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("", encoding="utf-8")
+            with (patch.object(check, "ROOT", root), patch.object(check, "errors", []),
+                  patch("sync_runtimes.generated_files", return_value={})):
+                check.check_skill_mirror()
+                self.assertIn("missing shared runtime component: scripts/copilot_runtime.py", check.errors)
+
     def test_missing_script_in_a_fenced_recipe_is_reported(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(missing_local_references("```sh\npython scripts/prices.py --help\n```",

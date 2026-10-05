@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -37,6 +38,18 @@ MAX_ACCOUNT_INSTRUMENTS = 64
 
 class BrokerError(Exception):
     """A fixed public diagnostic, never an upstream message or credential."""
+
+
+def _silence_sdk_logs():
+    # Official SDK INFO callbacks serialize raw account identifiers and payloads.
+    # Keep them out of MCP stderr and inherited application logging handlers.
+    parent = logging.getLogger("ibapi")
+    parent.setLevel(logging.CRITICAL + 1)
+    parent.propagate = False
+    parent.handlers[:] = [logging.NullHandler()]
+    for name, logger in list(logging.root.manager.loggerDict.items()):
+        if name.startswith("ibapi.") and isinstance(logger, logging.Logger):
+            logger.disabled = True
 
 
 def _clock(value=None):
@@ -282,6 +295,60 @@ def _quote(raw, contract, symbol, settings, moment, *, forex=False):
     return result
 
 
+def _account_observation(row):
+    raw_tag = row.get("raw_tag", row["tag"])
+    tag = row["tag"].removeprefix("$LEDGER-")
+    if raw_tag.removeprefix("$LEDGER-") != tag:
+        raise BrokerError("account_value_identity_invalid")
+    source = row.get("source", "unknown")
+    if source not in {"account_summary", "account_updates", "account_updates_multi", "unknown"}:
+        source = "unknown"
+    scope = row.get("value_scope")
+    if raw_tag.startswith("$LEDGER-"):
+        if scope not in {None, "per_currency"}:
+            raise BrokerError("account_value_scope_conflict")
+        scope = "per_currency"
+    elif scope is None:
+        scope = "per_currency" if tag in {"CashBalance", "TotalCashBalance"} else "account" if source == "account_summary" else "unknown"
+    if scope not in {"per_currency", "account", "unknown"}:
+        raise BrokerError("account_value_scope_unknown")
+    value = _money(row["value"]) if tag in _ACCOUNT_MONEY else row["value"]
+    return dict(row, tag=tag, raw_tag=raw_tag, value=value, source=source, value_scope=scope)
+
+
+def _account_base_currency(rows, selected, declared=None):
+    candidates, nav_currencies, evidence = set(), set(), []
+    for raw_row in rows:
+        if raw_row.get("account_id") != selected:
+            continue
+        row = _account_observation(raw_row)
+        value = None
+        if row["tag"] == "Currency" and row["currency"] == "BASE" and row["value"] != "BASE":
+            value = row["value"]
+        elif (row["tag"] == "NetLiquidation" and row["value_scope"] != "per_currency"
+              and row["source"] == "account_summary" and row["currency"] != "BASE"):
+            value = row["currency"]
+            nav_currencies.add(value)
+        if value is not None:
+            if not isinstance(value, str) or not re.fullmatch("[A-Z]{3}", value):
+                raise BrokerError("base_currency_invalid")
+            candidates.add(value)
+            evidence.append({field: row[field] for field in ("tag", "raw_tag", "currency", "source")})
+    if len(nav_currencies) > 1:
+        raise BrokerError("base_currency_ambiguous")
+    if declared is not None:
+        if not isinstance(declared, str) or not re.fullmatch("[A-Z]{3}", declared):
+            raise BrokerError("base_currency_invalid")
+        candidates.add(declared)
+        evidence.append({"tag": "base_currency", "raw_tag": "base_currency", "currency": declared, "source": "transport_declaration"})
+    if len(candidates) > 1:
+        raise BrokerError("base_currency_conflict")
+    if not candidates:
+        raise BrokerError("base_currency_unknown")
+    evidence.sort(key=lambda row: (row["tag"], row["raw_tag"], row["source"], row["currency"]))
+    return next(iter(candidates)), {"status": "broker_reported", "sources": evidence}
+
+
 def _normalize(raw, settings, symbols, moment):
     result = _base(moment)
     accounts = raw.get("accounts", [])
@@ -293,19 +360,24 @@ def _normalize(raw, settings, symbols, moment):
     alias = settings["account_alias"]
     if not isinstance(alias, str) or not alias.strip() or selected in alias:
         alias = "ibkr"
-    values = {}
+    values, ledger = {}, {}
     for row in raw.get("account_values", []):
         if row.get("account_id") == selected:
+            row = _account_observation(row)
             identity = (row["tag"], row["currency"])
-            value = _money(row["value"]) if row["tag"] in _ACCOUNT_MONEY else row["value"]
-            if identity in values and values[identity] != value:
-                raise BrokerError("account_values_changed_during_collection")
-            values[identity] = value
-    base = values.get(("Currency", "BASE")) or raw.get("base_currency")
-    if not isinstance(base, str) or not re.fullmatch("[A-Z]{3}", base):
-        raise BrokerError("base_currency_unknown")
+            if row["value_scope"] == "per_currency":
+                if identity in ledger and ledger[identity]["value"] != row["value"]:
+                    raise BrokerError("account_values_changed_during_collection")
+                if identity not in ledger or row["raw_tag"].startswith("$LEDGER-"):
+                    ledger[identity] = row
+            else:
+                if identity in values and values[identity] != row["value"]:
+                    raise BrokerError("account_values_changed_during_collection")
+                values[identity] = row["value"]
+    base, base_evidence = _account_base_currency(raw.get("account_values", []), selected, raw.get("base_currency"))
     nav = values.get(("NetLiquidation", base), values.get(("NetLiquidation", "BASE")))
     result["account"] = {"alias": alias, "account_key": key, "base_currency": base,
+                          "base_currency_evidence": base_evidence,
                          "nav": _optional_money(nav), "nav_currency": base,
                          "account_type": values.get(("AccountType", base), values.get(("AccountType", "BASE"))),
                          "available_funds": _optional_money(values.get(("AvailableFunds", base), values.get(("AvailableFunds", "BASE")))),
@@ -397,10 +469,12 @@ def _normalize(raw, settings, symbols, moment):
             result["issues"].append("execution_fees_pending")
     result["coverage"]["fills"]["executed_at_unknown_count"] = sum(fill["executed_at"] is None for fill in result["fills"])
     # A broker base-currency AvailableFunds value cannot be used as USD cash.
-    currencies = {currency for tag, currency in values if tag in {"CashBalance", "TotalCashBalance", "SettledCash", "TotalCashValue"} and currency != "BASE"}
+    currencies = {currency for tag, currency in ledger if tag in {"CashBalance", "TotalCashBalance", "SettledCash", "TotalCashValue"} and currency != "BASE"}
     for currency in sorted(currencies):
-        gross = next((values[(tag, currency)] for tag in ("CashBalance", "TotalCashBalance", "TotalCashValue") if (tag, currency) in values), None)
-        settled = values.get(("SettledCash", currency))
+        gross_row = next((ledger[(tag, currency)] for tag in ("CashBalance", "TotalCashBalance", "TotalCashValue") if (tag, currency) in ledger), None)
+        settled_row = ledger.get(("SettledCash", currency))
+        gross = gross_row["value"] if gross_row else None
+        settled = settled_row["value"] if settled_row else None
         reserved = Decimal(0)
         unknown = not result["coverage"]["orders"]["complete"]
         for order in result["orders"]:
@@ -415,6 +489,8 @@ def _normalize(raw, settings, symbols, moment):
                     reserved += Decimal(order["remaining_quantity"]) * Decimal(order["limit_price"])
         net = None if settled is None or unknown else _money(max(Decimal(0), Decimal(_money(settled)) - reserved))
         result["cash"][currency] = {"gross": _optional_money(gross), "settled": _optional_money(settled),
+                                     "gross_evidence": {field: gross_row[field] for field in ("raw_tag", "source", "value_scope")} if gross_row else None,
+                                     "settled_evidence": {field: settled_row[field] for field in ("raw_tag", "source", "value_scope")} if settled_row else None,
                                      "reserved": None if unknown else _money(reserved),
                                      "reservation_basis": "open_buy_limit_orders_excludes_fees" if not unknown else "unknown",
                                      "available": net, "available_basis": "settled_cash_net_open_orders"}
@@ -538,6 +614,7 @@ class ReadOnlyIBKRTransport:
     """Official socket SDK behind a query-only facade; no SDK object is returned."""
 
     def collect(self, settings, symbols, *, now=None):
+        _silence_sdk_logs()
         try:
             from ibapi.client import EClient
             from ibapi.wrapper import EWrapper
@@ -545,6 +622,7 @@ class ReadOnlyIBKRTransport:
             from ibapi.execution import ExecutionFilter
         except ImportError:
             raise BrokerError("ibapi_sdk_missing") from None
+        _silence_sdk_logs()
         reader = _IBCollector(settings, symbols, Contract, ExecutionFilter)
 
         class Client(EWrapper, EClient):
@@ -555,13 +633,13 @@ class ReadOnlyIBKRTransport:
             def error(self, *args):
                 # Current official SDK supplies errorTime before errorCode.
                 code = args[2] if len(args) >= 4 and isinstance(args[2], int) else args[1] if len(args) >= 3 else None
-                reader.error(code)
+                reader.error(code, req_id=args[0] if args else None)
 
             def nextValidId(self, orderId): reader.connected.set()
             def managedAccounts(self, accountsList): reader.managed(accountsList)
-            def accountSummary(self, reqId, account, tag, value, currency): reader.account_value(account, tag, value, currency)
+            def accountSummary(self, reqId, account, tag, value, currency): reader.account_value(account, tag, value, currency, source="account_summary")
             def accountSummaryEnd(self, reqId): reader.done("accounts")
-            def updateAccountValue(self, key, val, currency, accountName): reader.account_value(accountName, key, val, currency)
+            def updateAccountValue(self, key, val, currency, accountName): reader.account_value(accountName, key, val, currency, source="account_updates")
             def accountDownloadEnd(self, accountName): reader.done("cash")
             def position(self, account, contract, position, avgCost): reader.position(account, contract, position, avgCost)
             def positionEnd(self): reader.done("positions")
@@ -619,9 +697,9 @@ class ReadOnlyIBKRTransport:
             for event in list(reader.contract_ends.values()): reader.wait(event)
             client.reqMarketDataType(1)
             reader.request_quotes()
-            for event in list(reader.quote_ends.values()): reader.wait(event)
+            for event in list(reader.quote_ends.values()): reader.wait_quote(event)
             reader.raw["complete"]["contracts"] = all(event.is_set() for event in reader.contract_ends.values())
-            reader.raw["complete"]["quotes"] = all(event.is_set() for event in reader.quote_ends.values())
+            reader.raw["complete"]["quotes"] = all(event.is_set() for event in reader.quote_ends.values()) and not reader.failed_quotes
             return copy.deepcopy(reader.raw)
         finally:
             # Cancels below stop local data queries, never an order or paid subscription.
@@ -647,19 +725,40 @@ class _IBCollector:
         self.raw = {"accounts": [], "account_values": [], "positions": [], "orders": [], "fills": [],
                     "contracts": {}, "quotes": {}, "complete": {}, "issues": []}
         self._order_statuses, self._commissions, self._commission_presence = {}, {}, {}
+        self._fatal_issue, self.failed_quotes = None, set()
         self._next = 100
 
     def wait(self, event):
         if not event.wait(max(0, self.deadline - time.monotonic())):
             raise BrokerError("ibkr_query_timeout")
-        if self.raw["issues"]:
-            raise BrokerError(self.raw["issues"][0])
+        if self._fatal_issue:
+            raise BrokerError(self._fatal_issue)
 
-    def error(self, code):
+    def wait_quote(self, event):
+        # An unavailable feed must not erase independently completed account reads.
+        if not event.wait(max(0, self.deadline - time.monotonic())):
+            self.failed_quotes.update(req_id for req_id, item in self.quote_ends.items() if item is event)
+            if "ibkr_quote_query_timeout" not in self.raw["issues"]:
+                self.raw["issues"].append("ibkr_quote_query_timeout")
+        if self._fatal_issue:
+            raise BrokerError(self._fatal_issue)
+
+    def error(self, code, *, req_id=None):
         if code in {2104, 2106, 2107, 2108, 2158}:
+            return
+        if code in {2103, 2105, 2186}:
+            issue = {2103: "ibkr_market_data_farm_disconnected",
+                     2105: "ibkr_historical_data_farm_disconnected",
+                     2186: "ibkr_api_realtime_subscription_required"}[code]
+            if issue not in self.raw["issues"]: self.raw["issues"].append(issue)
             return
         issue = "ibkr_not_entitled" if code in {354, 10089, 10090, 10167, 10168} else "ibkr_connection_or_query_error"
         if issue not in self.raw["issues"]: self.raw["issues"].append(issue)
+        if req_id in self.quote_ends and code in {354, 10089, 10090, 10167, 10168}:
+            self.failed_quotes.add(req_id)
+            self.quote_ends[req_id].set()
+            return
+        self._fatal_issue = issue
         self.connected.set()
         self.managed_end.set()
         for event in list(self.ends.values()) + list(self.contract_ends.values()) + list(self.quote_ends.values()): event.set()
@@ -672,21 +771,20 @@ class _IBCollector:
         self.raw["complete"][section] = True
         self.ends[section].set()
 
-    def account_value(self, account, tag, value, currency):
-        if tag in _ACCOUNT_MONEY:
-            try: value = _money(value)
-            except ValueError:
-                self.error(None)
-                return
-        row = {"account_id": account, "tag": tag, "value": value, "currency": currency}
-        old = next((r for r in self.raw["account_values"] if (r["account_id"], r["tag"], r["currency"]) == (account, tag, currency)), None)
-        if old and old["value"] != value: self.raw["changed_during_collection"] = True
+    def account_value(self, account, tag, value, currency, *, source="unknown"):
+        try:
+            row = _account_observation({"account_id": account, "tag": tag, "value": value, "currency": currency, "source": source})
+        except (ValueError, BrokerError):
+            self.error(None)
+            return
+        identity = (account, row["raw_tag"], currency, row["source"])
+        old = next((r for r in self.raw["account_values"] if (r["account_id"], r.get("raw_tag", r["tag"]), r["currency"], r.get("source", "unknown")) == identity), None)
+        if old and old["value"] != row["value"]: self.raw["changed_during_collection"] = True
         if old: self.raw["account_values"].remove(old)
         self.raw["account_values"].append(row)
 
     def base_currency(self):
-        rows = self.raw["account_values"]
-        return next((r["value"] for r in rows if r["account_id"] == self.selected and r["tag"] == "Currency" and r["currency"] == "BASE"), None)
+        return _account_base_currency(self.raw["account_values"], self.selected)[0]
 
     @staticmethod
     def identity(contract):

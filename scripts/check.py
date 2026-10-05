@@ -271,7 +271,8 @@ def check_skill_mirror() -> None:
     for path, expected in generated_files().items():
         if not path.exists() or read(path) != expected:
             err(f"{rel(path)}: runtime drift; run python scripts/sync_runtimes.py")
-    for relative in (".codex-plugin/plugin.json", "mcps/copilot_mcp.py", "scripts/copilot/service.py"):
+    for relative in (".codex-plugin/plugin.json", "scripts/copilot_runtime.py",
+                     "mcps/copilot_mcp.py", "scripts/copilot/service.py"):
         if not (ROOT / relative).is_file():
             err(f"missing shared runtime component: {relative}")
 

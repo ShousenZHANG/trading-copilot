@@ -150,7 +150,7 @@ jobs:
 
           required = [
               "scripts/ticker.py", "scripts/parse_rating.py", "scripts/notify.py",
-              "scripts/copilot_cli.py", "scripts/copilot/config.py",
+              "scripts/copilot_cli.py", "scripts/copilot_runtime.py", "scripts/copilot/config.py",
               "scripts/copilot/valuation.py", "scripts/mcp_env.py", "scripts/self_tests.py",
               "scripts/backtest_cli.py", "scripts/copilot/backtest/engine.py",
               "scripts/copilot/backtest/execution_sensitivity.py",

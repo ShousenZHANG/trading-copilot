@@ -96,13 +96,15 @@
       }
     },
     "trading-copilot": {
+      "_doc": "Shared MCP. The portable stdlib launcher optionally uses a private local runtime manifest; no SDK, credentials or machine paths ship in config.",
       "command": "uv",
       "args": [
         "run",
         "--no-project",
         "--quiet",
         "--script",
-        "mcps/copilot_mcp.py"
+        "scripts/copilot_runtime.py",
+        "mcp"
       ]
     }
   },

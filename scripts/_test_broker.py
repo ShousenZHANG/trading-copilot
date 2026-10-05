@@ -22,6 +22,9 @@ def raw_fixture(base="USD"):
               for tag, value, currency in (("Currency", base, "BASE"), ("NetLiquidation", "10000", base),
                                           ("AccountType", "INDIVIDUAL", "BASE"), ("AvailableFunds", "50000", base),
                                           ("CashBalance", "1000", "USD"), ("SettledCash", "900", "USD"))]
+    for row in values:
+        if row["tag"] in {"CashBalance", "SettledCash"}:
+            row["value_scope"] = "per_currency"
     return {"accounts": [ACCOUNT], "account_values": values,
             "positions": [{"account_id": ACCOUNT, "instrument_id": "SPY", "con_id": 101,
                            "currency": "USD", "quantity": "10", "avg_cost": "90"}],
@@ -64,6 +67,70 @@ def add_symbol(raw, symbol, con_id, industry=None):
 
 
 class BrokerContracts(unittest.TestCase):
+    def test_prefixed_ledger_and_base_sentinel_use_reported_nav_currency(self):
+        raw = raw_fixture()
+        for row in raw["account_values"]:
+            if row["tag"] in {"Currency", "CashBalance", "SettledCash"}:
+                row["tag"] = "$LEDGER-" + row["tag"]
+            if row["tag"] == "$LEDGER-Currency":
+                row["value"] = "BASE"
+            if row["tag"] == "NetLiquidation":
+                row["source"] = "account_summary"
+        result = collect(raw)
+        self.assertEqual(result["status"], "ready", result["issues"])
+        self.assertEqual(result["account"]["base_currency"], "USD")
+        self.assertEqual(result["cash"]["USD"]["settled"], "900")
+        self.assertEqual(result["cash"]["USD"]["settled_evidence"]["raw_tag"], "$LEDGER-SettledCash")
+        self.assertEqual(result["account"]["base_currency_evidence"]["sources"][0]["tag"], "NetLiquidation")
+
+    def test_account_aggregate_settled_is_not_native_cash(self):
+        raw = raw_fixture()
+        raw["account_values"][-1]["tag"] = "$LEDGER-SettledCash"
+        raw["account_values"].append({"account_id": ACCOUNT, "tag": "SettledCash", "value": "5000",
+                                      "currency": "USD", "source": "account_summary"})
+        result = collect(raw)
+        self.assertEqual(result["status"], "ready", result["issues"])
+        self.assertEqual(result["cash"]["USD"]["settled"], "900")
+        self.assertEqual(result["cash"]["USD"]["available"], "900")
+        self.assertEqual(result["cash"]["USD"]["settled_evidence"]["value_scope"], "per_currency")
+
+    def test_conflicting_prefixed_and_legacy_ledger_values_block(self):
+        raw = raw_fixture()
+        raw["account_values"].append({"account_id": ACCOUNT, "tag": "$LEDGER-CashBalance", "value": "2000",
+                                      "currency": "USD", "source": "account_updates"})
+        result = collect(raw)
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("account_values_changed_during_collection", result["issues"])
+        raw["account_values"][-1]["value"] = "1000.000"
+        result = collect(raw)
+        self.assertEqual(result["status"], "ready", result["issues"])
+        self.assertEqual(result["cash"]["USD"]["gross_evidence"]["raw_tag"], "$LEDGER-CashBalance")
+
+    def test_missing_native_settled_is_not_replaced_by_gross_or_summary(self):
+        raw = raw_fixture()
+        raw["account_values"] = [row for row in raw["account_values"] if row["tag"] != "SettledCash"]
+        raw["account_values"].append({"account_id": ACCOUNT, "tag": "SettledCash", "value": "9000",
+                                      "currency": "USD", "source": "account_summary"})
+        raw["account_values"][-2]["tag"] = "$LEDGER-CashBalance"
+        result = collect(raw)
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["cash"]["USD"]["gross"], "1000")
+        self.assertIsNone(result["cash"]["USD"]["settled"])
+        self.assertIsNone(result["cash"]["USD"]["available"])
+        self.assertIn("cash_or_reservation_unknown:USD", result["issues"])
+        self.assertNotIn("BASE", result["cash"])
+
+    def test_base_currency_conflicts_and_ambiguous_nav_fail_closed(self):
+        raw = raw_fixture()
+        raw["account_values"][1].update(currency="AUD", source="account_summary")
+        self.assertIn("base_currency_conflict", collect(raw)["issues"])
+        raw["account_values"][0].update(tag="$LEDGER-Currency", value="BASE")
+        raw["account_values"].append({"account_id": ACCOUNT, "tag": "NetLiquidation", "value": "10000",
+                                      "currency": "USD", "source": "account_summary"})
+        self.assertIn("base_currency_ambiguous", collect(raw)["issues"])
+        raw["account_values"][-1]["account_id"] = "U7654321"
+        self.assertEqual(collect(raw)["account"]["base_currency"], "AUD")
+
     def test_normalizer_requires_quotes_for_account_stock_positions_and_orders(self):
         raw = raw_fixture()
         raw["positions"].append(dict(account_id=ACCOUNT, instrument_id="NVDA", con_id=102,
@@ -438,7 +505,10 @@ def sdk_double(error_args=None, raw=None):
             calls.append(("reqAccountUpdates", subscribe))
             if subscribe:
                 for row in data["account_values"]:
-                    self.updateAccountValue(row["tag"], row["value"], row["currency"], row["account_id"])
+                    tag = row["tag"]
+                    if row.get("value_scope") == "per_currency" and not tag.startswith("$LEDGER-"):
+                        tag = "$LEDGER-" + tag
+                    self.updateAccountValue(tag, row["value"], row["currency"], row["account_id"])
                 self.accountDownloadEnd(acctCode)
 
         def reqPositions(self):
@@ -470,7 +540,7 @@ def sdk_double(error_args=None, raw=None):
             saved = data["contracts"].get(contract.symbol.replace(" ", "."), [{}])[0]
             contract.conId = saved.get("con_id", 101)
             today = datetime.now(timezone.utc).strftime("%Y%m%d")
-            detail = types.SimpleNamespace(contract=contract, validExchanges="SMART", marketRuleIds="26",
+            detail = types.SimpleNamespace(contract=contract, validExchanges=contract.exchange, marketRuleIds="26",
                                            minTick=0.01, liquidHours=today + ":0000-" + today + ":2359", timeZoneId="UTC",
                                            industry=saved.get("industry"), category=saved.get("category"), subcategory=saved.get("subcategory"))
             self.contractDetails(reqId, detail)
@@ -506,6 +576,19 @@ def sdk_double(error_args=None, raw=None):
 
 
 class OfficialSocketInterface(unittest.TestCase):
+    def test_prefixed_base_sentinel_requests_reported_currency_fx(self):
+        raw = raw_fixture(base="AUD")
+        raw["account_values"][0].update(tag="$LEDGER-Currency", value="BASE")
+        modules, calls, _ = sdk_double(raw=raw)
+        with patch.dict(sys.modules, modules):
+            result = broker.collect_execution_snapshot(SETTINGS, ["SPY"])
+        self.assertEqual(result["status"], "ready", result["issues"])
+        self.assertEqual(result["account"]["base_currency"], "AUD")
+        self.assertIn(("reqContractDetails", "AUD"), calls)
+        self.assertNotIn(("reqContractDetails", "BASE"), calls)
+        self.assertEqual(result["cash"]["USD"]["available"], "900")
+        self.assertEqual(result["cash"]["USD"]["settled_evidence"]["source"], "account_updates")
+
     def test_real_transport_expands_after_account_ends_before_contract_queries(self):
         raw = raw_fixture()
         raw["positions"].append(dict(account_id=ACCOUNT, instrument_id="NVDA", con_id=102,

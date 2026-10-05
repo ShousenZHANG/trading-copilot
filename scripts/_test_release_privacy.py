@@ -27,6 +27,12 @@ class ReleasePrivacyTests(unittest.TestCase):
         problems = self.audit({}, omissions=(name,))
         self.assertTrue(any(name in problem for problem in problems), problems)
 
+    def test_mcp_runtime_launcher_is_a_required_release_file(self):
+        name = "scripts/copilot_runtime.py"
+        self.assertEqual(self.audit({}), [])
+        problems = self.audit({}, omissions=(name,))
+        self.assertTrue(any(name in problem for problem in problems), problems)
+
     def test_codex_secret_is_rejected_in_actual_archive(self):
         problems = self.audit({".codex/config.toml": '[mcp_servers.fixture.env]\nAPI_KEY="fixture-only-secret"'})
         self.assertTrue(any("hardcoded secret" in problem for problem in problems))

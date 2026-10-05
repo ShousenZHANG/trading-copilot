@@ -15,7 +15,7 @@ tool_timeout_sec = 180
 
 [mcp_servers."trading-copilot"]
 command = "uv"
-args = ["run", "--no-project", "--quiet", "--script", "mcps/copilot_mcp.py"]
+args = ["run", "--no-project", "--quiet", "--script", "scripts/copilot_runtime.py", "mcp"]
 env_vars = ["ALPACA_API_KEY", "ALPACA_SECRET_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "COPILOT_CONFIG_PATH", "COPILOT_DB_PATH", "FINNHUB_API_KEY", "FRED_API_KEY", "SEC_USER_AGENT"]
 startup_timeout_sec = 120
 tool_timeout_sec = 180

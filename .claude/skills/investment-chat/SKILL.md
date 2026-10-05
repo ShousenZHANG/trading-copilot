@@ -6,7 +6,7 @@ description: Analyze US stocks, ETFs, Nasdaq benchmarks and RMB investment gold 
 # Investment advisor
 
 Use the `trading-copilot` MCP tools. CLI fallback uses the same core:
-`uv run --no-project --quiet --script scripts/copilot_cli.py --help`.
+`uv run --no-project --quiet --script scripts/copilot_runtime.py cli --help`.
 One advisor explains both `long_term` and `swing`; both consume the same account
 cash, positions and pending orders. Personal statements, keys and identifiers
 stay local; default tools return necessary sanitized facts.

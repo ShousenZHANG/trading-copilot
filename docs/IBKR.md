@@ -39,6 +39,57 @@ automatically by collection. Missing SDK returns `ibapi_sdk_missing`.
 See [official Python setup](https://www.interactivebrokers.com/docs/tws-api/doc/quick-start/installation)
 and [Windows SDK installation](https://www.interactivebrokers.com/docs/tws-api/doc/download-the-tws-api/install-the-tws-api-on-windows).
 
+### Keep the optional SDK available across MCP restarts
+
+The canonical MCP entry in `.mcp.json` and its catalog uses
+`scripts/copilot_runtime.py`. It selects an already installed local Python;
+it never installs an SDK, loads credentials, or connects to a broker itself.
+Without a manifest it keeps the existing isolated `uv run --script` runtime.
+
+To use a dedicated Windows environment, create it locally and install both the
+official SDK downloaded above and the public MCP dependencies:
+
+```powershell
+uv venv --python 3.13 data/state/runtime/ibkr-venv
+uv pip install --python data/state/runtime/ibkr-venv/Scripts/python.exe "<official-sdk-directory>/source/pythonclient" "mcp[cli]>=1.2.0,<2" "yfinance==1.7.0" "exchange-calendars==4.13.2" "tzdata==2026.3"
+```
+
+Replace the SDK placeholder with the actual downloaded source directory. Keep
+the SDK version compatible with local TWS/Gateway. PEP 723 dependencies are
+not installed when the manifest selects Python directly, so this environment
+must contain the full dependency set in `mcps/copilot_mcp.py`.
+
+Create the private file `data/state/runtime/copilot-runtime.json`:
+
+```json
+{"schema_version": 1, "python": "ibkr-venv/Scripts/python.exe"}
+```
+
+`python` is relative to `data/state/runtime`, must identify an existing file,
+and its resolved path must remain inside that directory. Absolute paths,
+directory traversal, external symlinks, extra fields and malformed manifests
+are rejected. On macOS/Linux use a copied interpreter inside the local runtime
+(for example `ibkr-venv/bin/python`); a venv interpreter symlink pointing outside
+the runtime is rejected. The manifest and environment remain private and are
+excluded from releases. There is no global MCP server entry or machine path to
+add to generated configuration.
+
+Use the same selection for CLI checks:
+
+```powershell
+uv run --no-project --quiet --script scripts/copilot_runtime.py cli capabilities
+```
+
+Restart the MCP server after local runtime changes. If a desktop session keeps
+an old server process, close and reopen the Codex project/client once so it
+loads the current project entry and manifest; no TWS SDK reinstall or duplicate
+global MCP server entry is needed. A present but invalid
+manifest fails with a named `copilot_runtime_manifest_*` error on stderr and
+does not silently fall back to another Python. Launcher diagnostics do not
+print manifest contents or local paths. Child stdin/stdout/stderr, environment
+and exit status are inherited. The launcher does not certify SDK provenance,
+account access or live-data entitlements; verify those separately below.
+
 ## Local settings and permissions
 
 In TWS/Gateway, enable socket clients, check its actual socket port, and **keep
@@ -85,6 +136,14 @@ The client also actively rejects `reqOpenOrders`, `reqAutoOpenOrders`,
   cash, excluding their fees; a market buy, unknown order scope, or missing cash
   basis leaves reservations unknown. A pending sell adds no buying cash, and a
   pending cancel retains its reservation.
+- Current TWS may prepend `$LEDGER-` to per-currency account values. The adapter
+  preserves the raw tag, callback source and value scope before normalizing it.
+  Account-summary `SettledCash` does not certify native-currency settled cash;
+  an absent per-currency value remains unknown. `Currency@BASE = BASE` is a
+  sentinel. A unique account-summary NAV currency can establish the account base,
+  while conflicting currency evidence blocks collection. The adapter never
+  requests a fictitious `BASE.USD` pair.
+  [IBKR per-currency account value prefix](https://www.interactivebrokers.com/docs/tws-api/doc/tws-settings/per-currency-account-value-prefix)
 - Prices and quantities are decimal strings. A quote needs received bid/ask,
   sizes, actual `marketDataType = 1`, a verified contract/market-rule increment,
   and an applicable liquid-hours interval. Requested type 1 is not proof of live
@@ -125,6 +184,16 @@ regulatory-snapshot flag. It does not procure entitlements. Existing API access,
 feed scope and subscriptions must be checked separately.
 [Actual data type](https://www.interactivebrokers.com/docs/tws-api/doc/market-data-delayed/receive-market-data-type),
 [snapshot completion](https://www.interactivebrokers.com/docs/tws-api/doc/market-data-live/top-of-book-l-1/streaming-data-snapshots).
+
+A request-specific missing-entitlement error or quote timeout retains independently
+completed account, cash and position observations. It does not mark the failed
+quote request complete or make the snapshot executable. A delayed-data fallback
+warning remains a named subscription diagnostic. Check the API acknowledgement
+and actual API-enabled market-data subscriptions in Client Portal; accepting the
+agreement alone does not establish a real-time entitlement. Keep Read-Only API
+enabled throughout. The SDK's raw request/callback logging is suppressed because
+it can serialize account identifiers and full payloads into MCP stderr. Public
+diagnostics use fixed codes and sanitized projections.
 
 ## Local evidence and verification
 
